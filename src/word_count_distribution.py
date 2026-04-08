@@ -1,7 +1,9 @@
+"""Analyse and visualise word count distributions for radiology report fields."""
 import json
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
-from pathlib import Path
 
 # Path to the radiology reports JSON file
 DATA_PATH = Path(__file__).parent.parent / "data" / "text" / "reports.json"
@@ -10,10 +12,44 @@ DATA_PATH = Path(__file__).parent.parent / "data" / "text" / "reports.json"
 with open(DATA_PATH, encoding="utf-8") as f:
     reports = json.load(f)
 
+# Scan the raw file line-by-line to record line numbers of empty/whitespace-only field entries.
+# We decode the captured JSON string value so escape sequences like \n or \t are handled correctly.
+import re
+
+_field_pattern = re.compile(r'"(befund|beurteilung)"\s*:\s*(".*?")')
+empty_befund_lines = []
+empty_beurteilung_lines = []
+with open(DATA_PATH, encoding="utf-8") as f:
+    for lineno, line in enumerate(f, start=1):
+        m = _field_pattern.search(line)
+        if m:
+            try:
+                value = json.loads(m.group(2))
+            except json.JSONDecodeError:
+                continue
+            if not value.strip():
+                if m.group(1) == "befund":
+                    empty_befund_lines.append(lineno)
+                else:
+                    empty_beurteilung_lines.append(lineno)
+
+print(f"Total reports:       {len(reports)}")
+print(f"\nEmpty findings ({len(empty_befund_lines)})"
+      f"   — JSON line numbers: {empty_befund_lines}")
+print(f"Empty assessments ({len(empty_beurteilung_lines)})"
+      f" — JSON line numbers: {empty_beurteilung_lines}")
+
 # Count words in each "befund" (findings) and "beurteilung" (assessment) field,
-# skipping records where the field is missing, empty, or whitespace-only
-befund_counts = [len(r["befund"].split()) for r in reports if r.get("befund", "").strip()]
-beurteilung_counts = [len(r["beurteilung"].split()) for r in reports if r.get("beurteilung", "").strip()]
+# skipping records where the field is missing, empty, whitespace-only,
+# or only contains the placeholder "Die Bilder wurden bereitgestellt."
+PLACEHOLDER = "Die Bilder wurden bereitgestellt."
+befund_counts = [
+    len(r["befund"].split()) for r in reports
+    if r.get("befund", "").strip() and PLACEHOLDER not in r["befund"]
+]
+beurteilung_counts = [
+    len(r["beurteilung"].split()) for r in reports if r.get("beurteilung", "").strip()
+]
 
 # Create a side-by-side figure with one plot per field
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -43,6 +79,7 @@ for ax, counts, label in [
     print(f"  Mean:   {np.mean(counts):.1f}")
     print(f"  Median: {np.median(counts):.1f}")
     print(f"  Std:    {np.std(counts):.1f}")
+
 
 plt.tight_layout()
 
