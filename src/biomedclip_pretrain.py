@@ -447,12 +447,12 @@ def _load_all_samples(
 
     # --- Match images, reports, and labels ---
     samples: list[tuple[Path, Path, str, str]] = []
+    samples_no_report: list[tuple[Path, Path, str, str]] = []
     skipped_no_image = 0
-    skipped_no_report = 0
     skipped_no_label = 0
 
     for _, row in df.iterrows():
-        stem = row["filename"]
+        stem = Path(row["filename"]).stem
         patid = row["patid"]
         label = row["malignancy"]
         image_path = images_dir / f"{stem}.png"
@@ -461,22 +461,22 @@ def _load_all_samples(
         if not image_path.exists():
             skipped_no_image += 1
             continue
-        if patid not in report_lookup:
-            skipped_no_report += 1
-            continue
         if not label:
             skipped_no_label += 1
             continue
 
-        samples.append((image_path, mask_path, report_lookup[patid], label))
+        if patid in report_lookup:
+            samples.append((image_path, mask_path, report_lookup[patid], label))
+        else:
+            samples_no_report.append((image_path, mask_path, "", label))
 
     print(
-        f"Dataset: {len(samples)} valid samples "
+        f"Dataset: {len(samples)} samples with report, "
+        f"{len(samples_no_report)} samples without report "
         f"(skipped: {skipped_no_image} missing images, "
-        f"{skipped_no_report} missing reports, "
         f"{skipped_no_label} missing labels)"
     )
-    return samples
+    return samples, samples_no_report
 
 
 class BoneTumorPairDataset(Dataset):
@@ -555,7 +555,7 @@ def build_stratified_splits(
     The split indices and labels are also written to
     ``<out_dir>/biomedclip_pretrain/splits.json`` for use by downstream scripts.
     """
-    samples = _load_all_samples(
+    samples, samples_no_report = _load_all_samples(
         excel_path=Path(args.excel),
         reports_path=Path(args.reports),
         images_dir=Path(args.images),
@@ -589,6 +589,17 @@ def build_stratified_splits(
     train_frac_adj = args.downstream_train_frac / (args.pretrain_frac + args.downstream_train_frac)
     pretrain, downstream_train = _stratified_split_two(rest2, labels_rest2, train_frac_adj, args.seed)
 
+    # Add report-less samples to downstream splits (stratified)
+    if samples_no_report:
+        labels_nr = [s[3] for s in samples_no_report]
+        nr_rest, nr_test = _stratified_split_two(samples_no_report, labels_nr, args.test_frac, args.seed)
+        labels_nr_rest = [s[3] for s in nr_rest]
+        val_frac_nr = args.downstream_val_frac / (1.0 - args.test_frac)
+        nr_train, nr_val = _stratified_split_two(nr_rest, labels_nr_rest, val_frac_nr, args.seed)
+        downstream_train = downstream_train + nr_train
+        downstream_val = downstream_val + nr_val
+        test = test + nr_test
+
     # --- Print class distributions ---
     def _dist(split: list) -> dict[str, int]:
         from collections import Counter
@@ -616,6 +627,7 @@ def build_stratified_splits(
             {
                 "image": str(s[0]),
                 "mask": str(s[1]),
+                "report": s[2],
                 "label": s[3],
             }
             for s in split
@@ -1029,4 +1041,5 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    main(parse_args())
+    #main(parse_args())
+    build_stratified_splits(parse_args())
