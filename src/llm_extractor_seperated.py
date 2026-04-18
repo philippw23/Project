@@ -31,13 +31,13 @@ Usage:
 import argparse
 import json
 import re
-import sys
 import warnings
 from pathlib import Path
 
 import pandas as pd
 import torch
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
@@ -55,326 +55,258 @@ DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 # Übersetze letztlich die deutschen Phrasen in Englisch. \
 # Antworte ausschließlich mit validem JSON."""
 
-# SYSTEM_PROMPT = """\
-# Du bist ein erfahrener Radiologe und Experte für strukturierte medizinische Informationsextraktion.
-
-# Extrahiere diagnostische Evidenzphrasen aus deutschen Radiologiebefunden.
-
-# Wichtige Prinzipien:
-# - Trenne strikt zwischen:
-#   • Befund (Beobachtungen)
-#   • Beurteilung (Interpretation / Diagnose)
-# - Nutze für Befund möglichst exakte Originalformulierungen
-# - Falls keine Beurteilung vorhanden ist, leite eine kurze diagnostische Einschätzung aus dem Befund ab
-# - Alle finalen Phrasen müssen auf Englisch ausgegeben werden
-
-# Antworte ausschließlich mit validem JSON.
-# """
 SYSTEM_PROMPT = """\
 Du bist ein erfahrener Radiologe und Experte für strukturierte medizinische Informationsextraktion.
 
-Arbeite präzise, textnah und ohne Halluzination.
-Unterscheide zwischen deskriptiven (Befund) und diagnostischen (Beurteilung) Informationen.
+Extrahiere diagnostische Evidenzphrasen aus deutschen Radiologiebefunden.
 
-Alle Ausgaben müssen medizinisch korrekt sein.
+Wichtige Prinzipien:
+- Trenne strikt zwischen:
+  • Befund (Beobachtungen)
+  • Beurteilung (Interpretation / Diagnose)
+- Nutze für Befund möglichst exakte Originalformulierungen
+- Falls keine Beurteilung vorhanden ist, leite eine kurze diagnostische Einschätzung aus dem Befund ab
+- Alle finalen Phrasen müssen auf Englisch ausgegeben werden
+
 Antworte ausschließlich mit validem JSON.
 """
 
-USER_PROMPT_TEMPLATE = """\
-Lies den folgenden Radiologiebefund und extrahiere diagnostische Evidenzphrasen \
-getrennt nach Quelle.
-
-KRITISCHE REGEL:
-- "befund_phrases": Extrahiere NUR aus der BEFUND-Sektion
-- "beurteilung_phrases": Extrahiere NUR aus der BEURTEILUNG-Sektion (falls vorhanden)
-  Falls BEURTEILUNG fehlt: Destilliere die wichtigsten medizinischen Merkmale aus BEFUND
-
-Definitionen:
-- "befund_phrases": Einzelne deskriptive Beobachtungen aus dem Befund
-  Beispiele: "osteolytische Läsion", "chondroide Matrix", "Kortikalisdestruktion", \
-  "proximale Tibia metaphysär", "ca. 4 cm Durchmesser", "sklerotischer Randsaum"
-
-- "beurteilung_phrases": ALLE diagnostisch relevanten Aussagen aus der Beurteilung
-  Dies umfasst:
-  • Verdachtsdiagnosen: "V.a. Enchondrom", "DD Chondrosarkom"
-  • Zusammenfassende Beschreibungen: "randsklerosierte Osteolyse", "benigne imponierende Läsion"
-  • Einschätzungen: "vereinbar mit gutartigem Prozess", "Zeichen der Malignität"
-  • Negative Befunde: "kein Anhalt für Malignität", "keine aggressiven Merkmale"
-  • Empfehlungen: "Verlaufskontrolle empfohlen", "Biopsie indiziert"
-
-Regeln:
-1. Originale deutsche Formulierung (keine Umschreibungen)
-2. Anatomische Details beibehalten
-3. Prägnante Phrasen (2-8 Wörter), ein Konzept pro Phrase
-4. MINDESTENS eine Phrase pro Kategorie
-5. Extrahiere ALLE relevanten Aussagen aus der Beurteilung, nicht nur Diagnosen
-6. KEINE Halluzinationen oder Erfindungen von Informationen, die nicht explizit im Text stehen
-
-VOR DEM ANTWORTEN PRÜFE:
-- Enthält "befund_phrases" mindestens 1 Phrase? Wenn nein, extrahiere mindestens die auffälligste Läsion, Lokalisation oder Eigenschaft aus dem Befund.
-- Enthält "beurteilung_phrases" mindestens 1 Phrase? Wenn nein, leite mindestens eine diagnostische Kurzbewertung aus dem Befund ab.
-- Antworte erst, wenn beide Listen mindestens einen Eintrag enthalten.
-
-Beispiel 1 (Beurteilung mit Diagnose):
-BEFUND:
-Proximale Tibia metaphysär ca. 4 cm große osteolytische Läsion mit chondroider Matrix.
-
-BEURTEILUNG:
-V.a. Enchondrom. DD niedriggradiges Chondrosarkom.
-
-→ {{"befund_phrases": ["osteolytische Läsion", "chondroide Matrix", "ca. 4 cm große Läsion", 
-                       "proximale Tibia metaphysär"],
-    "beurteilung_phrases": ["V.a. Enchondrom", "DD niedriggradiges Chondrosarkom"]}}
-
-Beispiel 2 (Beurteilung mit Beschreibung):
-BEFUND:
-Im Grundphalanxschaft Finger III links rundliche Osteolyse mit sklerotischem Randsaum.
-
-BEURTEILUNG:
-Randsklerosierte Osteolyse im Bereich des Grundphalanxschaftes, vereinbar mit Enchondrom.
-
-→ {{"befund_phrases": ["rundliche Osteolyse", "sklerotischer Randsaum", 
-                       "Grundphalanxschaft Finger III links"],
-    "beurteilung_phrases": ["randsklerosierte Osteolyse", "vereinbar mit Enchondrom"]}}
-
-Beispiel 3 (Beurteilung mit negativem Befund):
-BEFUND:
-Distales Femur metaphysär kleine osteolytische Läsion, scharf begrenzt.
-
-BEURTEILUNG:
-Kein Anhalt für Malignität. Benigne imponierende Läsion, am ehesten fibröser Kortikalisdefekt.
-
-→ {{"befund_phrases": ["kleine osteolytische Läsion", "scharf begrenzt", 
-                       "distales Femur metaphysär"],
-    "beurteilung_phrases": ["kein Anhalt für Malignität", "benigne imponierende Läsion", 
-                            "am ehesten fibröser Kortikalisdefekt"]}}
-
-Beispiel 4 (ohne Beurteilung):
-BEFUND:
-Proximale Tibia unscharf begrenzte lytische Läsion mit Kortikalisdestruktion und \
-aggressiver Periostreaktion.
-
-[Keine Beurteilung vorhanden]
-
-→ {{"befund_phrases": ["lytische Läsion", "unscharf begrenzt", "Kortikalisdestruktion", 
-                       "aggressive Periostreaktion", "proximale Tibia"],
-    "beurteilung_phrases": ["aggressive Destruktion", "Hinweis auf maligne Läsion"]}}
-
-Beispiel 5 (ohne Beurteilung, benigner Eindruck):
-BEFUND:
-Kleiner rundlicher Herd im distalen Femur metaphysär, scharf begrenzt mit sklerotischem Randsaum, ohne Kortikalisdurchbruch.
-
-[Keine Beurteilung vorhanden]
-
-→ ```json
-{{"befund_phrases": ["kleiner rundlicher Herd", "distales Femur metaphysär",
-                    "scharf begrenzt", "sklerotischer Randsaum", "ohne Kortikalisdurchbruch"],
-"beurteilung_phrases": ["scharf begrenzte Läsion", "kein aggressives Wachstum", "Hinweis auf benigne Läsion"]}}
-
-Befund:
-{formatted_report}
-
-Antworte NUR mit diesem JSON:
-{{
-  "befund_phrases": [],
-  "beurteilung_phrases": []
-}}"""
-
 # USER_PROMPT_TEMPLATE = """\
-# Extrahiere medizinische Evidenzphrasen aus einem radiologischen Bericht.
+# Lies den folgenden Radiologiebefund und extrahiere diagnostische Evidenzphrasen \
+# getrennt nach Quelle.
 
-# ## WICHTIG: SEMANTISCHE TRENNUNG (NICHT STRUKTURELL)
-# - "befund_phrases": deskriptive, bildnahe Informationen
-# - "beurteilung_phrases": diagnostische oder interpretative Aussagen
-# - Die Zuordnung erfolgt nach INHALT, nicht nach Textabschnitt
+# KRITISCHE REGEL:
+# - "befund_phrases": Extrahiere NUR aus der BEFUND-Sektion
+# - "beurteilung_phrases": Extrahiere NUR aus der BEURTEILUNG-Sektion (falls vorhanden)
+#   Falls BEURTEILUNG fehlt: Destilliere die wichtigsten medizinischen Merkmale aus BEFUND
 
-# ## FALL: "s.o." ODER FEHLENDE BEURTEILUNG
-# - Wenn die Beurteilung leer ist oder nur referenziell ("s.o."):
-#   → extrahiere diagnostische Aussagen aus dem Befund
-# - Verwende nur explizit genannte Informationen
-# - KEINE neuen Diagnosen erfinden
+# Definitionen:
+# - "befund_phrases": Einzelne deskriptive Beobachtungen aus dem Befund
+#   Beispiele: "osteolytische Läsion", "chondroide Matrix", "Kortikalisdestruktion", \
+#   "proximale Tibia metaphysär", "ca. 4 cm Durchmesser", "sklerotischer Randsaum"
 
-# ## WAS EXTRAHIEREN?
+# - "beurteilung_phrases": ALLE diagnostisch relevanten Aussagen aus der Beurteilung
+#   Dies umfasst:
+#   • Verdachtsdiagnosen: "V.a. Enchondrom", "DD Chondrosarkom"
+#   • Zusammenfassende Beschreibungen: "randsklerosierte Osteolyse", "benigne imponierende Läsion"
+#   • Einschätzungen: "vereinbar mit gutartigem Prozess", "Zeichen der Malignität"
+#   • Negative Befunde: "kein Anhalt für Malignität", "keine aggressiven Merkmale"
+#   • Empfehlungen: "Verlaufskontrolle empfohlen", "Biopsie indiziert"
 
-# ### befund_phrases (deskriptiv / lokal)
-# - Morphologie
-# - Lokalisation
-# - Größe
-# - Struktur / Matrix / Begrenzung
-# - Aggressivitätszeichen
+# Regeln:
+# 1. Originale deutsche Formulierung (keine Umschreibungen)
+# 2. Anatomische Details beibehalten
+# 3. Prägnante Phrasen (2-10 Wörter), ein Konzept pro Phrase
+# 4. MINDESTENS eine Phrase pro Kategorie
+# 5. Extrahiere ALLE relevanten Aussagen aus der Beurteilung, nicht nur Diagnosen
 
-# ### beurteilung_phrases (interpretativ / global)
-# - Diagnosen / Verdachtsdiagnosen
-# - Differenzialdiagnosen
-# - Malignitäts-Einschätzung
-# - Negative Aussagen
-# - Klinische Gesamteinschätzung
-# - Bestätigende Wiederholung eines Befunds (auch rein deskriptiv — Wiederholung in der Beurteilung = Diagnosebestätigung)
+# VOR DEM ANTWORTEN PRÜFE:
+# - Enthält "befund_phrases" mindestens 1 Phrase? Wenn nein, extrahiere mindestens die auffälligste Läsion, Lokalisation oder Eigenschaft aus dem Befund.
+# - Enthält "beurteilung_phrases" mindestens 1 Phrase? Wenn nein, leite mindestens eine diagnostische Kurzbewertung aus dem Befund ab.
+# - Antworte erst, wenn beide Listen mindestens einen Eintrag enthalten.
 
-
-# ## REGELN
-# - Befund: möglichst originalgetreu
-# - Beurteilung: leichte Normalisierung erlaubt (z. B. "V.a." → "suspected")
-# - 2–8 Wörter pro Phrase
-# - 1 Konzept pro Phrase
-# - Keine Halluzination
-# - Keine Duplikate innerhalb einer Liste (Überschneidungen zwischen befund_ und beurteilung_phrases sind erlaubt und erwünscht)
-
-
-# ## QUALITÄTSCHECK
-# - Wenn möglich: ≥2 befund_phrases
-# - Wenn vorhanden: ≥1 beurteilung_phrase
-# - Keine künstlichen Ergänzungen erzwingen
-# ---
-
-# ## BEISPIELE
-
-# ### Beispiel 1 (Diagnose vorhanden)
+# Beispiel 1 (Beurteilung mit Diagnose):
 # BEFUND:
 # Proximale Tibia metaphysär ca. 4 cm große osteolytische Läsion mit chondroider Matrix.
 
 # BEURTEILUNG:
 # V.a. Enchondrom. DD niedriggradiges Chondrosarkom.
 
-# →
-# {{
-#   "befund_phrases": [
-#     "osteolytische Läsion",
-#     "chondroide Matrix",
-#     "ca. 4 cm große Läsion",
-#     "proximale Tibia metaphysär"
-#   ],
-#   "beurteilung_phrases": [
-#     "V.a. Enchondrom",
-#     "DD niedriggradiges Chondrosarkom"
-#   ]
-# }}
+# → {{"befund_phrases": ["osteolytische Läsion", "chondroide Matrix", "ca. 4 cm große Läsion", 
+#                        "proximale Tibia metaphysär"],
+#     "beurteilung_phrases": ["V.a. Enchondrom", "DD niedriggradiges Chondrosarkom"]}}
 
-# ---
-
-# ### Beispiel 2 (Beschreibung + Diagnose)
+# Beispiel 2 (Beurteilung mit Beschreibung):
 # BEFUND:
 # Im Grundphalanxschaft Finger III links rundliche Osteolyse mit sklerotischem Randsaum.
 
 # BEURTEILUNG:
 # Randsklerosierte Osteolyse im Bereich des Grundphalanxschaftes, vereinbar mit Enchondrom.
 
-# →
-# {{
-#   "befund_phrases": [
-#     "rundliche Osteolyse",
-#     "sklerotischer Randsaum",
-#     "Grundphalanxschaft Finger III links"
-#   ],
-#   "beurteilung_phrases": [
-#     "randsklerosierte Osteolyse",
-#     "vereinbar mit Enchondrom"
-#   ]
-# }}
+# → {{"befund_phrases": ["rundliche Osteolyse", "sklerotischer Randsaum", 
+#                        "Grundphalanxschaft Finger III links"],
+#     "beurteilung_phrases": ["randsklerosierte Osteolyse", "vereinbar mit Enchondrom"]}}
 
-# ---
-
-# ### Beispiel 3 (negativer Befund)
+# Beispiel 3 (Beurteilung mit negativem Befund):
 # BEFUND:
 # Distales Femur metaphysär kleine osteolytische Läsion, scharf begrenzt.
 
 # BEURTEILUNG:
 # Kein Anhalt für Malignität. Benigne imponierende Läsion, am ehesten fibröser Kortikalisdefekt.
 
-# →
-# {{
-#   "befund_phrases": [
-#     "kleine osteolytische Läsion",
-#     "scharf begrenzt",
-#     "distales Femur metaphysär"
-#   ],
-#   "beurteilung_phrases": [
-#     "kein Anhalt für Malignität",
-#     "benigne imponierende Läsion",
-#     "am ehesten fibröser Kortikalisdefekt"
-#   ]
-# }}
+# → {{"befund_phrases": ["kleine osteolytische Läsion", "scharf begrenzt", 
+#                        "distales Femur metaphysär"],
+#     "beurteilung_phrases": ["kein Anhalt für Malignität", "benigne imponierende Läsion", 
+#                             "am ehesten fibröser Kortikalisdefekt"]}}
 
-# ---
-
-# ### Beispiel 4 (keine Beurteilung, aggressive Merkmale)
+# Beispiel 4 (ohne Beurteilung):
 # BEFUND:
-# Proximale Tibia unscharf begrenzte lytische Läsion mit Kortikalisdestruktion und aggressiver Periostreaktion.
+# Proximale Tibia unscharf begrenzte lytische Läsion mit Kortikalisdestruktion und \
+# aggressiver Periostreaktion.
 
 # [Keine Beurteilung vorhanden]
 
-# →
-# {{
-#   "befund_phrases": [
-#     "lytische Läsion",
-#     "unscharf begrenzt",
-#     "Kortikalisdestruktion",
-#     "aggressive Periostreaktion",
-#     "proximale Tibia"
-#   ],
-#   "beurteilung_phrases": [
-#     "aggressive Merkmale",
-#     "Hinweis auf Malignität"
-#   ]
-# }}
+# → {{"befund_phrases": ["lytische Läsion", "unscharf begrenzt", "Kortikalisdestruktion", 
+#                        "aggressive Periostreaktion", "proximale Tibia"],
+#     "beurteilung_phrases": ["aggressive Destruktion", "Hinweis auf maligne Läsion"]}}
 
-# ---
-
-# ### Beispiel 5 (keine Beurteilung, benigne Merkmale)
+# Beispiel 5 (ohne Beurteilung, benigner Eindruck):
 # BEFUND:
 # Kleiner rundlicher Herd im distalen Femur metaphysär, scharf begrenzt mit sklerotischem Randsaum, ohne Kortikalisdurchbruch.
 
 # [Keine Beurteilung vorhanden]
 
-# →
-# {{
-#   "befund_phrases": [
-#     "kleiner rundlicher Herd",
-#     "distales Femur metaphysär",
-#     "scharf begrenzt",
-#     "sklerotischer Randsaum",
-#     "kein Kortikalisdurchbruch"
-#   ],
-#   "beurteilung_phrases": [
-#     "benigne Bildmorphologie",
-#     "keine aggressiven Merkmale"
-#   ]
-# }}
+# → ```json
+# {{"befund_phrases": ["kleiner rundlicher Herd", "distales Femur metaphysär",
+#                     "scharf begrenzt", "sklerotischer Randsaum", "ohne Kortikalisdurchbruch"],
+# "beurteilung_phrases": ["scharf begrenzte Läsion", "kein aggressives Wachstum", "Hinweis auf benigne Läsion"]}}
 
-# ---
-
-# ### Beispiel 6 (Beurteilung bestätigt Befund deskriptiv)
-# BEFUND:
-# Regelrechte Stellung im Kniegelenk. Im distalen medialen Femur die bekannte
-# kartilaginäre Exostose. Kein Hinweis auf Fraktur. Unauffällige Weichteile.
-
-# BEURTEILUNG:
-# Im distalen medialen ventralen Femur die bekannte kartilaginäre Exostose.
-
-# →
-# {{
-#   "befund_phrases": [
-#     "kartilaginäre Exostose distales mediales Femur",
-#     "regelrechte Gelenkstellung",
-#     "kein Frakturhinweis",
-#     "unauffällige Weichteile"
-#   ],
-#   "beurteilung_phrases": [
-#     "bekannte kartilaginäre Exostose distales mediales ventrales Femur"
-#   ]
-# }}
-
-# ---
-
-# ## INPUT
+# Befund:
 # {formatted_report}
 
-# ## OUTPUT (STRICT JSON ONLY)
+# Antworte NUR mit diesem JSON:
 # {{
 #   "befund_phrases": [],
 #   "beurteilung_phrases": []
-# }}
-# """
+# }}"""
+
+BEFUND_PROMPT_TEMPLATE = """\
+Extrahiere deskriptive Evidenzphrasen aus folgendem Radiologiebefund.
+
+## WAS EXTRAHIEREN?
+- Morphologie (z. B. lytic lesion, sclerotic rim)
+- Lokalisation (z. B. proximal tibia metaphysis)
+- Größe (z. B. approx. 4 cm)
+- Struktur / Matrix / Begrenzung
+- Aggressivitätszeichen (z. B. cortical destruction, periosteal reaction)
+
+## REGELN
+- Möglichst originalgetreu extrahieren (keine Halluzination)
+- 2–8 Wörter pro Phrase, 1 Konzept pro Phrase
+- Mindestens 2 Phrasen
+- Alle Phrasen auf Englisch
+
+---
+
+## BEISPIELE
+
+### Beispiel 1
+Proximale Tibia metaphysär ca. 4 cm große osteolytische Läsion mit chondroider Matrix.
+
+→ {{"befund_phrases": ["osteolytic lesion", "chondroid matrix", "approximately 4 cm lesion", "proximal tibia metaphysis"]}}
+
+### Beispiel 2
+Proximale Tibia unscharf begrenzte lytische Läsion mit Kortikalisdestruktion und aggressiver Periostreaktion.
+
+→ {{"befund_phrases": ["lytic lesion", "ill-defined margins", "cortical destruction", "aggressive periosteal reaction", "proximal tibia"]}}
+
+---
+
+## INPUT
+{text}
+
+## OUTPUT (STRICT JSON ONLY)
+{{"befund_phrases": []}}
+"""
+
+BEURTEILUNG_PROMPT_TEMPLATE = """\
+Extrahiere diagnostische Aussagen aus der folgenden Radiologie-Beurteilung.
+
+## ZIEL
+Extrahiere kurze, explizit genannte diagnostische Aussagen.
+Keine neuen Informationen hinzufügen.
+
+## WAS EXTRAHIEREN?
+- Diagnosen oder Verdachtsdiagnosen
+- Differenzialdiagnosen (DD)
+- Malignitäts-Einschätzung (benign / malignant / indeterminate)
+- Wichtige Negationen (z. B. "kein Anhalt für Malignität")
+- Klinische Einschätzungen (z. B. "am ehesten ...")
+
+## WICHTIG
+- Nur Inhalte verwenden, die im Text erwähnt sind
+- Leichte Standardisierung erlaubt:
+  - "V.a." → "suspected"
+  - "DD" → "differential"
+  - "kein Anhalt für" → "no evidence of"
+- Keine neuen Diagnosen erfinden
+- Keine Befunddetails (Morphologie, Lokalisation, Größe) extrahieren
+
+## REGELN
+- 2–8 Wörter pro Phrase
+- 1 Konzept pro Phrase
+- Englisch
+- Keine Duplikate
+- Wenn keine diagnostische Aussage vorhanden → leere Liste
+
+---
+
+## BEISPIELE
+
+### Beispiel 1
+V.a. Enchondrom. DD niedriggradiges Chondrosarkom.
+
+→ {{"beurteilung_phrases": ["suspected enchondroma", "low-grade chondrosarcoma differential"]}}
+
+### Beispiel 2
+Kein Anhalt für Malignität. Benigne imponierende Läsion.
+
+→ {{"beurteilung_phrases": ["no evidence of malignancy", "benign-appearing lesion"]}}
+
+### Beispiel 3
+Am ehesten fibröser Kortikalisdefekt.
+
+→ {{"beurteilung_phrases": ["most likely fibrous cortical defect"]}}
+
+### Beispiel 4 (keine Information)
+Beurteilung: s.o.
+
+→ {{"beurteilung_phrases": []}}
+
+---
+
+## INPUT
+{text}
+
+## OUTPUT (STRICT JSON ONLY)
+{{"beurteilung_phrases": []}}
+"""
+
+BEURTEILUNG_SUMMARY_PROMPT_TEMPLATE = """\
+Es liegt keine Beurteilung vor. Leite aus folgendem Radiologiebefund 1–3 kurze diagnostische Einschätzungen ab.
+
+## WAS ABLEITEN?
+- Wichtigste diagnostische Einschätzung (benigne / maligne Tendenz)
+- Verdachtsdiagnose (falls möglich)
+- Zusammenfassende Charakterisierung der Läsion
+
+## REGELN
+- Nur medizinisch begründete Schlussfolgerungen aus dem Text
+- 2–8 Wörter pro Phrase, 1 Konzept pro Phrase
+- Alle Phrasen auf Englisch
+
+---
+
+## BEISPIELE
+
+### Beispiel 1
+Proximale Tibia unscharf begrenzte lytische Läsion mit Kortikalisdestruktion und aggressiver Periostreaktion.
+
+→ {{"beurteilung_phrases": ["aggressive lesion", "suggestive of malignancy"]}}
+
+### Beispiel 2
+Kleiner rundlicher Herd im distalen Femur metaphysär, scharf begrenzt mit sklerotischem Randsaum, ohne Kortikalisdurchbruch.
+
+→ {{"beurteilung_phrases": ["well-defined lesion", "no aggressive features", "suggestive of benign lesion"]}}
+
+---
+
+## INPUT
+{text}
+
+## OUTPUT (STRICT JSON ONLY)
+{{"beurteilung_phrases": []}}
+"""
 
 CATEGORIES = [
     "befund_phrases",
@@ -393,7 +325,7 @@ def load_model(model_id: str, quantize: bool):
     model_id  : HuggingFace model ID
     quantize  : load in 4-bit (requires bitsandbytes + CUDA) to reduce VRAM
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    
 
     print(f"\nLoading tokenizer: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -430,15 +362,16 @@ def load_model(model_id: str, quantize: bool):
 # ── Inference ─────────────────────────────────────────────────────────────────
 
 def query_llm(
-    report: str,
+    text: str,
     model,
     tokenizer,
+    prompt_template: str,
     max_new_tokens: int = 512,
 ) -> dict:
-    """Run one report through the LLM and return parsed JSON."""
+    """Run one text through the LLM using the given prompt template and return parsed JSON."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": USER_PROMPT_TEMPLATE.format(formatted_report=report)},
+        {"role": "user",   "content": prompt_template.format(text=text)},
     ]
 
     # apply_chat_template returns a tensor or BatchEncoding depending on
@@ -537,27 +470,27 @@ def _parse_response(raw: str) -> dict:
 
 # ── Report loading (same format as medbert_extractor.py) ─────────────────────
 
-def load_reports(source: str | None) -> tuple[list[str], list[str]]:
-    """Returns (reports, patids). patids is empty strings for non-JSON sources."""
+def load_reports(source: str | None) -> tuple[list[str], list[str], list[str]]:
+    """Returns (befunds, beurteilungs, patids) as separate parallel lists."""
     p = Path(source)
     if p.suffix == ".json":
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, list):
             raise ValueError("JSON must be a list.")
-        if data and isinstance(data[0], str):
-            return data, [""] * len(data)
-        reports, patids = [], []
+        befunds, beurteilungs, patids = [], [], []
         for entry in data:
-            parts = []
-            if entry.get("befund", "").strip():
-                parts.append(entry["befund"].strip())
-            if entry.get("beurteilung", "").strip():
-                parts.append(entry["beurteilung"].strip())
-            if parts:
-                reports.append("\n\n".join(parts))
+            befund = (entry.get("befund") or "").strip()
+            beurteilung = (entry.get("beurteilung") or "").strip()
+            if befund or beurteilung:
+                befunds.append(befund)
+                beurteilungs.append(beurteilung)
                 patids.append(entry.get("patid", ""))
-        print(f"Loaded {len(reports)} reports from {p} (befund + beurteilung).")
-        return reports, patids
+        assert len(befunds) == len(beurteilungs) == len(patids), (
+            f"List length mismatch: befunds={len(befunds)}, "
+            f"beurteilungs={len(beurteilungs)}, patids={len(patids)}"
+        )
+        print(f"Loaded {len(befunds)} reports from {p}.")
+        return befunds, beurteilungs, patids
 
     raise ValueError(f"Unsupported source: {source}")
 
@@ -665,23 +598,42 @@ def compare_with_medbert(llm_df: pd.DataFrame, medbert_csv: str) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(args: argparse.Namespace) -> None:
-    reports, patids = load_reports(args.reports)
+    befunds, beurteilungs, patids = load_reports(args.reports)
     if args.max:
-        reports = reports[: args.max]
+        befunds = befunds[: args.max]
+        beurteilungs = beurteilungs[: args.max]
         patids = patids[: args.max]
-        print(f"Limited to {len(reports)} reports.")
+        print(f"Limited to {len(befunds)} reports.")
 
     model, tokenizer = load_model(args.model, quantize=args.quantize)
 
     results: list[dict] = []
     raw_responses: list[dict] = []
-    for report, patid in tqdm(zip(reports, patids), desc="LLM inference", total=len(reports)):
-        result, raw = query_llm(report, model, tokenizer, max_new_tokens=args.max_new_tokens)
-        result["patid"] = patid
+    for befund, beurteilung, patid in tqdm(zip(befunds, beurteilungs, patids), desc="LLM inference", total=len(befunds)):
+        befund_result, befund_raw = query_llm(befund, model, tokenizer, BEFUND_PROMPT_TEMPLATE, max_new_tokens=args.max_new_tokens)
+        beurteilung_result, beurteilung_raw = query_llm(beurteilung, model, tokenizer, BEURTEILUNG_PROMPT_TEMPLATE, max_new_tokens=args.max_new_tokens)
+
+        beurteilung_phrases = beurteilung_result.get("beurteilung_phrases", [])
+        summary_raw = None
+        if not beurteilung_phrases:
+            beurteilung_result, summary_raw = query_llm(befund, model, tokenizer, BEURTEILUNG_SUMMARY_PROMPT_TEMPLATE, max_new_tokens=args.max_new_tokens)
+            beurteilung_phrases = beurteilung_result.get("beurteilung_phrases", [])
+
+        result = {
+            "befund_phrases": befund_result.get("befund_phrases", []),
+            "beurteilung_phrases": beurteilung_phrases,
+            "patid": patid,
+        }
+        raw_responses.append({
+            "patid": patid,
+            "befund_raw": befund_raw,
+            "beurteilung_raw": beurteilung_raw,
+            "summary_raw": summary_raw,
+        })
+        for label, r in [("befund", befund_result), ("beurteilung", beurteilung_result)]:
+            if "error" in r:
+                tqdm.write(f"  [error:{label}] patid={patid} — {r['error'][:80]}")
         results.append(result)
-        raw_responses.append({"patid": patid, "raw": raw})
-        if "error" in result:
-            tqdm.write(f"  [error] patid={patid} — {result['error'][:80]}")
 
     df = flatten_to_dataframe(results, patids)
     print_summary(df)

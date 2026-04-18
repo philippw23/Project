@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=llm_extractor
+#SBATCH --job-name=medbert_extractor
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=48:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -26,8 +26,6 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 
 # Run the extractor
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
-$python_path $home_dir/Project/src/llm_extractor.py \
-    --model Qwen/Qwen2.5-7B-Instruct \
+$python_path $home_dir/Project/src/medbert_extractor.py \
     --reports $home_dir/Project/data/text/sanitized_reports.json \
-    --out_dir $home_dir/Project/results \
-    --max 15
+    --out_dir $home_dir/Project/results

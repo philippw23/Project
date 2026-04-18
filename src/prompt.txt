@@ -1,0 +1,191 @@
+USER_PROMPT_TEMPLATE = """\
+Extrahiere medizinische Evidenzphrasen aus einem radiologischen Bericht.
+
+## WICHTIG: SEMANTISCHE TRENNUNG (NICHT STRUKTURELL)
+- "befund_phrases": deskriptive, bildnahe Informationen
+- "beurteilung_phrases": diagnostische oder interpretative Aussagen
+- Die Zuordnung erfolgt nach INHALT, nicht nach Textabschnitt
+
+## FALL: "s.o." ODER FEHLENDE BEURTEILUNG
+- Wenn die Beurteilung leer ist oder nur referenziell ("s.o."):
+  → extrahiere diagnostische Aussagen aus dem Befund
+- Verwende nur explizit genannte Informationen
+- KEINE neuen Diagnosen erfinden
+
+## WAS EXTRAHIEREN?
+
+### befund_phrases (deskriptiv / lokal)
+- Morphologie
+- Lokalisation
+- Größe
+- Struktur / Matrix / Begrenzung
+- Aggressivitätszeichen
+
+### beurteilung_phrases (interpretativ / global)
+- Diagnosen / Verdachtsdiagnosen
+- Differenzialdiagnosen
+- Malignitäts-Einschätzung
+- Negative Aussagen
+- Klinische Gesamteinschätzung
+- Bestätigende Wiederholung eines Befunds (auch rein deskriptiv — Wiederholung in der Beurteilung = Diagnosebestätigung)
+
+
+## REGELN
+- Befund: möglichst originalgetreu
+- Beurteilung: leichte Normalisierung erlaubt (z. B. "V.a." → "suspected")
+- 2–8 Wörter pro Phrase
+- 1 Konzept pro Phrase
+- Englisch
+- Keine Halluzination
+- Keine Duplikate innerhalb einer Liste (Überschneidungen zwischen befund_ und beurteilung_phrases sind erlaubt und erwünscht)
+
+
+## QUALITÄTSCHECK
+- Wenn möglich: ≥2 befund_phrases
+- Wenn vorhanden: ≥1 beurteilung_phrase
+- Keine künstlichen Ergänzungen erzwingen
+---
+
+## BEISPIELE
+
+### Beispiel 1 (Diagnose vorhanden)
+BEFUND:
+Proximale Tibia metaphysär ca. 4 cm große osteolytische Läsion mit chondroider Matrix.
+
+BEURTEILUNG:
+V.a. Enchondrom. DD niedriggradiges Chondrosarkom.
+
+→
+{{
+  "befund_phrases": [
+    "osteolytic lesion",
+    "chondroid matrix",
+    "approximately 4 cm lesion",
+    "proximal tibia metaphysis"
+  ],
+  "beurteilung_phrases": [
+    "suspected enchondroma",
+    "low-grade chondrosarcoma differential"
+  ]
+}}
+
+---
+
+### Beispiel 2 (Beschreibung + Diagnose)
+BEFUND:
+Im Grundphalanxschaft Finger III links rundliche Osteolyse mit sklerotischem Randsaum.
+
+BEURTEILUNG:
+Randsklerosierte Osteolyse im Bereich des Grundphalanxschaftes, vereinbar mit Enchondrom.
+
+→
+{{
+  "befund_phrases": [
+    "round osteolysis",
+    "sclerotic rim",
+    "proximal phalanx shaft digit III left"
+  ],
+  "beurteilung_phrases": [
+    "sclerotic-rim osteolysis",
+    "consistent with enchondroma"
+  ]
+}}
+
+---
+
+### Beispiel 3 (negativer Befund)
+BEFUND:
+Distales Femur metaphysär kleine osteolytische Läsion, scharf begrenzt.
+
+BEURTEILUNG:
+Kein Anhalt für Malignität. Benigne imponierende Läsion, am ehesten fibröser Kortikalisdefekt.
+
+→
+{{
+  "befund_phrases": [
+    "small osteolytic lesion",
+    "well-defined",
+    "distal femur metaphysis"
+  ],
+  "beurteilung_phrases": [
+    "no evidence of malignancy",
+    "benign-appearing lesion",
+    "most likely fibrous cortical defect"
+  ]
+}}
+
+---
+
+### Beispiel 4 (keine Beurteilung, maligner Eindruck)
+BEFUND:
+Proximale Tibia unscharf begrenzte lytische Läsion mit Kortikalisdestruktion und aggressiver Periostreaktion.
+
+→
+{{
+  "befund_phrases": [
+    "lytic lesion",
+    "ill-defined margins",
+    "cortical destruction",
+    "aggressive periosteal reaction",
+    "proximal tibia"
+  ],
+  "beurteilung_phrases": [
+    "aggressive lesion",
+    "suggestive of malignancy"
+  ]
+}}
+
+---
+
+### Beispiel 5 (keine Beurteilung, benigner Eindruck)
+BEFUND:
+Kleiner rundlicher Herd im distalen Femur metaphysär, scharf begrenzt mit sklerotischem Randsaum, ohne Kortikalisdurchbruch.
+
+→
+{{
+  "befund_phrases": [
+    "small round lesion",
+    "distal femur metaphysis",
+    "well-defined",
+    "sclerotic rim",
+    "no cortical breakthrough"
+  ],
+  "beurteilung_phrases": [
+    "well-defined lesion",
+    "no aggressive features",
+    "suggestive of benign lesion"
+  ]
+}}
+
+### Beispiel 6 (Beurteilung bestätigt Befund deskriptiv)
+BEFUND:
+Regelrechte Stellung im Kniegelenk. Im distalen medialen Femur die bekannte
+kartilaginäre Exostose. Kein Hinweis auf Fraktur. Unauffällige Weichteile.
+
+BEURTEILUNG:
+Im distalen medialen ventralen Femur die bekannte kartilaginäre Exostose.
+
+→
+{{
+  "befund_phrases": [
+    "cartilaginous exostosis distal medial femur",
+    "normal knee joint alignment",
+    "no evidence of fracture",
+    "unremarkable soft tissue"
+  ],
+  "beurteilung_phrases": [
+    "known cartilaginous exostosis distal medial ventral femur"
+  ]
+}}
+
+---
+
+## INPUT
+{formatted_report}
+
+## OUTPUT (STRICT JSON ONLY)
+{{
+  "befund_phrases": [],
+  "beurteilung_phrases": []
+}}
+"""
