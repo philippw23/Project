@@ -1,0 +1,52 @@
+program: src/biomedclip_downstream.py
+project: biomedclip-downstream
+entity: philipp-wiese
+method: bayes
+metric:
+  name: val/loss
+  goal: minimize
+
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-2
+  dropout:
+    values: [0.1, 0.2, 0.3, 0.5]
+  meta_embed_dim:
+    values: [8, 16, 32, 64]
+  weight_decay:
+    values: [0.0, 0.01, 0.05]
+  hidden_dims:
+    values:
+      - [128]
+      - [256]
+      - [256, 128]
+      - [512, 256]
+  batch_size:
+    values: [8, 16, 32]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --wandb
+  - --wandb_project
+  - biomedclip-downstream
+  - --wandb_entity
+  - philipp-wiese
+  - --checkpoint
+  - results/biomedclip_pretrain/best_checkpoint.pt
+  - --splits
+  - results/biomedclip_pretrain/splits.json
+  - --excel
+  - data/metadata.xlsx
+  - --out_dir
+  - results
+  - --use_mask
+  - --epochs
+  - "50"
+  - --seed
+  - "42"
+  - --sweep
+  - ${args}

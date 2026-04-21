@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=biomedclip_pretrain
+#SBATCH --job-name=biomedclip_downstream
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=24:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -22,26 +22,23 @@ echo Environment activated
 
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
-export WANDB_DIR=$home_dir/Project/logs
-export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
-python $home_dir/Project/src/biomedclip_pretrain.py \
-    --excel    $home_dir/Project/data/metadata.xlsx \
-    --reports  $home_dir/Project/data/text/sanitized_reports.json \
-    --images   $home_dir/Project/data/images \
-    --masks    $home_dir/Project/data/segmentations \
-    --out_dir  $home_dir/Project/results \
+python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
+$python_path $home_dir/Project/src/biomedclip_downstream.py \
+    --checkpoint $home_dir/Project/results/biomedclip_pretrain/best_checkpoint.pt \
+    --splits     $home_dir/Project/results/biomedclip_pretrain/splits.json \
+    --excel      $home_dir/Project/data/metadata.xlsx \
     --use_mask \
-    --lora_layers 2 \
-    --lora_r 4 \
+    --lora_layers 4 \
+    --lora_r 8 \
     --lora_alpha 16 \
-    --batch_size 8 \
     --epochs 50 \
-    --lr 1e-4 \
-    --downstream_train_frac 0.8 \
-    --downstream_val_frac 0.1 \
-    --test_frac 0.1 \
+    --batch_size 64 \
+    --lr 1e-3 \
+    --dropout 0.3 \
+    --hidden_dims 128 128 \
+    --meta_embed_dim 16 \
     --seed 42 \
     --wandb \
-    --wandb_project biomedclip-pretrain \
+    --wandb_project biomedclip-downstream \
     --wandb_entity philipp-wiese

@@ -24,6 +24,11 @@ from pathlib import Path
 import numpy as np
 import open_clip
 import pandas as pd
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,6 +36,7 @@ from PIL import Image
 from sklearn.model_selection import train_test_split
 from torch.nn.utils import parametrize
 from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -264,6 +270,37 @@ def crop_around_mask(
         crop = np.pad(crop, pad_width, mode=pad_mode, **kwargs)
 
     return crop
+
+
+# ---------------------------------------------------------------------------
+# Augmentation
+# ---------------------------------------------------------------------------
+
+def build_train_transform(preprocess_val) -> transforms.Compose:
+    """Build a custom training augmentation pipeline.
+
+    Normalization mean/std are taken from preprocess_val so they always match
+    the model, regardless of which checkpoint is loaded.
+
+    Augmentations chosen for bone-tumour X-rays:
+      - RandomResizedCrop: simulates varying patient positioning and zoom
+      - RandomRotation(10°): small tilts from patient/table angle
+      - RandomAdjustSharpness: varies image sharpness/contrast
+      - GaussianBlur: simulates different acquisition sharpness
+    Horizontal/vertical flips are intentionally omitted — left/right anatomy
+    is clinically meaningful in radiographs.
+    """
+    # Extract normalization from the val pipeline (always correct for the model)
+    norm = next(t for t in preprocess_val.transforms if isinstance(t, transforms.Normalize))
+
+    return transforms.Compose([
+        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+        transforms.RandomRotation(degrees=10),
+        transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.3),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
+        transforms.ToTensor(),
+        norm,
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -545,65 +582,104 @@ def _stratified_split_two(
 def build_stratified_splits(
     args: argparse.Namespace,
 ) -> tuple[list, list, list, list]:
-    """Load all samples and split into four stratified groups.
+    """Load all samples and create one master stratified train/val/test split.
 
     Returns
     -------
     pretrain_samples, downstream_train_samples, downstream_val_samples, test_samples
-        Each entry is a list of (image_path, mask_path, text, label) tuples.
 
-    The split indices and labels are also written to
-    ``<out_dir>/biomedclip_pretrain/splits.json`` for use by downstream scripts.
+    Definitions
+    -----------
+    - pretrain_samples:
+        Subset of the TRAIN split that has reports available.
+        These are the only samples allowed for VLM pretraining.
+
+    - downstream_train_samples:
+        Full TRAIN split (with and without reports).
+
+    - downstream_val_samples:
+        Full VAL split (with and without reports).
+
+    - test_samples:
+        Full TEST split (with and without reports).
+
+    Notes
+    -----
+    This avoids leakage because:
+    - test samples are never used in pretraining
+    - validation samples are not used for fitting
+    - pretraining is derived only from the training split
+
+    The split manifest is written to:
+    ``<out_dir>/biomedclip_pretrain/splits.json``
     """
-    samples, samples_no_report = _load_all_samples(
+    samples_with_report, samples_no_report = _load_all_samples(
         excel_path=Path(args.excel),
         reports_path=Path(args.reports),
         images_dir=Path(args.images),
         masks_dir=Path(args.masks),
     )
-    if not samples:
+
+    all_samples = samples_with_report + samples_no_report
+    if not all_samples:
         raise RuntimeError(
-            "No valid (image, report, label) tuples found. "
+            "No valid labeled tuples found. "
             "Check --excel, --reports, --images paths."
         )
 
-    total = args.pretrain_frac + args.downstream_train_frac + args.downstream_val_frac + args.test_frac
+    # We no longer treat pretraining as a separate top-level split.
+    # Pretraining will be derived from the training split only.
+    total = args.downstream_train_frac + args.downstream_val_frac + args.test_frac
     if abs(total - 1.0) > 1e-4:
         raise ValueError(
-            f"Split fractions must sum to 1.0, got {total:.4f}. "
-            "Check --pretrain_frac, --downstream_train_frac, --downstream_val_frac, --test_frac."
+            f"Split fractions must sum to 1.0 using "
+            f"--downstream_train_frac + --downstream_val_frac + --test_frac, "
+            f"got {total:.4f}."
         )
 
-    labels = [s[3] for s in samples]
+    if hasattr(args, "pretrain_frac") and args.pretrain_frac not in (0, 0.0):
+        print(
+            "[Warning] --pretrain_frac is ignored. "
+            "Pretraining samples are derived from the training split only."
+        )
 
-    # Step 1: hold out test set
-    rest, test = _stratified_split_two(samples, labels, args.test_frac, args.seed)
+    labels_all = [s[3] for s in all_samples]
 
-    # Step 2: hold out downstream_val from the remainder
-    labels_rest = [s[3] for s in rest]
+    # Step 1: hold out test set from the full labeled cohort
+    train_val, test = _stratified_split_two(
+        all_samples,
+        labels_all,
+        args.test_frac,
+        args.seed,
+    )
+
+    # Step 2: split remaining data into train and val
+    labels_train_val = [s[3] for s in train_val]
     val_frac_adj = args.downstream_val_frac / (1.0 - args.test_frac)
-    rest2, downstream_val = _stratified_split_two(rest, labels_rest, val_frac_adj, args.seed)
+    downstream_train, downstream_val = _stratified_split_two(
+        train_val,
+        labels_train_val,
+        val_frac_adj,
+        args.seed,
+    )
 
-    # Step 3: split pretrain vs downstream_train from the remainder
-    labels_rest2 = [s[3] for s in rest2]
-    train_frac_adj = args.downstream_train_frac / (args.pretrain_frac + args.downstream_train_frac)
-    pretrain, downstream_train = _stratified_split_two(rest2, labels_rest2, train_frac_adj, args.seed)
+    # Step 3: derive pretraining set from training split only
+    # Assumption: samples without report have s[2] == None or empty string
+    pretrain = [s for s in downstream_train if s[2] is not None and str(s[2]).strip() != ""]
 
-    # Add report-less samples to downstream splits (stratified)
-    if samples_no_report:
-        labels_nr = [s[3] for s in samples_no_report]
-        nr_rest, nr_test = _stratified_split_two(samples_no_report, labels_nr, args.test_frac, args.seed)
-        labels_nr_rest = [s[3] for s in nr_rest]
-        val_frac_nr = args.downstream_val_frac / (1.0 - args.test_frac)
-        nr_train, nr_val = _stratified_split_two(nr_rest, labels_nr_rest, val_frac_nr, args.seed)
-        downstream_train = downstream_train + nr_train
-        downstream_val = downstream_val + nr_val
-        test = test + nr_test
+    if not pretrain:
+        raise RuntimeError(
+            "No report-bearing samples ended up in the training split. "
+            "Cannot run pretraining."
+        )
 
     # --- Print class distributions ---
     def _dist(split: list) -> dict[str, int]:
         from collections import Counter
         return dict(Counter(s[3] for s in split))
+
+    def _count_reports(split: list) -> int:
+        return sum(1 for s in split if s[2] is not None and str(s[2]).strip() != "")
 
     splits_info = {
         "pretrain": pretrain,
@@ -611,38 +687,47 @@ def build_stratified_splits(
         "downstream_val": downstream_val,
         "test": test,
     }
+
     print("\nSplit statistics:")
     for name, split in splits_info.items():
         dist = _dist(split)
         dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(dist.items()))
-        print(f"  {name:<20} {len(split):>4} samples  |  {dist_str}")
+        n_reports = _count_reports(split)
+        print(
+            f"  {name:<20} {len(split):>4} samples"
+            f"  | reports: {n_reports:>4}"
+            f"  | {dist_str}"
+        )
     print()
 
     # --- Save split manifest to disk ---
     out_dir = Path(args.out_dir) / "biomedclip_pretrain"
     out_dir.mkdir(parents=True, exist_ok=True)
+
     manifest: dict[str, list] = {}
     for name, split in splits_info.items():
         manifest[name] = [
             {
                 "image": str(s[0]),
-                "mask": str(s[1]),
+                "mask": str(s[1]) if s[1] is not None else None,
                 "report": s[2],
                 "label": s[3],
             }
             for s in split
         ]
+
     manifest_path = out_dir / "splits.json"
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
+
     print(f"  Split manifest saved -> {manifest_path}\n")
 
     return pretrain, downstream_train, downstream_val, test
 
-
 def build_pretrain_datasets(
     pretrain_samples: list,
-    preprocess,
+    preprocess_train,
+    preprocess_val,
     tokenizer,
     use_mask: bool,
     seed: int,
@@ -666,8 +751,8 @@ def build_pretrain_datasets(
 
     print(f"Pretrain loop split: {len(train_samp)} train / {len(val_samp)} monitor-val")
 
-    train_ds = BoneTumorPairDataset(train_samp, preprocess, tokenizer, use_mask)
-    val_ds = BoneTumorPairDataset(val_samp, preprocess, tokenizer, use_mask)
+    train_ds = BoneTumorPairDataset(train_samp, preprocess_train, tokenizer, use_mask)
+    val_ds = BoneTumorPairDataset(val_samp, preprocess_val, tokenizer, use_mask)
     return train_ds, val_ds
 
 
@@ -732,7 +817,8 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
 
-    for batch in tqdm(loader, desc="  train", leave=False):
+    pbar = tqdm(loader, desc="  train", leave=False)
+    for batch in pbar:
         images = batch["image"].to(device)
         texts = batch["text"].to(device)
 
@@ -749,6 +835,7 @@ def train_one_epoch(
         scaler.update()
 
         total_loss += loss.item()
+        pbar.set_postfix(loss=f"{loss.item():.4f}")
 
     return total_loss / len(loader)
 
@@ -786,11 +873,13 @@ def save_checkpoint(
     epoch: int,
     val_loss: float,
     path: Path,
+    lora_config: dict | None = None,
 ) -> None:
     torch.save(
         {
             "epoch": epoch,
             "val_loss": val_loss,
+            "lora_config": lora_config or {},
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
         },
@@ -868,7 +957,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=32,
+        default=8,
         help="Training batch size (default: %(default)s)",
     )
     parser.add_argument(
@@ -880,7 +969,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--lr",
         type=float,
-        default=1e-4,
+        default=0.5e-4,
         help="Peak learning rate for AdamW (default: %(default)s)",
     )
     parser.add_argument(
@@ -913,7 +1002,40 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=42,
         help="Random seed for reproducibility (default: %(default)s)",
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        default="biomedclip-pretrain",
+        help="W&B project name (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--wandb_run",
+        default=None,
+        help="W&B run name (default: auto-generated)",
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        default=None,
+        help="W&B team/entity name (default: personal account)",
+    )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Run as wandb sweep agent (hyperparams come from wandb.config)",
+    )
     return parser.parse_args(argv)
+
+
+def _apply_sweep_config(args: argparse.Namespace) -> None:
+    """Overwrite args with values from wandb.config when running as sweep agent."""
+    cfg = wandb.config
+    for key in ("lora_layers", "lora_r", "lora_alpha", "lr", "batch_size"):
+        if key in cfg:
+            setattr(args, key, cfg[key])
 
 
 def main(args: argparse.Namespace) -> None:
@@ -940,6 +1062,7 @@ def main(args: argparse.Namespace) -> None:
     model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
     tokenizer = open_clip.get_tokenizer(MODEL_TAG)
     model = model.to(device)
+    preprocess_train = build_train_transform(preprocess_val)
 
     # --- Inject LoRA ---
     inject_lora(model, args.lora_layers, args.lora_r, args.lora_alpha)
@@ -959,7 +1082,7 @@ def main(args: argparse.Namespace) -> None:
 
     # --- Pretrain datasets (small monitor-val inside pretrain set) ---
     train_ds, val_ds = build_pretrain_datasets(
-        pretrain_samples, preprocess_val, tokenizer, args.use_mask, args.seed
+        pretrain_samples, preprocess_train, preprocess_val, tokenizer, args.use_mask, args.seed
     )
 
     use_pin_memory = device.type == "cuda"
@@ -1000,13 +1123,36 @@ def main(args: argparse.Namespace) -> None:
         lr=args.lr,
     )
 
-    warmup_epochs = max(1, args.epochs // 10)
+    warmup_epochs = max(1, args.epochs // 5)
     scheduler = make_scheduler(optimizer, warmup_epochs, args.epochs)
     scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else torch.amp.GradScaler("cpu")
 
     # --- Output directory ---
     out_dir = Path(args.out_dir) / "biomedclip_pretrain"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- W&B ---
+    use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
+    if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
+        warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run,
+            config={
+                "lora_layers": args.lora_layers,
+                "lora_r": args.lora_r,
+                "lora_alpha": args.lora_alpha,
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "lr": args.lr,
+                "seed": args.seed,
+                "use_mask": args.use_mask,
+            },
+        )
+        if args.sweep:
+            _apply_sweep_config(args)
 
     # --- Training loop ---
     best_val_loss = float("inf")
@@ -1018,28 +1164,40 @@ def main(args: argparse.Namespace) -> None:
         scheduler.step()
 
         lr_current = scheduler.get_last_lr()[0]
+        logit_scale = model.logit_scale.item()
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
             f"train={train_loss:.4f} | val={val_loss:.4f} | "
             f"lr={lr_current:.2e} | "
-            f"logit_scale={model.logit_scale.item():.3f}"
+            f"logit_scale={logit_scale:.3f}"
         )
+        if use_wandb:
+            wandb.log({
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "train/lr": lr_current,
+                "train/logit_scale": logit_scale,
+            }, step=epoch)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(
                 model, optimizer, epoch, val_loss,
                 out_dir / "best_checkpoint.pt",
+                lora_config={"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha},
             )
 
     save_checkpoint(
         model, optimizer, args.epochs, val_loss,
         out_dir / "final_checkpoint.pt",
+        lora_config={"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha},
     )
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to: {out_dir}")
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
-    #main(parse_args())
-    build_stratified_splits(parse_args())
+    main(parse_args())
+    #build_stratified_splits(parse_args())
