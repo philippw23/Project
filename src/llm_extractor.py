@@ -3,7 +3,7 @@ LLM-based Bone Tumor Evidence Phrase Extractor  (HuggingFace)
 =============================================================
 Uses a local generative LLM from HuggingFace to extract free-form
 diagnostic evidence phrases from German radiology reports (LGDEA style),
-split into two lists:
+split into two lists but concateted into one prompt for joint extraction:
   - lesion_phrases   : direct visual characteristics of the lesion
                        (shape, margins, matrix, periosteal reaction, …)
                        → intended as mask tokens
@@ -78,6 +78,16 @@ Unterscheide zwischen deskriptiven (Befund) und diagnostischen (Beurteilung) Inf
 
 Alle Ausgaben müssen medizinisch korrekt sein.
 Antworte ausschließlich mit validem JSON.
+"""
+
+SYSTEM_PROMPT_ENGLISH = """\
+You are an experienced radiologist and expert in structured medical information extraction.
+
+Work precisely, close to the source text, and without hallucination.
+Distinguish between descriptive (Findings) and diagnostic (Impression) information.
+
+All outputs must be medically correct.
+Reply with valid JSON only.
 """
 
 USER_PROMPT_TEMPLATE = """\
@@ -175,6 +185,87 @@ Befund:
 {formatted_report}
 
 Antworte NUR mit diesem JSON:
+{{
+  "befund_phrases": [],
+  "beurteilung_phrases": []
+}}"""
+
+USER_PROMPT_TEMPLATE_ENGLISH = """\
+Read the following radiology report and extract the medically important phrases \
+separated by source section.
+
+CRITICAL RULE:
+- "befund_phrases": Extract ONLY from the FINDINGS section
+- "beurteilung_phrases": Extract ONLY from the IMPRESSION section (if present)
+  If IMPRESSION is missing: extract the most important descriptive features from FINDINGS
+
+Definitions:
+- "befund_phrases": Individual descriptive observations from the findings
+  Examples: "osteolytic lesion", "chondroid matrix", "cortical breakthrough", \
+  "proximal tibial metaphysis", "approx. 4 cm diameter", "sclerotic rim", \
+  "well-defined margins", "soft tissue involvement"
+
+- "beurteilung_phrases": ALL clinically relevant statements from the impression
+  This includes:
+  • Diagnoses and differential diagnoses: "enchondroma", "DDx chondrosarcoma"
+  • Descriptive summaries: "rim-sclerotic osteolysis", "well-circumscribed lesion"
+  • Clinical assessments: "consistent with benign process", "radiologically unremarkable"
+  • Negative findings: "no periosteal reaction", "no soft tissue mass"
+  • Recommendations: "follow-up recommended", "biopsy indicated"
+
+Rules:
+1. Use original phrasing from the text (no paraphrasing or interpretation)
+2. Preserve anatomical details and measurements
+3. Concise phrases (2–8 words), one concept per phrase
+4. AT LEAST one phrase per category
+5. Extract ALL relevant statements from the impression
+6. NO hallucinations or invented information not explicitly stated in the text
+
+BEFORE ANSWERING CHECK:
+- Does "befund_phrases" contain at least 1 phrase? If not, extract at least the most \
+prominent lesion, location, or morphological feature from the findings.
+- Does "beurteilung_phrases" contain at least 1 phrase? If not, extract the most \
+important clinical statement from the findings section.
+- Only reply once both lists contain at least one entry.
+
+Example 1 (with impression):
+FINDINGS:
+Proximal tibial metaphysis approx. 4 cm osteolytic lesion with chondroid matrix.
+
+IMPRESSION:
+Suspected enchondroma. DDx low-grade chondrosarcoma.
+
+→ {{"befund_phrases": ["osteolytic lesion", "chondroid matrix", "approx. 4 cm lesion",
+                       "proximal tibial metaphysis"],
+    "beurteilung_phrases": ["suspected enchondroma", "DDx low-grade chondrosarcoma"]}}
+
+Example 2 (with impression):
+FINDINGS:
+Rounded osteolysis with sclerotic rim in the proximal phalanx shaft of finger III left.
+
+IMPRESSION:
+Rim-sclerotic osteolysis in the proximal phalanx shaft, consistent with enchondroma.
+
+→ {{"befund_phrases": ["rounded osteolysis", "sclerotic rim",
+                       "proximal phalanx shaft finger III left"],
+    "beurteilung_phrases": ["rim-sclerotic osteolysis", "consistent with enchondroma"]}}
+
+Example 3 (no impression):
+FINDINGS:
+Distal femoral metaphysis small osteolytic lesion, sharply marginated, no cortical breakthrough, \
+no periosteal reaction.
+
+[No impression available]
+
+→ {{"befund_phrases": ["small osteolytic lesion", "sharply marginated",
+                       "distal femoral metaphysis", "no cortical breakthrough",
+                       "no periosteal reaction"],
+    "beurteilung_phrases": ["sharply marginated osteolytic lesion", "no cortical involvement"]}}
+
+Report:
+{formatted_report}
+
+Reply ONLY with this JSON:
 {{
   "befund_phrases": [],
   "beurteilung_phrases": []
@@ -434,11 +525,13 @@ def query_llm(
     model,
     tokenizer,
     max_new_tokens: int = 512,
+    system_prompt: str = SYSTEM_PROMPT,
+    user_prompt_template: str = USER_PROMPT_TEMPLATE,
 ) -> dict:
     """Run one report through the LLM and return parsed JSON."""
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": USER_PROMPT_TEMPLATE.format(formatted_report=report)},
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt_template.format(formatted_report=report)},
     ]
 
     # apply_chat_template returns a tensor or BatchEncoding depending on
@@ -537,8 +630,12 @@ def _parse_response(raw: str) -> dict:
 
 # ── Report loading (same format as medbert_extractor.py) ─────────────────────
 
-def load_reports(source: str | None) -> tuple[list[str], list[str]]:
-    """Returns (reports, patids). patids is empty strings for non-JSON sources."""
+def load_reports(source: str | None, english: bool = False) -> tuple[list[str], list[str]]:
+    """Returns (reports, patids). patids is empty strings for non-JSON sources.
+
+    english=True  → use befund_en / beurteilung_en (translated_reports.json)
+    english=False → use befund / beurteilung        (sanitized_reports.json)
+    """
     p = Path(source)
     if p.suffix == ".json":
         data = json.loads(p.read_text(encoding="utf-8"))
@@ -546,17 +643,23 @@ def load_reports(source: str | None) -> tuple[list[str], list[str]]:
             raise ValueError("JSON must be a list.")
         if data and isinstance(data[0], str):
             return data, [""] * len(data)
+
+        befund_key      = "befund_en"      if english else "befund"
+        beurteilung_key = "beurteilung_en" if english else "beurteilung"
+
         reports, patids = [], []
         for entry in data:
             parts = []
-            if entry.get("befund", "").strip():
-                parts.append(entry["befund"].strip())
-            if entry.get("beurteilung", "").strip():
-                parts.append(entry["beurteilung"].strip())
+            if entry.get(befund_key, "").strip():
+                parts.append(entry[befund_key].strip())
+            if entry.get(beurteilung_key, "").strip():
+                parts.append(entry[beurteilung_key].strip())
             if parts:
                 reports.append("\n\n".join(parts))
                 patids.append(entry.get("patid", ""))
-        print(f"Loaded {len(reports)} reports from {p} (befund + beurteilung).")
+
+        lang = "English" if english else "German"
+        print(f"Loaded {len(reports)} {lang} reports from {p}.")
         return reports, patids
 
     raise ValueError(f"Unsupported source: {source}")
@@ -665,7 +768,7 @@ def compare_with_medbert(llm_df: pd.DataFrame, medbert_csv: str) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(args: argparse.Namespace) -> None:
-    reports, patids = load_reports(args.reports)
+    reports, patids = load_reports(args.reports, english=args.english)
     if args.max:
         reports = reports[: args.max]
         patids = patids[: args.max]
@@ -673,10 +776,18 @@ def main(args: argparse.Namespace) -> None:
 
     model, tokenizer = load_model(args.model, quantize=args.quantize)
 
+    system_prompt        = SYSTEM_PROMPT_ENGLISH      if args.english else SYSTEM_PROMPT
+    user_prompt_template = USER_PROMPT_TEMPLATE_ENGLISH if args.english else USER_PROMPT_TEMPLATE
+
     results: list[dict] = []
     raw_responses: list[dict] = []
     for report, patid in tqdm(zip(reports, patids), desc="LLM inference", total=len(reports)):
-        result, raw = query_llm(report, model, tokenizer, max_new_tokens=args.max_new_tokens)
+        result, raw = query_llm(
+            report, model, tokenizer,
+            max_new_tokens=args.max_new_tokens,
+            system_prompt=system_prompt,
+            user_prompt_template=user_prompt_template,
+        )
         result["patid"] = patid
         results.append(result)
         raw_responses.append({"patid": patid, "raw": raw})
@@ -719,6 +830,11 @@ if __name__ == "__main__":
         "--reports", default=None,
         help="Path to a .json file or directory of .txt files. "
              "Omit for bundled sample reports.",
+    )
+    parser.add_argument(
+        "--english", action="store_true",
+        help="Read befund_en/beurteilung_en instead of befund/beurteilung "
+             "(use with translated_reports.json).",
     )
     parser.add_argument(
         "--model", default=DEFAULT_MODEL,

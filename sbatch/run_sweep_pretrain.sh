@@ -12,7 +12,7 @@
 #        wandb sweep configs/sweep_pretrain.yaml
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_pretrain.sh
-SWEEP_ID="philipp-wiese/biomedclip-pretrain/qvnu5ixt"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
+SWEEP_ID="philipp-wiese/biomedclip-downstream/apwxsuus"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
 
 if [ -z "$SWEEP_ID" ]; then
     echo "ERROR: Set SWEEP_ID in this script before submitting."

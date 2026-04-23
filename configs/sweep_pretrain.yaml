@@ -32,7 +32,8 @@ command:
   - --excel
   - data/metadata.xlsx
   - --reports
-  - data/text/sanitized_reports.json
+  - data/text/translated_reports.json
+  - --english
   - --images
   - data/images
   - --masks

@@ -18,7 +18,9 @@ import argparse
 import json
 import math
 import random
+import sys
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +34,10 @@ except ImportError:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageFile
 from sklearn.model_selection import train_test_split
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 from torch.nn.utils import parametrize
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
@@ -47,7 +51,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGES_DIR = ROOT_DIR / "data" / "images"
 DEFAULT_MASKS_DIR = ROOT_DIR / "data" / "segmentations"
 DEFAULT_EXCEL = ROOT_DIR / "data" / "metadata.xlsx"
-DEFAULT_REPORTS = ROOT_DIR / "data" / "text" / "sanitized_reports.json"
+DEFAULT_REPORTS = ROOT_DIR / "data" / "text" / "translated_reports.json" # "sanitized_reports.json"
 DEFAULT_OUT_DIR = ROOT_DIR / "results"
 
 MODEL_TAG = "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
@@ -431,6 +435,7 @@ def _load_all_samples(
     reports_path: Path,
     images_dir: Path,
     masks_dir: Path,
+    english: bool = False,
 ) -> list[tuple[Path, Path, str, str]]:
     """Return a list of (image_path, mask_path, text, label) for all valid pairs.
 
@@ -476,8 +481,10 @@ def _load_all_samples(
         pid = _normalise_id(str(entry.get("patid", "")).strip())
         if not pid:
             continue
-        befund = (entry.get("befund") or "").strip()
-        beurteilung = (entry.get("beurteilung") or "").strip()
+        befund_key      = "befund_en"      if english else "befund"
+        beurteilung_key = "beurteilung_en" if english else "beurteilung"
+        befund      = (entry.get(befund_key) or "").strip()
+        beurteilung = (entry.get(beurteilung_key) or "").strip()
         text = " ".join(filter(None, [befund, beurteilung]))
         if text:
             report_lookup[pid] = text
@@ -581,6 +588,7 @@ def _stratified_split_two(
 
 def build_stratified_splits(
     args: argparse.Namespace,
+    run_dir: Path | None = None,
 ) -> tuple[list, list, list, list]:
     """Load all samples and create one master stratified train/val/test split.
 
@@ -618,6 +626,7 @@ def build_stratified_splits(
         reports_path=Path(args.reports),
         images_dir=Path(args.images),
         masks_dir=Path(args.masks),
+        english=args.english,
     )
 
     all_samples = samples_with_report + samples_no_report
@@ -663,14 +672,14 @@ def build_stratified_splits(
         args.seed,
     )
 
-    # Step 3: derive pretraining set from training split only
-    # Assumption: samples without report have s[2] == None or empty string
-    pretrain = [s for s in downstream_train if s[2] is not None and str(s[2]).strip() != ""]
+    # Step 3: all report-bearing samples are used for pretraining.
+    # The downstream task never uses reports, so using val/test image-report pairs
+    # for contrastive pretraining does not leak label information.
+    pretrain = list(samples_with_report)
 
     if not pretrain:
         raise RuntimeError(
-            "No report-bearing samples ended up in the training split. "
-            "Cannot run pretraining."
+            "No report-bearing samples found. Cannot run pretraining."
         )
 
     # --- Print class distributions ---
@@ -688,8 +697,13 @@ def build_stratified_splits(
         "test": test,
     }
 
-    print("\nSplit statistics:")
-    for name, split in splits_info.items():
+    downstream_splits = {
+        "downstream_train": downstream_train,
+        "downstream_val":   downstream_val,
+        "test":             test,
+    }
+    print("\nDownstream split statistics (mutually exclusive):")
+    for name, split in downstream_splits.items():
         dist = _dist(split)
         dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(dist.items()))
         n_reports = _count_reports(split)
@@ -698,10 +712,14 @@ def build_stratified_splits(
             f"  | reports: {n_reports:>4}"
             f"  | {dist_str}"
         )
+
+    dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(_dist(pretrain).items()))
+    print(f"\nPretrain set (all report-bearing samples, overlaps with all splits above):")
+    print(f"  {'pretrain':<20} {len(pretrain):>4} samples  | {dist_str}")
     print()
 
     # --- Save split manifest to disk ---
-    out_dir = Path(args.out_dir) / "biomedclip_pretrain"
+    out_dir = run_dir if run_dir is not None else Path(args.out_dir) / "biomedclip_pretrain"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     manifest: dict[str, list] = {}
@@ -817,7 +835,7 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
 
-    pbar = tqdm(loader, desc="  train", leave=False)
+    pbar = tqdm(loader, desc="  train", leave=False, disable=not sys.stdout.isatty())
     for batch in pbar:
         images = batch["image"].to(device)
         texts = batch["text"].to(device)
@@ -863,6 +881,65 @@ def evaluate(
     return total_loss / len(loader)
 
 
+@torch.no_grad()
+def evaluate_retrieval(
+    model: nn.Module,
+    val_samples: list,
+    preprocess_val,
+    tokenizer,
+    device: torch.device,
+    use_mask: bool,
+    batch_size: int = 32,
+) -> dict[str, float]:
+    """Compute image-text retrieval metrics on the downstream val set.
+
+    Only samples with non-empty reports are used (need paired image+text).
+    Returns I2T/T2I Recall@1, Recall@5, and median rank.
+    """
+    paired = [(s[0], s[1], s[2]) for s in val_samples if s[2] and str(s[2]).strip()]
+    if len(paired) < 2:
+        return {}
+
+    model.eval()
+    ds = BoneTumorPairDataset(paired, preprocess_val, tokenizer, use_mask)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    all_img_feats, all_txt_feats = [], []
+    for batch in loader:
+        images = batch["image"].to(device)
+        texts = batch["text"].to(device)
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            img_feat = F.normalize(model.encode_image(images), dim=-1)
+            txt_feat = F.normalize(model.encode_text(texts), dim=-1)
+        all_img_feats.append(img_feat.float())
+        all_txt_feats.append(txt_feat.float())
+
+    img_embs = torch.cat(all_img_feats, dim=0)  # (N, D)
+    txt_embs = torch.cat(all_txt_feats, dim=0)  # (N, D)
+    sim = img_embs @ txt_embs.T                  # (N, N)
+    n = sim.shape[0]
+
+    def _metrics(sim_matrix: torch.Tensor) -> tuple[float, float, float]:
+        ranks = np.array([
+            int((sim_matrix[i] > sim_matrix[i, i]).sum().item()) + 1
+            for i in range(n)
+        ])
+        return (ranks <= 1).mean(), (ranks <= 5).mean(), float(np.median(ranks))
+
+    i2t_r1, i2t_r5, i2t_med = _metrics(sim)
+    t2i_r1, t2i_r5, t2i_med = _metrics(sim.T)
+
+    return {
+        "retrieval/i2t_r1":          i2t_r1,
+        "retrieval/i2t_r5":          i2t_r5,
+        "retrieval/i2t_median_rank": i2t_med,
+        "retrieval/t2i_r1":          t2i_r1,
+        "retrieval/t2i_r5":          t2i_r5,
+        "retrieval/t2i_median_rank": t2i_med,
+        "retrieval/n_pairs":         float(n),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Checkpointing
 # ---------------------------------------------------------------------------
@@ -904,7 +981,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--reports",
         default=str(DEFAULT_REPORTS),
-        help="Path to sanitized_reports.json (default: %(default)s)",
+        help="Path to reports JSON (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--english", action="store_true",
+        help="Read befund_en/beurteilung_en instead of befund/beurteilung "
+             "(use with translated_reports.json).",
     )
     parser.add_argument(
         "--images",
@@ -1077,8 +1159,13 @@ def main(args: argparse.Namespace) -> None:
         f"({100 * n_trainable / n_total:.2f} %)"
     )
 
+    # --- Run directory (timestamped) ---
+    run_dir = Path(args.out_dir) / "biomedclip_pretrain" / datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run directory: {run_dir}")
+
     # --- Stratified splits ---
-    pretrain_samples, _, _, _ = build_stratified_splits(args)
+    pretrain_samples, _, downstream_val, _ = build_stratified_splits(args, run_dir=run_dir)
 
     # --- Pretrain datasets (small monitor-val inside pretrain set) ---
     train_ds, val_ds = build_pretrain_datasets(
@@ -1127,10 +1214,6 @@ def main(args: argparse.Namespace) -> None:
     scheduler = make_scheduler(optimizer, warmup_epochs, args.epochs)
     scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else torch.amp.GradScaler("cpu")
 
-    # --- Output directory ---
-    out_dir = Path(args.out_dir) / "biomedclip_pretrain"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     # --- W&B ---
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
     if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
@@ -1171,29 +1254,45 @@ def main(args: argparse.Namespace) -> None:
             f"lr={lr_current:.2e} | "
             f"logit_scale={logit_scale:.3f}"
         )
+        retrieval = evaluate_retrieval(
+            model, downstream_val, preprocess_val, tokenizer, device,
+            args.use_mask, batch_size=args.batch_size,
+        )
+        if retrieval:
+            print(
+                f"           | I2T R@1={retrieval['retrieval/i2t_r1']:.1%}"
+                f"  R@5={retrieval['retrieval/i2t_r5']:.1%}"
+                f"  med={retrieval['retrieval/i2t_median_rank']:.0f}"
+                f" | T2I R@1={retrieval['retrieval/t2i_r1']:.1%}"
+                f"  R@5={retrieval['retrieval/t2i_r5']:.1%}"
+                f"  med={retrieval['retrieval/t2i_median_rank']:.0f}"
+                f" | n={int(retrieval['retrieval/n_pairs'])}"
+            )
         if use_wandb:
-            wandb.log({
+            log_dict = {
                 "train/loss": train_loss,
                 "val/loss": val_loss,
                 "train/lr": lr_current,
                 "train/logit_scale": logit_scale,
-            }, step=epoch)
+            }
+            log_dict.update(retrieval)
+            wandb.log(log_dict, step=epoch)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(
                 model, optimizer, epoch, val_loss,
-                out_dir / "best_checkpoint.pt",
+                run_dir / "best_checkpoint.pt",
                 lora_config={"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha},
             )
 
     save_checkpoint(
         model, optimizer, args.epochs, val_loss,
-        out_dir / "final_checkpoint.pt",
+        run_dir / "final_checkpoint.pt",
         lora_config={"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha},
     )
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
-    print(f"Checkpoints saved to: {out_dir}")
+    print(f"Checkpoints saved to: {run_dir}")
     if use_wandb:
         wandb.finish()
 

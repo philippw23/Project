@@ -27,8 +27,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageFile
 from sklearn.metrics import classification_report, confusion_matrix
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -313,13 +315,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Downstream malignancy classifier on top of BiomedCLIP image encoder."
     )
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
+    parser.add_argument("--freezed_biomedclip", action="store_true",
+                        help="Use the vanilla BiomedCLIP encoder without loading a "
+                             "fine-tuned checkpoint (no LoRA injection).")
     parser.add_argument("--splits", default=str(DEFAULT_SPLITS))
     parser.add_argument("--excel", default=str(DEFAULT_EXCEL))
     parser.add_argument("--out_dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--use_mask", action="store_true")
-    parser.add_argument("--lora_layers", type=int, default=4)
-    parser.add_argument("--lora_r", type=int, default=8)
-    parser.add_argument("--lora_alpha", type=float, default=16.0)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -377,22 +379,29 @@ def main(args: argparse.Namespace) -> None:
         if args.sweep:
             _apply_sweep_config(args)
 
-    # --- Load model and checkpoint ---
+    # --- Load model ---
     print(f"Loading model: {MODEL_TAG}")
     model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
 
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    if args.freezed_biomedclip:
+        print("Using vanilla BiomedCLIP encoder (no checkpoint, no LoRA).")
+    else:
+        ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
 
-    # Use LoRA config from checkpoint if present, otherwise fall back to CLI args
-    lora_cfg = ckpt.get("lora_config") or {}
-    lora_layers = lora_cfg.get("lora_layers", args.lora_layers)
-    lora_r      = lora_cfg.get("lora_r",      args.lora_r)
-    lora_alpha  = lora_cfg.get("lora_alpha",   args.lora_alpha)
-    print(f"LoRA config from checkpoint: layers={lora_layers}, r={lora_r}, alpha={lora_alpha}")
+        lora_cfg = ckpt.get("lora_config") or {}
+        if not lora_cfg:
+            raise RuntimeError(
+                f"Checkpoint '{args.checkpoint}' has no 'lora_config'. "
+                "Re-run pretraining with the current biomedclip_pretrain.py which saves this field."
+            )
+        lora_layers = lora_cfg["lora_layers"]
+        lora_r      = lora_cfg["lora_r"]
+        lora_alpha  = lora_cfg["lora_alpha"]
+        print(f"LoRA config from checkpoint: layers={lora_layers}, r={lora_r}, alpha={lora_alpha}")
 
-    inject_lora(model, lora_layers, lora_r, lora_alpha)
-    model.load_state_dict(ckpt["model_state_dict"])
-    print(f"Loaded checkpoint: {args.checkpoint} (epoch {ckpt['epoch']}, val_loss={ckpt['val_loss']:.4f})")
+        inject_lora(model, lora_layers, lora_r, lora_alpha)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"Loaded checkpoint: {args.checkpoint} (epoch {ckpt['epoch']}, val_loss={ckpt['val_loss']:.4f})")
 
     encoder = model.visual.to(device)
     for p in encoder.parameters():
@@ -469,8 +478,9 @@ def main(args: argparse.Namespace) -> None:
         [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
     )
     label_counts = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
-    # class_weights = (label_counts.sum() / (NUM_CLASSES * label_counts)).to(device)
+    class_weights = (label_counts.sum() / (NUM_CLASSES * label_counts)).sqrt().to(device)
     print(f"Class counts (train): { {IDX_TO_LABEL[i]: int(label_counts[i]) for i in range(NUM_CLASSES)} }")
+    print(f"Class weights (train): { {IDX_TO_LABEL[i]: float(class_weights[i]) for i in range(NUM_CLASSES)} }")
 
     val_emb_ds   = EmbeddingDataset(val_emb,   val_age,   val_sex,   val_lbl)
     test_emb_ds  = EmbeddingDataset(test_emb,  test_age,  test_sex,  test_lbl)
@@ -480,7 +490,7 @@ def main(args: argparse.Namespace) -> None:
 
     # --- MLP ---
     mlp = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim).to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # --- Output dir ---
