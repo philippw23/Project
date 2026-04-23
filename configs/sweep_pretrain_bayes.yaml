@@ -17,10 +17,6 @@ parameters:
     distribution: log_uniform_values
     min: 1e-5
     max: 1e-3
-  weight_decay:
-    distribution: log_uniform_values
-    min: 0.01
-    max: 0.3
   batch_size:
     values: [16, 32, 64]
 

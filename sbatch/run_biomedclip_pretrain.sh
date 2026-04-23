@@ -37,7 +37,7 @@ python $home_dir/Project/src/biomedclip_pretrain.py \
     --lora_r 8 \
     --lora_alpha 64 \
     --batch_size 32 \
-    --epochs 50 \
+    --epochs 100 \
     --lr 5e-5 \
     --downstream_train_frac 0.8 \
     --downstream_val_frac 0.1 \

@@ -436,20 +436,26 @@ def _load_all_samples(
     images_dir: Path,
     masks_dir: Path,
     english: bool = False,
-) -> list[tuple[Path, Path, str, str]]:
-    """Return a list of (image_path, mask_path, text, label) for all valid pairs.
+) -> tuple[list, list]:
+    """Build two independent sample pools with different requirements.
 
-    *label* is the malignancy class from column C (e.g. "benign", "malignant").
-    Samples without a malignancy label are skipped with a warning, because they
-    cannot be used in the stratified split.
+    Returns
+    -------
+    pretrain_cands : list of (image_path, mask_path, report)
+        Every row that has an image file and a non-empty report.
+        Label is not required — unlabeled images are valid pretrain samples.
+
+    downstream_cands : list of (image_path, mask_path, report_or_None, label)
+        Every row that has an image file, a malignancy label, and a parseable
+        age + sex entry.  Report is included when available, else None.
     """
 
-    # --- Load metadata: columns A (filename), C (malignancy), H (patid) ---
+    # --- Load metadata: A=filename, C=malignancy, E=age, F=sex, H=patid ---
     try:
         df = pd.read_excel(
             excel_path,
             sheet_name="internal_data_matched",
-            usecols=[0, 2, 7],    # A=filename, C=malignancy, H=patid
+            usecols=[0, 2, 4, 5, 7],  # A, C, E, F, H
             skiprows=1,
             header=0,
             dtype=str,
@@ -458,11 +464,13 @@ def _load_all_samples(
     except Exception as exc:
         raise RuntimeError(f"Cannot read Excel file '{excel_path}': {exc}") from exc
 
-    df.columns = ["filename", "malignancy", "patid"]
+    df.columns = ["filename", "malignancy", "age", "sex", "patid"]
     df = df.dropna(subset=["filename", "patid"])
-    df["filename"] = df["filename"].str.strip()
-    df["patid"] = df["patid"].str.strip()
+    df["filename"]   = df["filename"].str.strip()
+    df["patid"]      = df["patid"].str.strip()
     df["malignancy"] = df["malignancy"].fillna("").str.strip().str.lower()
+    df["age"]        = df["age"].fillna("")
+    df["sex"]        = df["sex"].fillna("")
 
     def _normalise_id(val: str) -> str:
         try:
@@ -489,38 +497,48 @@ def _load_all_samples(
         if text:
             report_lookup[pid] = text
 
-    # --- Match images, reports, and labels ---
-    samples: list[tuple[Path, Path, str, str]] = []
-    samples_no_report: list[tuple[Path, Path, str, str]] = []
-    skipped_no_image = 0
-    skipped_no_label = 0
+    # --- Build pools ---
+    pretrain_cands:    list[tuple[Path, Path, str]]             = []
+    downstream_cands:  list[tuple[Path, Path, str | None, str]] = []
+    skipped_no_image   = 0
+    skipped_no_age_sex = 0
 
     for _, row in df.iterrows():
-        stem = Path(row["filename"]).stem
-        patid = row["patid"]
-        label = row["malignancy"]
+        stem       = Path(row["filename"]).stem
+        patid      = row["patid"]
+        label      = row["malignancy"]
         image_path = images_dir / f"{stem}.png"
-        mask_path = masks_dir / f"{stem}.png"
+        mask_path  = masks_dir  / f"{stem}.png"
 
         if not image_path.exists():
             skipped_no_image += 1
             continue
-        if not label:
-            skipped_no_label += 1
-            continue
 
-        if patid in report_lookup:
-            samples.append((image_path, mask_path, report_lookup[patid], label))
-        else:
-            samples_no_report.append((image_path, mask_path, "", label))
+        report = report_lookup.get(patid) or None
+
+        # Pretrain candidate: image + report (label not required)
+        if report:
+            pretrain_cands.append((image_path, mask_path, report))
+
+        # Downstream candidate: image + label + valid age/sex
+        if label:
+            try:
+                float(row["age"])
+            except (ValueError, TypeError):
+                skipped_no_age_sex += 1
+                continue
+            if str(row["sex"]).strip().lower() not in ("m", "male", "1", "f", "female", "0"):
+                skipped_no_age_sex += 1
+                continue
+            downstream_cands.append((image_path, mask_path, report, label))
 
     print(
-        f"Dataset: {len(samples)} samples with report, "
-        f"{len(samples_no_report)} samples without report "
+        f"Dataset: {len(pretrain_cands)} pretrain candidates (image+report), "
+        f"{len(downstream_cands)} downstream candidates (image+label+age+sex) "
         f"(skipped: {skipped_no_image} missing images, "
-        f"{skipped_no_label} missing labels)"
+        f"{skipped_no_age_sex} missing/invalid age or sex)"
     )
-    return samples, samples_no_report
+    return pretrain_cands, downstream_cands
 
 
 class BoneTumorPairDataset(Dataset):
@@ -590,7 +608,7 @@ def build_stratified_splits(
     args: argparse.Namespace,
     run_dir: Path | None = None,
 ) -> tuple[list, list, list, list]:
-    """Load all samples and create one master stratified train/val/test split.
+    """Load all samples and create independent pretrain and downstream splits.
 
     Returns
     -------
@@ -598,30 +616,31 @@ def build_stratified_splits(
 
     Definitions
     -----------
-    - pretrain_samples:
-        Subset of the TRAIN split that has reports available.
-        These are the only samples allowed for VLM pretraining.
+    - pretrain_samples : list of (image_path, mask_path, report)
+        All report-bearing images EXCEPT those whose image path appears in
+        downstream_val or test.  No label required — unlabeled images are valid.
 
-    - downstream_train_samples:
-        Full TRAIN split (with and without reports).
+    - downstream_train_samples : list of (image_path, mask_path, report_or_None, label)
+        Downstream candidates not assigned to val or test.  May overlap with
+        pretrain_samples (same images can appear in both).
 
-    - downstream_val_samples:
-        Full VAL split (with and without reports).
+    - downstream_val_samples : list of (image_path, mask_path, report_or_None, label)
+        Held-out val split.  Images here are excluded from pretrain.
 
-    - test_samples:
-        Full TEST split (with and without reports).
+    - test_samples : list of (image_path, mask_path, report_or_None, label)
+        Final held-out test split.  Images here are excluded from pretrain.
 
     Notes
     -----
-    This avoids leakage because:
-    - test samples are never used in pretraining
-    - validation samples are not used for fitting
-    - pretraining is derived only from the training split
+    Leakage is prevented by:
+    - Downstream val/test images never appear in pretraining.
+    - Downstream train images may appear in pretrain (the encoder sees them
+      during contrastive learning, but without labels — no label leakage).
 
     The split manifest is written to:
     ``<out_dir>/biomedclip_pretrain/splits.json``
     """
-    samples_with_report, samples_no_report = _load_all_samples(
+    pretrain_cands, downstream_cands = _load_all_samples(
         excel_path=Path(args.excel),
         reports_path=Path(args.reports),
         images_dir=Path(args.images),
@@ -629,15 +648,17 @@ def build_stratified_splits(
         english=args.english,
     )
 
-    all_samples = samples_with_report + samples_no_report
-    if not all_samples:
+    if not downstream_cands:
         raise RuntimeError(
-            "No valid labeled tuples found. "
-            "Check --excel, --reports, --images paths."
+            "No downstream candidates found (need image + label + age/sex). "
+            "Check --excel, --images paths."
+        )
+    if not pretrain_cands:
+        raise RuntimeError(
+            "No pretrain candidates found (need image + report). "
+            "Check --reports path."
         )
 
-    # We no longer treat pretraining as a separate top-level split.
-    # Pretraining will be derived from the training split only.
     total = args.downstream_train_frac + args.downstream_val_frac + args.test_frac
     if abs(total - 1.0) > 1e-4:
         raise ValueError(
@@ -646,56 +667,61 @@ def build_stratified_splits(
             f"got {total:.4f}."
         )
 
-    if hasattr(args, "pretrain_frac") and args.pretrain_frac not in (0, 0.0):
-        print(
-            "[Warning] --pretrain_frac is ignored. "
-            "Pretraining samples are derived from the training split only."
-        )
+    # Separate downstream candidates by report availability.
+    # No-report samples are useless for pretraining, so they should fill
+    # val/test first — maximising the pretrain pool.
+    no_report  = [s for s in downstream_cands if not (s[2] and str(s[2]).strip())]
+    has_report = [s for s in downstream_cands if s[2] and str(s[2]).strip()]
 
-    labels_all = [s[3] for s in all_samples]
+    n_total       = len(downstream_cands)
+    n_test        = max(1, round(n_total * args.test_frac))
+    n_val         = max(1, round(n_total * args.downstream_val_frac))
+    n_from_no_rep = min(len(no_report), n_val + n_test)
+    n_supplement  = (n_val + n_test) - n_from_no_rep
 
-    # Step 1: hold out test set from the full labeled cohort
-    train_val, test = _stratified_split_two(
-        all_samples,
-        labels_all,
-        args.test_frac,
-        args.seed,
-    )
+    # Step 1: assign no-report samples to val/test pool (all or stratified subset)
+    if n_from_no_rep == len(no_report):
+        no_rep_pool, no_rep_train = no_report, []
+    else:
+        frac = n_from_no_rep / len(no_report)
+        labels_nr = [s[3] for s in no_report]
+        no_rep_train, no_rep_pool = _stratified_split_two(no_report, labels_nr, frac, args.seed)
 
-    # Step 2: split remaining data into train and val
-    labels_train_val = [s[3] for s in train_val]
-    val_frac_adj = args.downstream_val_frac / (1.0 - args.test_frac)
-    downstream_train, downstream_val = _stratified_split_two(
-        train_val,
-        labels_train_val,
-        val_frac_adj,
-        args.seed,
-    )
+    # Step 2: supplement from has-report samples only if no-report pool was insufficient
+    if n_supplement > 0 and has_report:
+        frac = n_supplement / len(has_report)
+        labels_hr = [s[3] for s in has_report]
+        has_rep_train, has_rep_pool = _stratified_split_two(has_report, labels_hr, frac, args.seed)
+    else:
+        has_rep_pool, has_rep_train = [], has_report
 
-    # Step 3: all report-bearing samples are used for pretraining.
-    # The downstream task never uses reports, so using val/test image-report pairs
-    # for contrastive pretraining does not leak label information.
-    pretrain = list(samples_with_report)
+    # Step 3: split the combined val+test pool (stratified) into val and test
+    val_test_pool = no_rep_pool + has_rep_pool
+    labels_vt     = [s[3] for s in val_test_pool]
+    test_frac_of_pool = n_test / len(val_test_pool)
+    downstream_val, test = _stratified_split_two(val_test_pool, labels_vt, test_frac_of_pool, args.seed)
+
+    downstream_train = no_rep_train + has_rep_train
+
+    # Step 3: pretrain = all report-bearing images except val/test images.
+    # Downstream train images may appear in pretrain — the encoder sees them
+    # without labels, which is not label leakage.
+    excluded_images = {s[0] for s in downstream_val} | {s[0] for s in test}
+    pretrain = [s for s in pretrain_cands if s[0] not in excluded_images]
 
     if not pretrain:
         raise RuntimeError(
-            "No report-bearing samples found. Cannot run pretraining."
+            "Pretrain set is empty after excluding val/test images."
         )
 
-    # --- Print class distributions ---
-    def _dist(split: list) -> dict[str, int]:
-        from collections import Counter
-        return dict(Counter(s[3] for s in split))
+    # --- Print statistics ---
+    from collections import Counter
 
-    def _count_reports(split: list) -> int:
-        return sum(1 for s in split if s[2] is not None and str(s[2]).strip() != "")
+    def _dist(split: list, label_idx: int) -> dict[str, int]:
+        return dict(Counter(s[label_idx] for s in split))
 
-    splits_info = {
-        "pretrain": pretrain,
-        "downstream_train": downstream_train,
-        "downstream_val": downstream_val,
-        "test": test,
-    }
+    def _count_reports(split: list, report_idx: int) -> int:
+        return sum(1 for s in split if s[report_idx] is not None and str(s[report_idx]).strip())
 
     downstream_splits = {
         "downstream_train": downstream_train,
@@ -704,18 +730,24 @@ def build_stratified_splits(
     }
     print("\nDownstream split statistics (mutually exclusive):")
     for name, split in downstream_splits.items():
-        dist = _dist(split)
+        dist = _dist(split, label_idx=3)
         dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(dist.items()))
-        n_reports = _count_reports(split)
+        n_reports = _count_reports(split, report_idx=2)
         print(
             f"  {name:<20} {len(split):>4} samples"
             f"  | reports: {n_reports:>4}"
             f"  | {dist_str}"
         )
 
-    dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(_dist(pretrain).items()))
-    print(f"\nPretrain set (all report-bearing samples, overlaps with all splits above):")
-    print(f"  {'pretrain':<20} {len(pretrain):>4} samples  | {dist_str}")
+    n_pretrain_with_label = sum(
+        1 for s in pretrain if s[0] in {ds[0] for ds in downstream_train}
+    )
+    print(
+        f"\nPretrain set ({len(pretrain)} samples, val/test excluded):"
+        f"\n  {len(pretrain_cands) - len(pretrain)} val/test images removed"
+        f"\n  {n_pretrain_with_label} samples overlap with downstream_train"
+        f"\n  {len(pretrain) - n_pretrain_with_label} are unlabeled (report only)"
+    )
     print()
 
     # --- Save split manifest to disk ---
@@ -723,14 +755,16 @@ def build_stratified_splits(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     manifest: dict[str, list] = {}
-    for name, split in splits_info.items():
+
+    # Pretrain entries are 3-tuples (image, mask, report) — no label field
+    manifest["pretrain"] = [
+        {"image": str(s[0]), "mask": str(s[1]), "report": s[2]}
+        for s in pretrain
+    ]
+    # Downstream entries are 4-tuples (image, mask, report, label)
+    for name, split in downstream_splits.items():
         manifest[name] = [
-            {
-                "image": str(s[0]),
-                "mask": str(s[1]) if s[1] is not None else None,
-                "report": s[2],
-                "label": s[3],
-            }
+            {"image": str(s[0]), "mask": str(s[1]), "report": s[2], "label": s[3]}
             for s in split
         ]
 
@@ -757,8 +791,8 @@ def build_pretrain_datasets(
     used only to track contrastive loss during pretraining — it is not a
     downstream evaluation split.
     """
-    # Strip labels — not needed for contrastive pretraining
-    unlabeled = [(s[0], s[1], s[2]) for s in pretrain_samples]
+    # pretrain_samples are already 3-tuples (image, mask, report)
+    unlabeled = list(pretrain_samples)
 
     rng = random.Random(seed)
     indices = list(range(len(unlabeled)))
@@ -894,6 +928,8 @@ def evaluate_retrieval(
     """Compute image-text retrieval metrics on the downstream val set.
 
     Only samples with non-empty reports are used (need paired image+text).
+    Metrics are computed per mini-batch and averaged, matching how val loss
+    is computed, so the two are directly comparable.
     Returns I2T/T2I Recall@1, Recall@5, and median rank.
     """
     paired = [(s[0], s[1], s[2]) for s in val_samples if s[2] and str(s[2]).strip()]
@@ -904,39 +940,47 @@ def evaluate_retrieval(
     ds = BoneTumorPairDataset(paired, preprocess_val, tokenizer, use_mask)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    all_img_feats, all_txt_feats = [], []
+    i2t_r1_list, i2t_r5_list, i2t_med_list = [], [], []
+    t2i_r1_list, t2i_r5_list, t2i_med_list = [], [], []
+    n_pairs = 0
+
     for batch in loader:
         images = batch["image"].to(device)
         texts = batch["text"].to(device)
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             img_feat = F.normalize(model.encode_image(images), dim=-1)
             txt_feat = F.normalize(model.encode_text(texts), dim=-1)
-        all_img_feats.append(img_feat.float())
-        all_txt_feats.append(txt_feat.float())
 
-    img_embs = torch.cat(all_img_feats, dim=0)  # (N, D)
-    txt_embs = torch.cat(all_txt_feats, dim=0)  # (N, D)
-    sim = img_embs @ txt_embs.T                  # (N, N)
-    n = sim.shape[0]
+        sim = img_feat.float() @ txt_feat.float().T  # (B, B)
+        b = sim.shape[0]
+        n_pairs += b
 
-    def _metrics(sim_matrix: torch.Tensor) -> tuple[float, float, float]:
-        ranks = np.array([
-            int((sim_matrix[i] > sim_matrix[i, i]).sum().item()) + 1
-            for i in range(n)
-        ])
-        return (ranks <= 1).mean(), (ranks <= 5).mean(), float(np.median(ranks))
+        def _metrics(sim_matrix: torch.Tensor) -> tuple[float, float, float]:
+            ranks = np.array([
+                int((sim_matrix[i] > sim_matrix[i, i]).sum().item()) + 1
+                for i in range(b)
+            ])
+            return (ranks <= 1).mean(), (ranks <= 5).mean(), float(np.median(ranks))
 
-    i2t_r1, i2t_r5, i2t_med = _metrics(sim)
-    t2i_r1, t2i_r5, t2i_med = _metrics(sim.T)
+        i2t_r1, i2t_r5, i2t_med = _metrics(sim)
+        t2i_r1, t2i_r5, t2i_med = _metrics(sim.T)
+
+        i2t_r1_list.append(i2t_r1)
+        i2t_r5_list.append(i2t_r5)
+        i2t_med_list.append(i2t_med)
+        t2i_r1_list.append(t2i_r1)
+        t2i_r5_list.append(t2i_r5)
+        t2i_med_list.append(t2i_med)
 
     return {
-        "retrieval/i2t_r1":          i2t_r1,
-        "retrieval/i2t_r5":          i2t_r5,
-        "retrieval/i2t_median_rank": i2t_med,
-        "retrieval/t2i_r1":          t2i_r1,
-        "retrieval/t2i_r5":          t2i_r5,
-        "retrieval/t2i_median_rank": t2i_med,
-        "retrieval/n_pairs":         float(n),
+        "retrieval/i2t_r1":          float(np.mean(i2t_r1_list)),
+        "retrieval/i2t_r5":          float(np.mean(i2t_r5_list)),
+        "retrieval/i2t_median_rank": float(np.mean(i2t_med_list)),
+        "retrieval/t2i_r1":          float(np.mean(t2i_r1_list)),
+        "retrieval/t2i_r5":          float(np.mean(t2i_r5_list)),
+        "retrieval/t2i_median_rank": float(np.mean(t2i_med_list)),
+        "retrieval/n_pairs":         float(n_pairs),
+        "retrieval/batch_size":      float(batch_size),
     }
 
 
@@ -1039,7 +1083,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=8,
+        default=32,
         help="Training batch size (default: %(default)s)",
     )
     parser.add_argument(
@@ -1051,8 +1095,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.5e-4,
+        default=5e-4,
         help="Peak learning rate for AdamW (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.2,
+        help="AdamW weight decay for non-norm parameters (default: %(default)s)",
     )
     parser.add_argument(
         "--pretrain_frac",
@@ -1115,7 +1165,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     """Overwrite args with values from wandb.config when running as sweep agent."""
     cfg = wandb.config
-    for key in ("lora_layers", "lora_r", "lora_alpha", "lr", "batch_size"):
+    for key in ("lora_layers", "lora_r", "lora_alpha", "lr", "weight_decay", "batch_size"):
         if key in cfg:
             setattr(args, key, cfg[key])
 
@@ -1204,10 +1254,12 @@ def main(args: argparse.Namespace) -> None:
     trainable_params = decay_params + no_decay_params
     optimizer = torch.optim.AdamW(
         [
-            {"params": decay_params, "weight_decay": 0.01},
+            {"params": decay_params, "weight_decay": args.weight_decay},
             {"params": no_decay_params, "weight_decay": 0.0},
         ],
         lr=args.lr,
+        betas=(0.9, 0.98),
+        eps=1e-6,
     )
 
     warmup_epochs = max(1, args.epochs // 5)
@@ -1230,6 +1282,7 @@ def main(args: argparse.Namespace) -> None:
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
                 "lr": args.lr,
+                "weight_decay": args.weight_decay,
                 "seed": args.seed,
                 "use_mask": args.use_mask,
             },
@@ -1239,6 +1292,8 @@ def main(args: argparse.Namespace) -> None:
 
     # --- Training loop ---
     best_val_loss = float("inf")
+    best_mean_r1 = 0.0
+    lora_config = {"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha}
     print(f"\nStarting training for {args.epochs} epochs (warmup: {warmup_epochs})\n")
 
     for epoch in range(1, args.epochs + 1):
@@ -1255,10 +1310,13 @@ def main(args: argparse.Namespace) -> None:
             f"logit_scale={logit_scale:.3f}"
         )
         retrieval = evaluate_retrieval(
-            model, downstream_val, preprocess_val, tokenizer, device,
+            model, val_ds.samples, preprocess_val, tokenizer, device,
             args.use_mask, batch_size=args.batch_size,
         )
         if retrieval:
+            retrieval["retrieval/mean_r1"] = (
+                retrieval["retrieval/i2t_r1"] + retrieval["retrieval/t2i_r1"]
+            ) / 2
             print(
                 f"           | I2T R@1={retrieval['retrieval/i2t_r1']:.1%}"
                 f"  R@5={retrieval['retrieval/i2t_r5']:.1%}"
@@ -1266,7 +1324,7 @@ def main(args: argparse.Namespace) -> None:
                 f" | T2I R@1={retrieval['retrieval/t2i_r1']:.1%}"
                 f"  R@5={retrieval['retrieval/t2i_r5']:.1%}"
                 f"  med={retrieval['retrieval/t2i_median_rank']:.0f}"
-                f" | n={int(retrieval['retrieval/n_pairs'])}"
+                f" | avg/bs={int(retrieval['retrieval/batch_size'])} n={int(retrieval['retrieval/n_pairs'])}"
             )
         if use_wandb:
             log_dict = {
@@ -1282,16 +1340,25 @@ def main(args: argparse.Namespace) -> None:
             best_val_loss = val_loss
             save_checkpoint(
                 model, optimizer, epoch, val_loss,
-                run_dir / "best_checkpoint.pt",
-                lora_config={"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha},
+                run_dir / "best_val_checkpoint.pt",
+                lora_config=lora_config,
+            )
+
+        mean_r1 = retrieval.get("retrieval/mean_r1", 0.0)
+        if mean_r1 > best_mean_r1:
+            best_mean_r1 = mean_r1
+            save_checkpoint(
+                model, optimizer, epoch, val_loss,
+                run_dir / "best_r1_checkpoint.pt",
+                lora_config=lora_config,
             )
 
     save_checkpoint(
         model, optimizer, args.epochs, val_loss,
         run_dir / "final_checkpoint.pt",
-        lora_config={"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha},
+        lora_config=lora_config,
     )
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f} | Best mean R@1: {best_mean_r1:.1%}")
     print(f"Checkpoints saved to: {run_dir}")
     if use_wandb:
         wandb.finish()

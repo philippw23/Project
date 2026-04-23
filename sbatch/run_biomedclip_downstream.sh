@@ -27,7 +27,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # python $home_dir/Project/src/biomedclip_downstream.py \
 #     --freezed_biomedclip \
-#     --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260423_091436/splits.json \
+#     --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260423_151036/splits.json \
 #     --excel      $home_dir/Project/data/metadata.xlsx \
 #     --use_mask \
 #     --epochs 50 \
@@ -43,8 +43,8 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 
 python $home_dir/Project/src/biomedclip_downstream.py \
-    --checkpoint $home_dir/Project/results/biomedclip_pretrain/run_20260423_091436/final_checkpoint.pt \
-    --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260423_091436/splits.json \
+    --checkpoint $home_dir/Project/results/biomedclip_pretrain/run_20260423_151036/final_checkpoint.pt \
+    --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260423_151036/splits.json \
     --excel      $home_dir/Project/data/metadata.xlsx \
     --use_mask \
     --epochs 50 \
