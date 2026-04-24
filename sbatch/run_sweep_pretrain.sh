@@ -9,10 +9,10 @@
 
 # Usage:
 #   1. Create sweep and get ID:
-#        wandb sweep configs/sweep_pretrain.yaml
+#        wandb sweep src/biomedclip/train/sweep_pretrain.yaml
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_pretrain.sh
-SWEEP_ID="philipp-wiese/biomedclip-downstream/apwxsuus"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
+SWEEP_ID="philipp-wiese/biomedclip-pretrain/d15ebbaw"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
 
 if [ -z "$SWEEP_ID" ]; then
     echo "ERROR: Set SWEEP_ID in this script before submitting."
@@ -37,4 +37,4 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
-python -m wandb agent --count 15 $SWEEP_ID
+python -m wandb agent $SWEEP_ID

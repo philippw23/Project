@@ -9,7 +9,7 @@
 
 # Usage:
 #   1. Create sweep and get ID:
-#        wandb sweep configs/sweep_downstream.yaml
+#        wandb sweep src/biomedclip/eval/sweep_downstream.yaml
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_downstream.sh
 SWEEP_ID="philipp-wiese/biomedclip-downstream/idv7z14e"   # e.g. "philipp-wiese/philipp-wiese/abc12345"

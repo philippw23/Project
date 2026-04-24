@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import warnings
+
+import torch
+import torch.nn as nn
+from torch.nn.utils import parametrize
+
+
+class LoRALinear(nn.Module):
+    """Wraps a frozen nn.Linear with a low-rank adaptation.
+
+    output = W(x) + (x @ A^T @ B^T) * (alpha / r)
+
+    A is initialised with small Gaussian noise; B is initialised to zero so
+    that the LoRA contribution is zero at the start of training.
+    """
+
+    def __init__(self, linear: nn.Linear, r: int, alpha: float) -> None:
+        super().__init__()
+        self.linear = linear
+        self.r      = r
+        self.scale  = alpha / r
+
+        in_features  = linear.in_features
+        out_features = linear.out_features
+        device = linear.weight.device
+        dtype  = linear.weight.dtype
+
+        self.lora_A = nn.Parameter(
+            torch.randn(r, in_features, device=device, dtype=dtype) * 0.01
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(out_features, r, device=device, dtype=dtype)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x) + (x @ self.lora_A.t() @ self.lora_B.t()) * self.scale
+
+
+class LoRAFusedQKV(nn.Module):
+    """Low-rank parametrization for fused QKV attention weights.
+
+    PyTorch MultiheadAttention stores Q, K, and V in one parameter named
+    ``in_proj_weight`` with shape (3 * d_model, d_model).  Registering this
+    parametrization makes the effective weight:
+
+        W_qkv + (B @ A) * (alpha / r)
+
+    while keeping the original fused QKV weight frozen.
+    """
+
+    def __init__(self, weight: torch.Tensor, r: int, alpha: float) -> None:
+        super().__init__()
+        out_features, in_features = weight.shape
+        self.r     = r
+        self.scale = alpha / r
+        self.lora_A = nn.Parameter(
+            torch.randn(r, in_features, device=weight.device, dtype=weight.dtype) * 0.01
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(out_features, r, device=weight.device, dtype=weight.dtype)
+        )
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        return weight + (self.lora_B @ self.lora_A).view_as(weight) * self.scale
+
+
+def inject_lora(model: nn.Module, lora_layers: int, r: int, alpha: float) -> None:
+    """Freeze the whole model, then inject LoRA into the last N ViT blocks.
+
+    BiomedCLIP uses a TimmModel wrapper, so the block path is:
+        model.visual.trunk.blocks[i]
+
+    Targets per block (timm ViT naming):
+        block.attn.qkv   (fused QKV Linear: dim -> 3 * dim)
+        block.attn.proj  (output projection: dim -> dim)
+        block.mlp.fc1    (dim -> mlp_width)
+        block.mlp.fc2    (mlp_width -> dim)
+
+    logit_scale is unfrozen so the contrastive temperature can be learned.
+    """
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    blocks = model.visual.trunk.blocks
+    n_blocks = len(blocks)
+    effective_layers = min(lora_layers, n_blocks)
+    if effective_layers < lora_layers:
+        warnings.warn(
+            f"--lora_layers={lora_layers} exceeds total ViT blocks ({n_blocks}). "
+            f"Applying LoRA to all {n_blocks} blocks.",
+            stacklevel=2,
+        )
+    target_indices = range(n_blocks - effective_layers, n_blocks)
+
+    for i in target_indices:
+        block = blocks[i]
+        block.attn.qkv  = LoRALinear(block.attn.qkv,  r, alpha)
+        block.attn.proj = LoRALinear(block.attn.proj, r, alpha)
+        block.mlp.fc1   = LoRALinear(block.mlp.fc1,   r, alpha)
+        block.mlp.fc2   = LoRALinear(block.mlp.fc2,   r, alpha)
+
+    model.logit_scale.requires_grad_(True)
+
+
+def count_trainable_params(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)

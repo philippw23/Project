@@ -10,7 +10,6 @@ Usage:
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +17,7 @@ from PIL import Image
 from tqdm import tqdm
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(Path(__file__).parent))
-from biomedclip_pretrain import crop_around_mask
+from biomedclip.data.transforms import crop_around_mask
 
 
 def parse_args() -> argparse.Namespace:
