@@ -27,7 +27,6 @@ import open_clip
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 try:
@@ -51,7 +50,6 @@ from biomedclip.data.splits import build_stratified_splits, build_pretrain_datas
 from biomedclip.models.lora import inject_lora, count_trainable_params
 from biomedclip.loss.contrastive import clip_loss
 from biomedclip.eval.retrieval import evaluate, evaluate_retrieval
-from biomedclip import distributed
 
 
 def make_scheduler(
@@ -59,9 +57,16 @@ def make_scheduler(
     warmup_epochs: int,
     total_epochs: int,
 ) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warm-up followed by cosine annealing to zero.
+
+    During the first warmup_epochs epochs the lr rises linearly from 0 to peak.
+    Afterwards it follows a cosine curve that reaches 0 at epoch total_epochs.
+    """
     def lr_lambda(epoch: int) -> float:
         if epoch < warmup_epochs:
+            # Linearly ramp up: fraction of warmup complete.
             return float(epoch + 1) / max(1, warmup_epochs)
+        # Cosine decay from 1.0 → 0.0 over the remaining epochs.
         progress = float(epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
@@ -70,7 +75,6 @@ def make_scheduler(
 
 def train_one_epoch(
     model: nn.Module,
-    raw_model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler: torch.cuda.amp.GradScaler,
@@ -78,27 +82,34 @@ def train_one_epoch(
     trainable_params: list,
     max_grad_norm: float = 1.0,
 ) -> float:
+    """Run one training epoch and return the average batch loss.
+
+    open_clip exposes encode_image() and encode_text() as named methods rather
+    than a single forward(images, texts), so the training loop calls those
+    methods directly on the model.
+    """
     model.train()
     total_loss = 0.0
 
+    # Disable progress bar when stdout is not a terminal (e.g. SLURM log file).
     pbar = tqdm(loader, desc="  train", leave=False, disable=not sys.stdout.isatty())
     for batch in pbar:
         images = batch["image"].to(device)
         texts  = batch["text"].to(device)
 
         optimizer.zero_grad()
-        with torch.autocast(device_type=device.type, dtype=torch.float16):
-            image_feat = raw_model.encode_image(images)
-            text_feat  = raw_model.encode_text(texts)
-            loss       = clip_loss(
-                image_feat,
-                text_feat,
-                raw_model.logit_scale,
-                gather_distributed=distributed.is_enabled(),
-            )
 
+        # Mixed-precision forward: compute activations in float16 to save memory.
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            image_feat = model.encode_image(images)   # (B, embed_dim)
+            text_feat  = model.encode_text(texts)     # (B, embed_dim)
+            loss       = clip_loss(image_feat, text_feat, model.logit_scale)
+
+        # GradScaler multiplies the loss before backward to prevent float16 underflow,
+        # then divides the gradients back before the optimizer step.
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
+        # Gradient clipping prevents occasional large updates from destabilising training.
         torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
@@ -146,7 +157,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Peak learning rate for AdamW (default: %(default)s)")
     parser.add_argument("--weight_decay", type=float, default=0.2,
                         help="AdamW weight decay for non-norm parameters (default: %(default)s)")
-    parser.add_argument("--patience",    type=int,   default=10,
+    parser.add_argument("--patience",    type=int,   default=20,
                         help="Early stopping patience in epochs based on mean R@1 (0 to disable, default: %(default)s)")
     parser.add_argument("--downstream_train_frac", type=float, default=0.8,
                         help="Fraction of downstream data for classifier training (default: %(default)s)")
@@ -166,9 +177,6 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="W&B team/entity name (default: personal account)")
     parser.add_argument("--sweep", action="store_true",
                         help="Run as wandb sweep agent (hyperparams come from wandb.config)")
-    parser.add_argument("--distributed", action="store_true",
-                        help="Enable multi-GPU training via torch.distributed "
-                             "(launch with: torchrun --nproc_per_node=N src/biomedclip_pretrain.py --distributed ...)")
     return parser.parse_args(argv)
 
 
@@ -178,81 +186,81 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
     for key in ("lora_layers", "lora_r", "lr", "weight_decay", "batch_size"):
         if key in cfg:
             setattr(args, key, cfg[key])
+    # Keep alpha proportional to rank (a common LoRA convention).
     args.lora_alpha = 2.0 * args.lora_r
 
 
 def main(args: argparse.Namespace) -> None:
-    if args.distributed:
-        distributed.enable()
-
-    random.seed(args.seed + distributed.get_global_rank())
-    np.random.seed(args.seed + distributed.get_global_rank())
-    torch.manual_seed(args.seed + distributed.get_global_rank())
+    # ── Reproducibility ───────────────────────────────────────────────────────
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed + distributed.get_global_rank())
+        torch.cuda.manual_seed_all(args.seed)
 
-    local_rank = distributed.get_local_rank()
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    if distributed.is_main_process():
-        print(f"Device: {device}  |  world_size={distributed.get_global_size()}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
 
+    # ── Optional architecture inspection ──────────────────────────────────────
     if args.print_architecture:
-        if distributed.is_main_process():
-            print_biomedclip_architecture(
-                model_tag=MODEL_TAG,
-                device=device,
-                include_full_model=args.print_full_model,
-            )
+        print_biomedclip_architecture(
+            model_tag=MODEL_TAG,
+            device=device,
+            include_full_model=args.print_full_model,
+        )
         return
 
-    if distributed.is_main_process():
-        print(f"Loading model: {MODEL_TAG}")
+    # ── Model loading ─────────────────────────────────────────────────────────
+    print(f"Loading model: {MODEL_TAG}")
+    # open_clip returns (model, train_preprocess, val_preprocess).
+    # We override train_preprocess with a custom augmentation pipeline below.
     model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
     tokenizer = open_clip.get_tokenizer(MODEL_TAG)
     model = model.to(device)
+    # Adds random horizontal flip, colour jitter, and random resized crop on top of val_preprocess.
     preprocess_train = build_train_transform(preprocess_val)
 
+    # Freeze all parameters, then inject trainable LoRA branches into the last
+    # lora_layers ViT blocks and unfreeze logit_scale and visual.proj.
     inject_lora(model, args.lora_layers, args.lora_r, args.lora_alpha)
-    if distributed.is_main_process():
-        n_trainable = count_trainable_params(model)
-        n_total     = sum(p.numel() for p in model.parameters())
-        print(
-            f"LoRA injected into last {args.lora_layers} ViT blocks "
-            f"(r={args.lora_r}, alpha={args.lora_alpha})"
-        )
-        print(f"Trainable params: {n_trainable:,} / {n_total:,} ({100 * n_trainable / n_total:.2f} %)")
+    n_trainable = count_trainable_params(model)
+    n_total     = sum(p.numel() for p in model.parameters())
+    print(
+        f"LoRA injected into last {args.lora_layers} ViT blocks "
+        f"(r={args.lora_r}, alpha={args.lora_alpha})"
+    )
+    print(f"Trainable params: {n_trainable:,} / {n_total:,} ({100 * n_trainable / n_total:.2f} %)")
 
-    raw_model = model
-    if args.distributed:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
-        raw_model = model.module
-
+    # ── Output directory ──────────────────────────────────────────────────────
     run_dir = Path(args.out_dir) / "biomedclip_pretrain" / datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    if distributed.is_main_process():
-        run_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Run directory: {run_dir}")
-    distributed.synchronize()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run directory: {run_dir}")
 
-    pretrain_samples, _, downstream_val, _ = build_stratified_splits(args, run_dir=run_dir)
+    # ── Data splits and datasets ───────────────────────────────────────────────
+    # Stratified split by malignancy label; splits.json is written to run_dir.
+    pretrain_samples, _, _, _ = build_stratified_splits(args, run_dir=run_dir)
 
+    # train_ds applies preprocess_train (with augmentations); val_ds uses preprocess_val.
     train_ds, val_ds = build_pretrain_datasets(
         pretrain_samples, preprocess_train, preprocess_val, tokenizer, args.use_mask, args.seed
     )
 
     use_pin_memory = device.type == "cuda"
-    train_sampler = DistributedSampler(train_ds, shuffle=True) if args.distributed else None
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
+        shuffle=True,
         num_workers=4,
-        pin_memory=use_pin_memory, drop_last=len(train_ds) > args.batch_size,
+        pin_memory=use_pin_memory,
+        drop_last=len(train_ds) > args.batch_size,  # discard a tiny last batch
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4,
         pin_memory=use_pin_memory,
     )
 
+    # ── Optimizer ─────────────────────────────────────────────────────────────
+    # Norm and bias parameters are excluded from weight decay because they
+    # act as scale/shift terms and should not be penalised toward zero.
     no_decay_suffixes = ("bias", "norm.weight", "norm.bias", "ln_1.weight", "ln_1.bias",
                          "ln_2.weight", "ln_2.bias", "ln_pre.weight", "ln_pre.bias",
                          "ln_post.weight", "ln_post.bias")
@@ -271,16 +279,19 @@ def main(args: argparse.Namespace) -> None:
             {"params": no_decay_params, "weight_decay": 0.0},
         ],
         lr=args.lr,
-        betas=(0.9, 0.98),
+        betas=(0.9, 0.98),  # standard CLIP betas
         eps=1e-6,
     )
 
+    # Warm-up for the first 20 % of epochs, then cosine decay to 0.
     warmup_epochs = max(1, args.epochs // 5)
     scheduler     = make_scheduler(optimizer, warmup_epochs, args.epochs)
+    # GradScaler prevents float16 gradient underflow during mixed-precision training.
     scaler        = torch.amp.GradScaler("cuda") if device.type == "cuda" else torch.amp.GradScaler("cpu")
 
-    use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE and distributed.is_main_process()
-    if (args.wandb or args.sweep) and not WANDB_AVAILABLE and distributed.is_main_process():
+    # ── W&B initialisation ────────────────────────────────────────────────────
+    use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
+    if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
         warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
     if use_wandb:
         wandb.init(
@@ -300,83 +311,82 @@ def main(args: argparse.Namespace) -> None:
             },
         )
         if args.sweep:
+            # Overwrite CLI args with sweep-agent-supplied hyperparameters.
             _apply_sweep_config(args)
 
+    # ── Training loop ─────────────────────────────────────────────────────────
     best_val_loss     = float("inf")
-    best_mean_r1      = 0.0
-    epochs_no_improve = 0
+    best_mean_r1      = 0.0          # average of I2T R@1 and T2I R@1
+    epochs_no_improve = 0            # consecutive epochs without R@1 improvement
     lora_config = {"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha}
-    stop_signal = torch.zeros(1, device=device)
-    if distributed.is_main_process():
-        print(f"\nStarting training for {args.epochs} epochs (warmup: {warmup_epochs})\n")
+
+    print(f"\nStarting training for {args.epochs} epochs (warmup: {warmup_epochs})\n")
 
     for epoch in range(1, args.epochs + 1):
-        if train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-        train_loss = train_one_epoch(model, raw_model, train_loader, optimizer, scaler, device, trainable_params)
-        val_loss   = evaluate(raw_model, val_loader, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, trainable_params)
+        # evaluate() computes the symmetric CLIP val loss without gradient updates.
+        val_loss   = evaluate(model, val_loader, device)
         scheduler.step()
 
-        if distributed.is_main_process():
-            lr_current  = scheduler.get_last_lr()[0]
-            logit_scale = raw_model.logit_scale.item()
+        lr_current  = scheduler.get_last_lr()[0]
+        logit_scale = model.logit_scale.item()
+        print(
+            f"Epoch {epoch:03d}/{args.epochs} | "
+            f"train={train_loss:.4f} | val={val_loss:.4f} | "
+            f"lr={lr_current:.2e} | logit_scale={logit_scale:.3f}"
+        )
+
+        # Retrieval evaluation: R@1, R@5, median rank for I→T and T→I directions.
+        retrieval = evaluate_retrieval(
+            model, val_ds.samples, preprocess_val, tokenizer, device,
+            args.use_mask, batch_size=args.batch_size,
+        ) or {}
+        if retrieval:
+            # mean_r1 averages both retrieval directions as a single summary metric.
+            retrieval["retrieval/mean_r1"] = (
+                retrieval["retrieval/i2t_r1"] + retrieval["retrieval/t2i_r1"]
+            ) / 2
             print(
-                f"Epoch {epoch:03d}/{args.epochs} | "
-                f"train={train_loss:.4f} | val={val_loss:.4f} | "
-                f"lr={lr_current:.2e} | logit_scale={logit_scale:.3f}"
+                f"           | I2T R@1={retrieval['retrieval/i2t_r1']:.1%}"
+                f"  R@5={retrieval['retrieval/i2t_r5']:.1%}"
+                f"  med={retrieval['retrieval/i2t_median_rank']:.0f}"
+                f" | T2I R@1={retrieval['retrieval/t2i_r1']:.1%}"
+                f"  R@5={retrieval['retrieval/t2i_r5']:.1%}"
+                f"  med={retrieval['retrieval/t2i_median_rank']:.0f}"
+                f" | avg/bs={int(retrieval['retrieval/batch_size'])} n={int(retrieval['retrieval/n_pairs'])}"
             )
-            retrieval = evaluate_retrieval(
-                raw_model, val_ds.samples, preprocess_val, tokenizer, device,
-                args.use_mask, batch_size=args.batch_size,
-            )
-            if retrieval:
-                retrieval["retrieval/mean_r1"] = (
-                    retrieval["retrieval/i2t_r1"] + retrieval["retrieval/t2i_r1"]
-                ) / 2
-                print(
-                    f"           | I2T R@1={retrieval['retrieval/i2t_r1']:.1%}"
-                    f"  R@5={retrieval['retrieval/i2t_r5']:.1%}"
-                    f"  med={retrieval['retrieval/i2t_median_rank']:.0f}"
-                    f" | T2I R@1={retrieval['retrieval/t2i_r1']:.1%}"
-                    f"  R@5={retrieval['retrieval/t2i_r5']:.1%}"
-                    f"  med={retrieval['retrieval/t2i_median_rank']:.0f}"
-                    f" | avg/bs={int(retrieval['retrieval/batch_size'])} n={int(retrieval['retrieval/n_pairs'])}"
-                )
-            if use_wandb:
-                log_dict = {
-                    "train/loss": train_loss, "val/loss": val_loss,
-                    "train/lr": lr_current,   "train/logit_scale": logit_scale,
-                }
-                log_dict.update(retrieval)
-                wandb.log(log_dict, step=epoch)
+        if use_wandb:
+            log_dict = {
+                "train/loss": train_loss, "val/loss": val_loss,
+                "train/lr": lr_current,   "train/logit_scale": logit_scale,
+            }
+            log_dict.update(retrieval)
+            wandb.log(log_dict, step=epoch)
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                save_checkpoint(raw_model, optimizer, epoch, val_loss,
-                                run_dir / "best_val_checkpoint.pt", lora_config=lora_config)
+        # Save a checkpoint whenever validation loss reaches a new minimum.
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(model, optimizer, epoch, val_loss,
+                            run_dir / "best_val_checkpoint.pt", lora_config=lora_config)
 
-            mean_r1 = retrieval.get("retrieval/mean_r1", 0.0)
-            if mean_r1 > best_mean_r1:
-                best_mean_r1      = mean_r1
-                epochs_no_improve = 0
-                save_checkpoint(raw_model, optimizer, epoch, val_loss,
-                                run_dir / "best_r1_checkpoint.pt", lora_config=lora_config)
-            else:
-                epochs_no_improve += 1
-                if args.patience > 0 and epochs_no_improve >= args.patience:
-                    print(f"\nEarly stopping triggered (no R@1 improvement for {args.patience} epochs).")
-                    stop_signal.fill_(1)
+        # Save the best-R@1 checkpoint and track early stopping progress.
+        mean_r1 = retrieval.get("retrieval/mean_r1", 0.0)
+        if mean_r1 > best_mean_r1:
+            best_mean_r1      = mean_r1
+            epochs_no_improve = 0
+            save_checkpoint(model, optimizer, epoch, val_loss,
+                            run_dir / "best_r1_checkpoint.pt", lora_config=lora_config)
+        else:
+            epochs_no_improve += 1
+            if args.patience > 0 and epochs_no_improve >= args.patience:
+                print(f"\nEarly stopping triggered (no R@1 improvement for {args.patience} epochs).")
+                break
 
-        if distributed.is_enabled():
-            torch.distributed.broadcast(stop_signal, src=0)
-        if stop_signal.item():
-            break
-
-    if distributed.is_main_process():
-        save_checkpoint(raw_model, optimizer, args.epochs, val_loss,
-                        run_dir / "final_checkpoint.pt", lora_config=lora_config)
-        print(f"\nTraining complete. Best val loss: {best_val_loss:.4f} | Best mean R@1: {best_mean_r1:.1%}")
-        print(f"Checkpoints saved to: {run_dir}")
+    # ── Final checkpoint and summary ──────────────────────────────────────────
+    save_checkpoint(model, optimizer, args.epochs, val_loss,
+                    run_dir / "final_checkpoint.pt", lora_config=lora_config)
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f} | Best mean R@1: {best_mean_r1:.1%}")
+    print(f"Checkpoints saved to: {run_dir}")
     if use_wandb:
         wandb.finish()
 

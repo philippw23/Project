@@ -3,7 +3,7 @@
 Loads the LoRA-adapted image encoder from a checkpoint produced by
 biomedclip_pretrain.py, freezes it, and trains a small MLP classifier on top.
 
-MLP input : [image_embedding (512) | age (1, z-scored) | sex (1, binary)]
+MLP input : [image_embedding (512 projected | 768 pre-projection) | age (1, z-scored) | sex (1, binary)]
 MLP output: 3-class logits  (benign=0 / intermediate=1 / malignant=2)
 
 Usage:
@@ -58,24 +58,34 @@ def train_one_epoch(
     criterion: nn.Module,
     device: torch.device,
 ) -> float:
-    """Train one epoch. Encoder runs in eval mode (frozen) but re-encodes each batch
-    so that preprocess_train augmentations are applied fresh every epoch."""
+    """Train the MLP for one pass over the training split.
+
+    The encoder stays in eval mode so batch-norm statistics and dropout are
+    fixed, but it re-encodes each batch from raw images so that the random
+    augmentations in preprocess_train are applied fresh on every epoch.
+    """
     mlp.train()
     encoder.eval()
     total_loss = 0.0
     for batch in loader:
+        # Unpack the batch dict from DownstreamDataset.
         images = batch["image"].to(device)
         age    = batch["age"].to(device)
         sex    = batch["sex"].to(device)
         lbl    = batch["label"].to(device)
+
+        # Encode images without tracking gradients — encoder is frozen.
         with torch.no_grad():
-            emb = F.normalize(encoder(images), dim=-1)
+            emb = F.normalize(encoder(images), dim=-1)  # (B, embed_dim), unit norm
+
         optimizer.zero_grad()
-        logits = mlp(emb, age, sex)
+        logits = mlp(emb, age, sex)   # (B, 3) raw class logits
         loss   = criterion(logits, lbl)
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
+
+    # Return mean loss over all batches.
     return total_loss / len(loader)
 
 
@@ -86,6 +96,12 @@ def evaluate(
     criterion: nn.Module,
     device: torch.device,
 ) -> tuple[float, float, np.ndarray, np.ndarray]:
+    """Evaluate the MLP on a pre-computed embedding split.
+
+    The loader yields (emb, age, sex, label) tuples from an EmbeddingDataset,
+    so the encoder is not called here.  Returns loss, accuracy, and the raw
+    prediction/label arrays for downstream metric computation.
+    """
     mlp.eval()
     total_loss = 0.0
     all_preds, all_labels = [], []
@@ -93,8 +109,10 @@ def evaluate(
         emb, age, sex, lbl = emb.to(device), age.to(device), sex.to(device), lbl.to(device)
         logits = mlp(emb, age, sex)
         total_loss += criterion(logits, lbl).item()
+        # argmax over the 3 class logits gives the predicted class index.
         all_preds.append(logits.argmax(dim=1).cpu())
         all_labels.append(lbl.cpu())
+
     preds  = torch.cat(all_preds).numpy()
     labels = torch.cat(all_labels).numpy()
     acc    = (preds == labels).mean()
@@ -105,6 +123,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Downstream malignancy classifier on top of BiomedCLIP image encoder."
     )
+    # ── Checkpoint / splits ──────────────────────────────────────────────────
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
     parser.add_argument("--freezed_biomedclip", action="store_true",
                         help="Use the vanilla BiomedCLIP encoder without loading a "
@@ -113,6 +132,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--excel",       default=str(DEFAULT_EXCEL))
     parser.add_argument("--out_dir",     default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--use_mask",    action="store_true")
+
+    # ── Encoder feature choice ───────────────────────────────────────────────
+    parser.add_argument("--use_projected_features", action="store_true",
+                        help="Use the 512-dim projected CLIP embedding instead of the "
+                             "768-dim pre-projection ViT features (default: pre-projection).")
+
+    # ── Training hyperparameters ─────────────────────────────────────────────
     parser.add_argument("--epochs",      type=int,   default=50)
     parser.add_argument("--batch_size",  type=int,   default=64)
     parser.add_argument("--lr",          type=float, default=1e-3)
@@ -121,6 +147,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Projection dim for age/sex before fusion (default: %(default)s)")
     parser.add_argument("--hidden_dims", type=str, nargs="+", default=[256, 128])
     parser.add_argument("--weight_decay", type=float, default=0.01)
+
+    # ── Loss function ─────────────────────────────────────────────────────────
     parser.add_argument("--loss", default="ce",
                         choices=["ce", "ce_smooth", "focal", "cb_focal", "ldam", "balanced_softmax"],
                         help="Classification loss for the downstream head.")
@@ -137,6 +165,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Maximum class margin for LDAM loss.")
     parser.add_argument("--ldam_scale", type=float, default=30.0,
                         help="Logit scale for LDAM loss.")
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",        type=int,   default=42)
     parser.add_argument("--wandb",       action="store_true")
     parser.add_argument("--wandb_project", default="biomedclip-downstream")
@@ -145,9 +175,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="W&B team/entity name (default: personal account)")
     parser.add_argument("--sweep", action="store_true",
                         help="Run as wandb sweep agent (hyperparams come from wandb.config)")
-    parser.add_argument("--multi_gpu", action="store_true",
-                        help="Use all visible CUDA devices with torch.nn.DataParallel.")
     args = parser.parse_args(argv)
+
+    # Normalise hidden_dims: accept both '--hidden_dims 256 128' and '--hidden_dims [256,128]'.
     raw = " ".join(str(x) for x in args.hidden_dims)
     args.hidden_dims = [int(x) for x in raw.strip("[]").replace(",", " ").split()]
     return args
@@ -156,10 +186,11 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     """Overwrite args with values from wandb.config when running as sweep agent."""
     cfg = wandb.config
+    # Each key in cfg overrides the matching argparse attribute.
     for key in (
         "lr", "dropout", "meta_embed_dim", "weight_decay", "loss",
         "class_weighting", "label_smoothing", "focal_gamma", "cb_beta",
-        "ldam_max_margin", "ldam_scale", "batch_size",
+        "ldam_max_margin", "ldam_scale", "batch_size", "use_projected_features",
     ):
         if key in cfg:
             setattr(args, key, cfg[key])
@@ -168,18 +199,13 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
+    # ── Reproducibility ───────────────────────────────────────────────────────
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    n_cuda = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    use_multi_gpu = args.multi_gpu and n_cuda > 1
-    if args.multi_gpu:
-        if use_multi_gpu:
-            print(f"Using DataParallel on {n_cuda} visible GPUs")
-        else:
-            print(f"--multi_gpu set, but only {n_cuda} CUDA device(s) visible; using single device.")
 
+    # ── W&B initialisation ────────────────────────────────────────────────────
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
     if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
         warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
@@ -188,19 +214,25 @@ def main(args: argparse.Namespace) -> None:
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.wandb_run,
-            config={k: v for k, v in vars(args).items()},
+            config=dict(vars(args).items()),
         )
+        # Sweep agents receive hyperparams from the sweep controller via wandb.config.
         if args.sweep:
             _apply_sweep_config(args)
 
+    # ── Model loading ─────────────────────────────────────────────────────────
     print(f"Loading model: {MODEL_TAG}")
     model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
 
     if args.freezed_biomedclip:
+        # Use vanilla BiomedCLIP weights without any fine-tuning (baseline).
         print("Using vanilla BiomedCLIP encoder (no checkpoint, no LoRA).")
     else:
+        # Load the LoRA-adapted checkpoint produced by pretrain.py.
         ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
 
+        # Recover the LoRA rank/alpha/layers used during pretraining so the
+        # model architecture matches the saved state dict exactly.
         lora_cfg = ckpt.get("lora_config") or {}
         if not lora_cfg:
             raise RuntimeError(
@@ -212,24 +244,38 @@ def main(args: argparse.Namespace) -> None:
         lora_alpha  = lora_cfg["lora_alpha"]
         print(f"LoRA config from checkpoint: layers={lora_layers}, r={lora_r}, alpha={lora_alpha}")
 
+        # inject_lora freezes all params and adds trainable LoRA branches,
+        # then load_state_dict fills in both frozen and LoRA weights.
         inject_lora(model, lora_layers, lora_r, lora_alpha)
         model.load_state_dict(ckpt["model_state_dict"])
         print(f"Loaded checkpoint: {args.checkpoint} (epoch {ckpt['epoch']}, val_loss={ckpt['val_loss']:.4f})")
 
-    encoder = model.visual.to(device)
+    # ── Encoder selection ─────────────────────────────────────────────────────
+    # model.visual       → full BiomedCLIP visual tower including the 768→512 projection head
+    # model.visual.trunk → ViT backbone only, output dimension 768
+    if args.use_projected_features:
+        encoder = model.visual.to(device)         # 512-dim CLIP embedding space
+        print("Encoder: projected features (512-dim)")
+    else:
+        encoder = model.visual.trunk.to(device)   # 768-dim ViT CLS token
+        print("Encoder: pre-projection ViT features (768-dim)")
+
+    # Freeze all encoder parameters — the downstream MLP is the only trainable part.
     for p in encoder.parameters():
         p.requires_grad_(False)
     encoder.eval()
-    if use_multi_gpu:
-        encoder = nn.DataParallel(encoder)
 
+    # ── Data preparation ──────────────────────────────────────────────────────
+    # preprocess_train adds random flips/crops on top of preprocess_val for augmentation.
     preprocess_train = build_train_transform(preprocess_val)
 
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
 
+    # age_sex_lookup maps image stem → (age_raw, sex_binary).
     age_sex_lookup = load_age_sex_lookup(Path(args.excel))
 
+    # Verify that the Excel lookup keys match the image stems in splits.json.
     lookup_keys  = list(age_sex_lookup.keys())
     split_stems  = [Path(s["image"]).stem for s in splits["downstream_train"][:5]]
     print(f"Lookup sample keys : {lookup_keys[:5]}")
@@ -245,6 +291,8 @@ def main(args: argparse.Namespace) -> None:
             f"  Split example:  {split_stems[:3]}"
         )
 
+    # Compute z-score normalisation statistics from the training split only
+    # so that val/test ages are normalised with the same scale.
     train_ages = [
         age_sex_lookup[Path(s["image"]).stem][0]
         for s in splits["downstream_train"]
@@ -254,6 +302,7 @@ def main(args: argparse.Namespace) -> None:
     age_std  = float(np.std(train_ages))
     print(f"Age stats (train): mean={age_mean:.1f}, std={age_std:.1f}")
 
+    # Train split uses augmented transforms; val/test use clean val transforms.
     train_ds = DownstreamDataset(splits["downstream_train"], age_sex_lookup, age_mean, age_std,
                                   preprocess_train, args.use_mask)
     val_ds   = DownstreamDataset(splits["downstream_val"],   age_sex_lookup, age_mean, age_std,
@@ -265,17 +314,26 @@ def main(args: argparse.Namespace) -> None:
     use_pin       = device.type == "cuda"
     loader_kwargs = {"batch_size": args.batch_size, "num_workers": 4, "pin_memory": use_pin}
 
+    # train_loader yields raw images (encoder re-encodes each epoch for augmentation).
+    # val_loader_raw / test_loader_raw are only used once to pre-compute embeddings.
     train_loader    = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
     val_loader_raw  = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
     test_loader_raw = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
+    # ── Pre-compute val/test embeddings ───────────────────────────────────────
+    # Val and test sets use no augmentation, so embeddings are fixed across epochs.
+    # Pre-computing them once avoids running the encoder on every eval call.
     print("Pre-computing val/test embeddings...")
     val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader_raw,  device)
     test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
 
+    # Infer embed_dim from the actual embedding shape so the MLP adapts automatically
+    # to either 512 (projected) or 768 (pre-projection) without any hard-coded value.
     embed_dim = val_emb.shape[1]
     print(f"Embedding dim: {embed_dim}")
 
+    # ── Class weighting ───────────────────────────────────────────────────────
+    # Count labels in the training split to compute per-class weights for the loss.
     train_labels_all = torch.tensor(
         [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
     )
@@ -294,29 +352,34 @@ def main(args: argparse.Namespace) -> None:
         print(f"Class weights (train): { {IDX_TO_LABEL[i]: float(class_weights[i]) for i in range(NUM_CLASSES)} }")
     print(f"Loss: {args.loss} | class_weighting={args.class_weighting}")
 
+    # Wrap the pre-computed embedding arrays in EmbeddingDataset so the eval
+    # loop can use a standard DataLoader without touching the encoder.
     val_emb_ds  = EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl)
     test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
 
     val_loader  = DataLoader(val_emb_ds,  batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
 
+    # ── MLP, loss, optimiser ──────────────────────────────────────────────────
     mlp       = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim).to(device)
-    if use_multi_gpu:
-        mlp = nn.DataParallel(mlp)
     criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     out_dir = Path(args.out_dir) / "biomedclip_downstream"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Use the W&B run ID in the checkpoint filename to prevent collisions across sweep runs.
     run_id    = (wandb.run.id if use_wandb and wandb.run else None) or "local"
     ckpt_path = out_dir / f"best_mlp_{run_id}.pt"
 
+    # ── Training loop ─────────────────────────────────────────────────────────
     best_val_loss = float("inf")
     print(f"\nTraining MLP for {args.epochs} epochs\n")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss          = train_one_epoch(mlp, encoder, train_loader, optimizer, criterion, device)
+        # Train one epoch on raw images (encoder re-encodes with augmentation each time).
+        train_loss              = train_one_epoch(mlp, encoder, train_loader, optimizer, criterion, device)
+        # Evaluate on pre-computed fixed embeddings.
         val_loss, val_acc, _, _ = evaluate(mlp, val_loader, criterion, device)
 
         print(
@@ -326,15 +389,17 @@ def main(args: argparse.Namespace) -> None:
         if use_wandb:
             wandb.log({"train/loss": train_loss, "val/loss": val_loss, "val/acc": val_acc}, step=epoch)
 
+        # Save the MLP weights whenever validation loss improves.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            mlp_state = mlp.module.state_dict() if isinstance(mlp, nn.DataParallel) else mlp.state_dict()
+            mlp_state = mlp.state_dict()
             torch.save({"epoch": epoch, "mlp_state_dict": mlp_state, "val_loss": val_loss},
                        ckpt_path)
 
+    # ── Test evaluation ───────────────────────────────────────────────────────
+    # Reload the best validation checkpoint before running the final test evaluation.
     mlp_state = torch.load(ckpt_path, map_location=device, weights_only=False)["mlp_state_dict"]
-    target_mlp = mlp.module if isinstance(mlp, nn.DataParallel) else mlp
-    target_mlp.load_state_dict(mlp_state)
+    mlp.load_state_dict(mlp_state)
     test_loss, test_acc, test_preds, test_labels = evaluate(mlp, test_loader, criterion, device)
 
     label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
