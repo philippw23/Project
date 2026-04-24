@@ -2,8 +2,8 @@
 #SBATCH --job-name=biomedclip_downstream
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=8
 #SBATCH --time=04:00:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 
@@ -42,18 +42,36 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 #     --wandb_entity philipp-wiese
 
 
+# python $home_dir/Project/src/biomedclip_downstream.py \
+#     --checkpoint $home_dir/Project/results/biomedclip_pretrain/run_20260424_032940/best_r1_checkpoint.pt \
+#     --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260424_032940/splits.json \
+#     --excel      $home_dir/Project/data/metadata.xlsx \
+#     --use_mask \
+#     --epochs 50 \
+#     --batch_size 16 \
+#     --lr 0.00023139479826336684 \
+#     --dropout 0.3 \
+#     --hidden_dims 128 \
+#     --meta_embed_dim 16 \
+#     --seed 42 \
+#     --multi_gpu \
+#     --wandb \
+#     --wandb_project biomedclip-downstream \
+#     --wandb_entity philipp-wiese
+
 python $home_dir/Project/src/biomedclip_downstream.py \
-    --checkpoint $home_dir/Project/results/biomedclip_pretrain/run_20260423_164404/best_val_checkpoint.pt \
-    --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260423_164404/splits.json \
+    --checkpoint $home_dir/Project/results/biomedclip_pretrain/run_20260424_032940/best_r1_checkpoint.pt \
+    --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260424_032940/splits.json \
     --excel      $home_dir/Project/data/metadata.xlsx \
     --use_mask \
     --epochs 50 \
     --batch_size 16 \
-    --lr 0.00023139479826336684 \
+    --lr 1e-4 \
     --dropout 0.3 \
     --hidden_dims 128 \
     --meta_embed_dim 16 \
     --seed 42 \
+    --multi_gpu \
     --wandb \
     --wandb_project biomedclip-downstream \
     --wandb_entity philipp-wiese

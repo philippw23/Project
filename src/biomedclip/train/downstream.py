@@ -27,7 +27,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import balanced_accuracy_score, classification_report, confusion_matrix, f1_score
 from torch.utils.data import DataLoader
 
 try:
@@ -42,6 +42,7 @@ from biomedclip.data.datasets import (
     DownstreamDataset, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
 )
 from biomedclip.data.splits import load_age_sex_lookup
+from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.lora import inject_lora
 from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
 
@@ -120,6 +121,22 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Projection dim for age/sex before fusion (default: %(default)s)")
     parser.add_argument("--hidden_dims", type=str, nargs="+", default=[256, 128])
     parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--loss", default="ce",
+                        choices=["ce", "ce_smooth", "focal", "cb_focal", "ldam", "balanced_softmax"],
+                        help="Classification loss for the downstream head.")
+    parser.add_argument("--class_weighting", default="sqrt",
+                        choices=["none", "inverse", "sqrt", "effective"],
+                        help="Class weighting scheme used by CE/Focal/LDAM losses.")
+    parser.add_argument("--label_smoothing", type=float, default=0.0,
+                        help="Label smoothing for ce_smooth/focal/cb_focal.")
+    parser.add_argument("--focal_gamma", type=float, default=2.0,
+                        help="Gamma parameter for focal losses.")
+    parser.add_argument("--cb_beta", type=float, default=0.99,
+                        help="Beta for effective-number class weights.")
+    parser.add_argument("--ldam_max_margin", type=float, default=0.5,
+                        help="Maximum class margin for LDAM loss.")
+    parser.add_argument("--ldam_scale", type=float, default=30.0,
+                        help="Logit scale for LDAM loss.")
     parser.add_argument("--seed",        type=int,   default=42)
     parser.add_argument("--wandb",       action="store_true")
     parser.add_argument("--wandb_project", default="biomedclip-downstream")
@@ -128,6 +145,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="W&B team/entity name (default: personal account)")
     parser.add_argument("--sweep", action="store_true",
                         help="Run as wandb sweep agent (hyperparams come from wandb.config)")
+    parser.add_argument("--multi_gpu", action="store_true",
+                        help="Use all visible CUDA devices with torch.nn.DataParallel.")
     args = parser.parse_args(argv)
     raw = " ".join(str(x) for x in args.hidden_dims)
     args.hidden_dims = [int(x) for x in raw.strip("[]").replace(",", " ").split()]
@@ -137,7 +156,11 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     """Overwrite args with values from wandb.config when running as sweep agent."""
     cfg = wandb.config
-    for key in ("lr", "dropout", "meta_embed_dim", "weight_decay"):
+    for key in (
+        "lr", "dropout", "meta_embed_dim", "weight_decay", "loss",
+        "class_weighting", "label_smoothing", "focal_gamma", "cb_beta",
+        "ldam_max_margin", "ldam_scale", "batch_size",
+    ):
         if key in cfg:
             setattr(args, key, cfg[key])
     if "hidden_dims" in cfg:
@@ -149,6 +172,13 @@ def main(args: argparse.Namespace) -> None:
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    n_cuda = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    use_multi_gpu = args.multi_gpu and n_cuda > 1
+    if args.multi_gpu:
+        if use_multi_gpu:
+            print(f"Using DataParallel on {n_cuda} visible GPUs")
+        else:
+            print(f"--multi_gpu set, but only {n_cuda} CUDA device(s) visible; using single device.")
 
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
     if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
@@ -190,6 +220,8 @@ def main(args: argparse.Namespace) -> None:
     for p in encoder.parameters():
         p.requires_grad_(False)
     encoder.eval()
+    if use_multi_gpu:
+        encoder = nn.DataParallel(encoder)
 
     preprocess_train = build_train_transform(preprocess_val)
 
@@ -248,9 +280,19 @@ def main(args: argparse.Namespace) -> None:
         [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
     )
     label_counts  = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
-    class_weights = (label_counts.sum() / (NUM_CLASSES * label_counts)).sqrt().to(device)
+    class_weights = compute_class_weights(
+        label_counts,
+        num_classes=NUM_CLASSES,
+        mode=args.class_weighting,
+        beta=args.cb_beta,
+        device=device,
+    )
     print(f"Class counts (train): { {IDX_TO_LABEL[i]: int(label_counts[i]) for i in range(NUM_CLASSES)} }")
-    print(f"Class weights (train): { {IDX_TO_LABEL[i]: float(class_weights[i]) for i in range(NUM_CLASSES)} }")
+    if class_weights is None:
+        print("Class weights (train): none")
+    else:
+        print(f"Class weights (train): { {IDX_TO_LABEL[i]: float(class_weights[i]) for i in range(NUM_CLASSES)} }")
+    print(f"Loss: {args.loss} | class_weighting={args.class_weighting}")
 
     val_emb_ds  = EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl)
     test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
@@ -259,7 +301,9 @@ def main(args: argparse.Namespace) -> None:
     test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
 
     mlp       = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim).to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    if use_multi_gpu:
+        mlp = nn.DataParallel(mlp)
+    criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     out_dir = Path(args.out_dir) / "biomedclip_downstream"
@@ -284,10 +328,13 @@ def main(args: argparse.Namespace) -> None:
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({"epoch": epoch, "mlp_state_dict": mlp.state_dict(), "val_loss": val_loss},
+            mlp_state = mlp.module.state_dict() if isinstance(mlp, nn.DataParallel) else mlp.state_dict()
+            torch.save({"epoch": epoch, "mlp_state_dict": mlp_state, "val_loss": val_loss},
                        ckpt_path)
 
-    mlp.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=False)["mlp_state_dict"])
+    mlp_state = torch.load(ckpt_path, map_location=device, weights_only=False)["mlp_state_dict"]
+    target_mlp = mlp.module if isinstance(mlp, nn.DataParallel) else mlp
+    target_mlp.load_state_dict(mlp_state)
     test_loss, test_acc, test_preds, test_labels = evaluate(mlp, test_loader, criterion, device)
 
     label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
@@ -295,11 +342,20 @@ def main(args: argparse.Namespace) -> None:
     print("TEST RESULTS")
     print("=" * 60)
     print(f"Loss: {test_loss:.4f}  |  Accuracy: {test_acc:.3f}")
+    print(f"Balanced accuracy: {balanced_accuracy_score(test_labels, test_preds):.3f}")
+    print(f"Macro F1: {f1_score(test_labels, test_preds, average='macro'):.3f}")
     print()
-    print(classification_report(test_labels, test_preds, target_names=label_names, digits=3))
+    print(classification_report(
+        test_labels,
+        test_preds,
+        labels=list(range(NUM_CLASSES)),
+        target_names=label_names,
+        digits=3,
+        zero_division=0,
+    ))
     print("Confusion matrix (rows=true, cols=pred):")
     print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds),
+        confusion_matrix(test_labels, test_preds, labels=list(range(NUM_CLASSES))),
         index=label_names, columns=label_names,
     ).to_string())
 

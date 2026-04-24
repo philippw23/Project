@@ -90,7 +90,12 @@ def train_one_epoch(
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             image_feat = raw_model.encode_image(images)
             text_feat  = raw_model.encode_text(texts)
-            loss       = clip_loss(image_feat, text_feat, raw_model.logit_scale)
+            loss       = clip_loss(
+                image_feat,
+                text_feat,
+                raw_model.logit_scale,
+                gather_distributed=distributed.is_enabled(),
+            )
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)

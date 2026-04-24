@@ -2,6 +2,7 @@ program: src/biomedclip_downstream.py
 project: biomedclip-downstream
 entity: philipp-wiese
 method: bayes
+run_cap: 30
 metric:
   name: val/loss
   goal: minimize
@@ -9,22 +10,32 @@ metric:
 parameters:
   lr:
     distribution: log_uniform_values
-    min: 1e-4
-    max: 1e-2
+    min: 3e-5
+    max: 5e-4
   dropout:
-    values: [0.1, 0.2, 0.3, 0.5]
+    values: [0.3, 0.4, 0.5, 0.6]
   meta_embed_dim:
-    values: [8, 16, 32, 64]
+    values: [4, 8, 16, 32]
   weight_decay:
-    values: [0.0, 0.01, 0.05]
+    values: [0.01, 0.05, 0.1]
+  loss:
+    values: [ce, ce_smooth, focal, cb_focal, ldam, balanced_softmax]
+  class_weighting:
+    values: [sqrt, effective]
+  label_smoothing:
+    values: [0.0, 0.05, 0.1]
+  focal_gamma:
+    values: [1.0, 2.0, 3.0]
+  cb_beta:
+    values: [0.9, 0.99, 0.999]
   hidden_dims:
     values:
+      - [32]
+      - [64]
       - [128]
-      - [256]
-      - [256, 128]
-      - [512, 256]
+      - [64, 32]
   batch_size:
-    values: [8, 16, 32]
+    values: [16, 32, 64]
 
 command:
   - ${env}
@@ -36,16 +47,16 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --checkpoint
-  - results/biomedclip_pretrain/best_checkpoint.pt
+  - results/biomedclip_pretrain/run_20260424_032940/best_r1_checkpoint.pt
   - --splits
-  - results/biomedclip_pretrain/splits.json
+  - results/biomedclip_pretrain/run_20260424_032940/splits.json
   - --excel
   - data/metadata.xlsx
   - --out_dir
   - results
   - --use_mask
   - --epochs
-  - "50"
+  - "30"
   - --seed
   - "42"
   - --sweep
