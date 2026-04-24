@@ -49,9 +49,9 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --checkpoint
-  - results/biomedclip_pretrain/run_20260424_032940/best_r1_checkpoint.pt
+  - results/biomedclip_pretrain/run_20260424_164434/best_r1_checkpoint.pt
   - --splits
-  - results/biomedclip_pretrain/run_20260424_032940/splits.json
+  - results/biomedclip_pretrain/run_20260424_164434/splits.json
   - --excel
   - data/metadata.xlsx
   - --out_dir

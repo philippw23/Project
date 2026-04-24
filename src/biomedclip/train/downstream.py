@@ -119,6 +119,11 @@ def evaluate(
     return total_loss / len(loader), float(acc), preds, labels
 
 
+def _str_to_bool(v: str) -> bool:
+    """Accept explicit True/False strings from wandb sweep agents alongside bare flags."""
+    return str(v).lower() not in ("false", "0", "no", "none")
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Downstream malignancy classifier on top of BiomedCLIP image encoder."
@@ -134,7 +139,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--use_mask",    action="store_true")
 
     # ── Encoder feature choice ───────────────────────────────────────────────
-    parser.add_argument("--use_projected_features", action="store_true",
+    # nargs='?' with const=True lets this work both as a bare flag (--use_projected_features)
+    # and with an explicit value (--use_projected_features=False) as wandb sweep agents pass it.
+    parser.add_argument("--use_projected_features", nargs="?", const=True,
+                        type=_str_to_bool, default=False,
                         help="Use the 512-dim projected CLIP embedding instead of the "
                              "768-dim pre-projection ViT features (default: pre-projection).")
 
