@@ -109,6 +109,8 @@ def build_classification_loss(
 ) -> nn.Module:
     counts = label_counts.to(device=device, dtype=torch.float32)
     if args.loss == "ce":
+        return nn.CrossEntropyLoss()
+    if args.loss == "wce":
         return nn.CrossEntropyLoss(weight=class_weights)
     if args.loss == "ce_smooth":
         return nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)

@@ -19,15 +19,11 @@ parameters:
   weight_decay:
     values: [0.01, 0.05, 0.1]
   loss:
-    values: [ce, ce_smooth, focal, cb_focal, ldam, balanced_softmax]
-  class_weighting:
-    values: [sqrt, effective]
-  label_smoothing:
-    values: [0.0, 0.05, 0.1]
+    values: [ce, wce, focal, cb_focal, balanced_softmax]
   focal_gamma:
     values: [1.0, 2.0, 3.0]
   cb_beta:
-    values: [0.9, 0.99, 0.999]
+    values: [0.9, 0.99]
   hidden_dims:
     values:
       - [32]
@@ -48,8 +44,7 @@ command:
   - biomedclip-downstream
   - --wandb_entity
   - philipp-wiese
-  - --checkpoint
-  - results/biomedclip_pretrain/run_20260424_164434/best_r1_checkpoint.pt
+  - --freezed_biomedclip
   - --splits
   - results/biomedclip_pretrain/run_20260424_164434/splits.json
   - --excel

@@ -181,7 +181,6 @@ def build_stratified_splits(
     run_dir: Path | None = None,
 ) -> tuple[list, list, list, list]:
     """Load all samples and create independent pretrain and downstream splits."""
-    from biomedclip.utils.misc import DEFAULT_IMAGES_DIR, DEFAULT_MASKS_DIR, DEFAULT_EXCEL, DEFAULT_REPORTS, DEFAULT_OUT_DIR
 
     pretrain_cands, downstream_cands = _load_all_samples(
         excel_path=Path(args.excel),

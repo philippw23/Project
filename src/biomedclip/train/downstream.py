@@ -159,7 +159,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # ── Loss function ─────────────────────────────────────────────────────────
     parser.add_argument("--loss", default="ce",
-                        choices=["ce", "ce_smooth", "focal", "cb_focal", "ldam", "balanced_softmax"],
+                        choices=["ce", "wce", "ce_smooth", "focal", "cb_focal", "ldam", "balanced_softmax"],
                         help="Classification loss for the downstream head.")
     parser.add_argument("--class_weighting", default="sqrt",
                         choices=["none", "inverse", "sqrt", "effective"],

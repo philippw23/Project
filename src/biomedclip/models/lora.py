@@ -4,7 +4,6 @@ import warnings
 
 import torch
 import torch.nn as nn
-from torch.nn.utils import parametrize
 
 
 class LoRALinear(nn.Module):
@@ -41,34 +40,6 @@ class LoRALinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Original frozen linear output plus the low-rank adaptation.
         return self.linear(x) + (x @ self.lora_A.t() @ self.lora_B.t()) * self.scale
-
-
-class LoRAFusedQKV(nn.Module):
-    """Low-rank parametrization for fused QKV attention weights.
-
-    PyTorch MultiheadAttention stores Q, K, and V in one parameter named
-    ``in_proj_weight`` with shape (3 * d_model, d_model).  Registering this
-    parametrization makes the effective weight:
-
-        W_qkv + (B @ A) * (alpha / r)
-
-    while keeping the original fused QKV weight frozen.
-    """
-
-    def __init__(self, weight: torch.Tensor, r: int, alpha: float) -> None:
-        super().__init__()
-        out_features, in_features = weight.shape
-        self.r     = r
-        self.scale = alpha / r
-        self.lora_A = nn.Parameter(
-            torch.randn(r, in_features, device=weight.device, dtype=weight.dtype) * 0.01
-        )
-        self.lora_B = nn.Parameter(
-            torch.zeros(out_features, r, device=weight.device, dtype=weight.dtype)
-        )
-
-    def forward(self, weight: torch.Tensor) -> torch.Tensor:
-        return weight + (self.lora_B @ self.lora_A).view_as(weight) * self.scale
 
 
 def inject_lora(model: nn.Module, lora_layers: int, r: int, alpha: float) -> None:
