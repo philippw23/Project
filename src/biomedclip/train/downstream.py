@@ -27,7 +27,8 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import balanced_accuracy_score, classification_report, confusion_matrix, f1_score
+from sklearn.metrics import (balanced_accuracy_score, classification_report, confusion_matrix,
+                              f1_score, precision_recall_fscore_support)
 from torch.utils.data import DataLoader
 
 try:
@@ -388,14 +389,23 @@ def main(args: argparse.Namespace) -> None:
         # Train one epoch on raw images (encoder re-encodes with augmentation each time).
         train_loss              = train_one_epoch(mlp, encoder, train_loader, optimizer, criterion, device)
         # Evaluate on pre-computed fixed embeddings.
-        val_loss, val_acc, _, _ = evaluate(mlp, val_loader, criterion, device)
+        val_loss, val_acc, val_preds, val_labels = evaluate(mlp, val_loader, criterion, device)
+        val_bal_acc = balanced_accuracy_score(val_labels, val_preds)
+        val_combined_acc = 0.5 * val_acc + 0.5 * val_bal_acc
 
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
-            f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.3f}"
+            f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.3f} | "
+            f"val_bal_acc={val_bal_acc:.3f} | val_combined_acc={val_combined_acc:.3f}"
         )
         if use_wandb:
-            wandb.log({"train/loss": train_loss, "val/loss": val_loss, "val/acc": val_acc}, step=epoch)
+            wandb.log({
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "val/acc": val_acc,
+                "val/balanced_acc": val_bal_acc,
+                "val/combined_acc": val_combined_acc,
+            }, step=epoch)
 
         # Save the MLP weights whenever validation loss improves.
         if val_loss < best_val_loss:
@@ -433,7 +443,26 @@ def main(args: argparse.Namespace) -> None:
     ).to_string())
 
     if use_wandb:
-        wandb.log({"test/loss": test_loss, "test/acc": test_acc})
+        test_bal_acc = balanced_accuracy_score(test_labels, test_preds)
+        test_prec, test_rec, test_f1, _ = precision_recall_fscore_support(
+            test_labels, test_preds, average="macro", zero_division=0
+        )
+        per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
+            test_labels, test_preds, labels=list(range(NUM_CLASSES)), zero_division=0
+        )
+        log_dict = {
+            "test/loss": test_loss,
+            "test/acc": test_acc,
+            "test/balanced_acc": test_bal_acc,
+            "test/precision_macro": test_prec,
+            "test/recall_macro": test_rec,
+            "test/f1_macro": test_f1,
+        }
+        for i, name in enumerate(label_names):
+            log_dict[f"test/precision_{name}"] = per_class_prec[i]
+            log_dict[f"test/recall_{name}"] = per_class_rec[i]
+            log_dict[f"test/f1_{name}"] = per_class_f1[i]
+        wandb.log(log_dict)
         wandb.finish()
 
     print(f"\nBest val loss: {best_val_loss:.4f}")
