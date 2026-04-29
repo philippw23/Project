@@ -40,6 +40,25 @@ def load_pretrained_weights(
             for k, v in state_dict.items()
         }
 
+    # Continued-pretrain checkpoints store blocks in a staged layout:
+    #   blocks.{stage}.{global_block_idx}.{rest}
+    # The model expects a flat layout:
+    #   blocks.{global_block_idx}.{rest}
+    # Strip the stage level by dropping the outer index entirely.
+    # Also remap SwiGLU MLP weight names: w12->fc1, w3->fc2.
+    import re
+    _staged = re.compile(r'^blocks\.\d+\.(\d+)\.(.+)$')
+    remapped = {}
+    for k, v in state_dict.items():
+        m = _staged.match(k)
+        if m:
+            new_key = f"blocks.{m.group(1)}.{m.group(2)}"
+            new_key = new_key.replace(".mlp.w12.", ".mlp.fc1.").replace(".mlp.w3.", ".mlp.fc2.")
+            remapped[new_key] = v
+        else:
+            remapped[k] = v
+    state_dict = remapped
+
     msg = model.load_state_dict(state_dict, strict=False)
 
     n_loaded = len(state_dict) - len(msg.missing_keys)

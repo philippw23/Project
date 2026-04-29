@@ -137,6 +137,7 @@ class Block(nn.Module):
         # 3 * D * H  =  2 * D * (4D)  →  H = 8D/3
         if ffn_layer == "swiglufused":
             hidden = int(dim * mlp_ratio * 2 / 3)
+            hidden = (hidden + 15) // 16 * 16  # round up to nearest multiple of 16 (matches CheXFound training code)
             self.mlp = SwiGLUFFN(dim, hidden, bias=ffn_bias)
         else:
             hidden = int(dim * mlp_ratio)
