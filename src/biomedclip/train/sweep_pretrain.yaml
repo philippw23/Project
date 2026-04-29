@@ -36,7 +36,6 @@ command:
   - data/metadata.xlsx
   - --reports
   - data/text/translated_reports.json
-  - --english
   - --images
   - data/images
   - --masks

@@ -44,9 +44,10 @@ command:
   - biomedclip-downstream
   - --wandb_entity
   - philipp-wiese
-  - --freezed_biomedclip
+  - --checkpoint 
+  - results/biomedclip_pretrain/run_20260428_051525/best_val_checkpoint.pt
   - --splits
-  - results/biomedclip_pretrain/run_20260424_164434/splits.json
+  - results/biomedclip_pretrain/run_20260428_051525/splits.json
   - --excel
   - data/metadata.xlsx
   - --out_dir
@@ -58,3 +59,4 @@ command:
   - "42"
   - --sweep
   - ${args}
+

@@ -1,3 +1,17 @@
+"""Prompts for the separated extraction pipeline.
+
+Each report section (befund / beurteilung) is queried with its own dedicated prompt,
+giving the model a narrower, more focused task per call.
+
+Three prompt templates are defined:
+- BEFUND_PROMPT_TEMPLATE             — extracts descriptive observation phrases from the findings
+- BEURTEILUNG_PROMPT_TEMPLATE        — extracts diagnostic statements from the impression
+- BEURTEILUNG_SUMMARY_PROMPT_TEMPLATE — fallback used when the beurteilung section is absent
+                                        or yields no phrases; derives a diagnosis from the befund
+
+All output phrases are requested in English regardless of the input language.
+"""
+
 SYSTEM_PROMPT = """\
 Du bist ein erfahrener Radiologe und Experte für strukturierte medizinische Informationsextraktion.
 

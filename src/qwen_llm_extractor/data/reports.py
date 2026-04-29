@@ -1,13 +1,31 @@
+"""Report loading utilities for the two extraction modes (joint and separated).
+
+Both functions read from a JSON file that is expected to be a list of report dicts,
+each with at minimum a ``patid`` and one or more of the following section fields:
+``befund``, ``beurteilung``, ``befund_en``, ``beurteilung_en``.
+
+A legacy format where the JSON is a plain list of strings (no metadata) is also
+supported for backward compatibility; patids are returned as empty strings in that case.
+"""
+
 import json
 from pathlib import Path
 
 
 def load_reports_joint(source: str, english: bool = False) -> tuple[list[str], list[str]]:
-    """Load reports for joint extraction. Returns (reports, patids).
+    """Load reports for joint extraction by concatenating befund and beurteilung.
 
-    Concatenates befund + beurteilung into a single string per report.
-    english=True  → use befund_en / beurteilung_en (translated_reports.json)
-    english=False → use befund / beurteilung        (sanitized_reports.json)
+    Parameters
+    ----------
+    source  : path to a ``.json`` reports file
+    english : if True, read ``befund_en`` / ``beurteilung_en`` (translated_reports.json);
+              if False, read ``befund`` / ``beurteilung`` (sanitized_reports.json)
+
+    Returns
+    -------
+    tuple[list[str], list[str]]
+        ``(reports, patids)`` — parallel lists of the same length.
+        Reports with no non-empty section fields are silently skipped.
     """
     p = Path(source)
     if p.suffix != ".json":
@@ -16,6 +34,7 @@ def load_reports_joint(source: str, english: bool = False) -> tuple[list[str], l
     data = json.loads(p.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError("JSON must be a list.")
+    # Legacy format: plain list of strings (no patid metadata)
     if data and isinstance(data[0], str):
         return data, [""] * len(data)
 
@@ -30,6 +49,7 @@ def load_reports_joint(source: str, english: bool = False) -> tuple[list[str], l
         if entry.get(beurteilung_key, "").strip():
             parts.append(entry[beurteilung_key].strip())
         if parts:
+            # Sections are double-newline separated so the LLM sees them as distinct blocks
             reports.append("\n\n".join(parts))
             patids.append(entry.get("patid", ""))
 
@@ -39,9 +59,22 @@ def load_reports_joint(source: str, english: bool = False) -> tuple[list[str], l
 
 
 def load_reports_separated(source: str) -> tuple[list[str], list[str], list[str]]:
-    """Load reports for separated extraction. Returns (befunds, beurteilungs, patids).
+    """Load reports for separated extraction, keeping sections as parallel lists.
 
-    Keeps befund and beurteilung as separate parallel lists (German only).
+    Unlike ``load_reports_joint``, the two sections are NOT concatenated — they
+    are returned as separate lists so each can be passed to its own LLM prompt.
+    Only German fields (``befund`` / ``beurteilung``) are supported.
+
+    Parameters
+    ----------
+    source : path to a ``.json`` reports file
+
+    Returns
+    -------
+    tuple[list[str], list[str], list[str]]
+        ``(befunds, beurteilungs, patids)`` — three parallel lists of the same length.
+        Reports where both sections are empty are skipped. An assertion guards against
+        length mismatches introduced by future edits to the loop.
     """
     p = Path(source)
     if p.suffix != ".json":

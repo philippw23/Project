@@ -1,3 +1,15 @@
+"""Prompts for the joint extraction pipeline.
+
+The model receives the full report (befund + beurteilung) in one user message and
+is asked to return both phrase lists in a single JSON response.
+
+Four prompt variants are defined:
+- SYSTEM_PROMPT / USER_PROMPT_TEMPLATE         — German input, German output
+- SYSTEM_PROMPT_ENGLISH / USER_PROMPT_TEMPLATE_ENGLISH — English input, English output
+
+The English variants are used when running on translated_reports.json (--english flag).
+"""
+
 SYSTEM_PROMPT = """\
 Du bist ein erfahrener Radiologe und Experte für strukturierte medizinische Informationsextraktion.
 

@@ -1,3 +1,13 @@
+"""Separated extraction pipeline: befund and beurteilung are queried independently.
+
+Each report section gets its own LLM call with a section-specific prompt, which
+gives the model a narrower task and tends to improve precision. If the beurteilung
+section is missing or yields no phrases, a third fallback call derives a summary
+diagnosis from the befund text instead.
+
+Entry point: ``main()`` / ``parse_args()`` — run as a script via the package CLI.
+"""
+
 import argparse
 import json
 from pathlib import Path
@@ -6,7 +16,9 @@ import torch
 from tqdm import tqdm
 
 from qwen_llm_extractor.data.reports import load_reports_separated
-from qwen_llm_extractor.eval.analysis import flatten_to_dataframe, print_summary, compare_with_medbert
+from qwen_llm_extractor.eval.analysis import (
+    flatten_to_dataframe, print_summary, compare_with_medbert,
+)
 from qwen_llm_extractor.models.loader import DEFAULT_MODEL, load_model
 from qwen_llm_extractor.prompts.separated import (
     SYSTEM_PROMPT,
@@ -24,7 +36,27 @@ def query_llm(
     prompt_template: str,
     max_new_tokens: int = 512,
 ) -> tuple[dict, str]:
-    """Run one text through the LLM using the given prompt template and return (parsed_json, raw_text)."""
+    """Run one text through the LLM using the given prompt template.
+
+    Builds a two-message chat (system + user), tokenises it with the chat template,
+    runs greedy decoding, strips the prompt tokens from the output, and parses the
+    resulting text as JSON.
+
+    Parameters
+    ----------
+    text             : the radiology text to extract from (befund or beurteilung)
+    model            : loaded HuggingFace CausalLM (already on the target device)
+    tokenizer        : matching AutoTokenizer
+    prompt_template  : format string with a single ``{text}`` placeholder
+    max_new_tokens   : upper bound on generated tokens (default 512 is enough for
+                       a JSON list of short phrases)
+
+    Returns
+    -------
+    tuple[dict, str]
+        - parsed dict (may contain an ``"error"`` key if JSON parsing failed)
+        - raw decoded string before JSON extraction (useful for debugging)
+    """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": prompt_template.format(text=text)},
@@ -35,6 +67,7 @@ def query_llm(
         add_generation_prompt=True,
         return_tensors="pt",
     )
+    # Qwen tokenizer returns a BatchEncoding dict; older/other tokenizers return a plain tensor
     input_ids = (
         chat_out["input_ids"] if hasattr(chat_out, "input_ids") else chat_out
     ).to(model.device)
@@ -46,18 +79,21 @@ def query_llm(
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             do_sample=False,
+            # Disable sampling params explicitly; some HF versions warn if left as defaults
             temperature=None,
             top_p=None,
             top_k=None,
             pad_token_id=tokenizer.eos_token_id,
         )
 
+    # Strip the prompt tokens — output_ids includes the full input + generated tokens
     new_tokens = output_ids[0][input_ids.shape[-1]:]
     raw = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
     return _parse_response(raw), raw
 
 
 def main(args: argparse.Namespace) -> None:
+    """Load reports, run the three-pass LLM inference loop, save results, and optionally compare with medbert."""
     befunds, beurteilungs, patids = load_reports_separated(args.reports)
     if args.max:
         befunds      = befunds[: args.max]
@@ -77,6 +113,8 @@ def main(args: argparse.Namespace) -> None:
 
         beurteilung_phrases = beurteilung_result.get("beurteilung_phrases", [])
         summary_raw = None
+        # Fallback: if the beurteilung section yielded nothing (e.g. "s.o." or absent),
+        # re-run with a summary prompt that derives a diagnosis from the befund instead
         if not beurteilung_phrases:
             beurteilung_result, summary_raw = query_llm(befund, model, tokenizer, BEURTEILUNG_SUMMARY_PROMPT_TEMPLATE, args.max_new_tokens)
             beurteilung_phrases = beurteilung_result.get("beurteilung_phrases", [])
@@ -109,7 +147,7 @@ def main(args: argparse.Namespace) -> None:
     with open(out / "llm_raw_responses.json", "w", encoding="utf-8") as f:
         json.dump(raw_responses, f, ensure_ascii=False, indent=2)
 
-    print(f"\nSaved:")
+    print("\nSaved:")
     print(f"  {out}/llm_extracted_terms.csv   ({len(df)} rows)")
     print(f"  {out}/llm_raw_results.json")
     print(f"  {out}/llm_raw_responses.json")
@@ -119,6 +157,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Define and parse CLI arguments for the separated extraction pipeline."""
     parser = argparse.ArgumentParser(
         description="Extract bone tumor imaging features from German radiology reports "
                     "using a local HuggingFace LLM (separated befund/beurteilung extraction)."

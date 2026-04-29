@@ -1,0 +1,55 @@
+# CheXFound ViT-L/16 continued iBOT pretraining on bone-tumour X-rays.
+#
+# Based on the CheXFound paper config (vitl16_ibot333_highres512.yaml).
+# Changes from original:
+#   - dataset_path: BoneTumor dataset (flat images folder)
+#   - batch_size_per_gpu: 4  (single GPU, 512x512, ViT-L)
+#   - epochs: 50             (shorter for small dataset)
+#   - base_lr: 5.0e-05       (lower LR for continued pretraining, not from scratch)
+#   - MODEL.WEIGHTS: path to original CheXFound checkpoint (warm start)
+#
+# All iBOT-specific hyperparameters (loss_weight, prototypes, momentum, crops)
+# are kept identical to the CheXFound paper's validated settings.
+
+MODEL:
+  WEIGHTS: '/mnt/nfs/homedirs/philippw/CheXFound/weights/chexfound_vitl16.pth'
+
+dino:
+  head_n_prototypes: 131072
+  head_bottleneck_dim: 384
+
+ibot:
+  loss_weight: 3.0
+  separate_head: true
+  head_n_prototypes: 131072
+
+train:
+  batch_size_per_gpu: 4
+  dataset_path: "BoneTumor:split=TRAIN:root=/mnt/nfs/homedirs/philippw/Project/data/images"
+  centering: sinkhorn_knopp
+  OFFICIAL_EPOCH_LENGTH: 2500
+
+student:
+  arch: vit_large
+  patch_size: 16
+  drop_path_rate: 0.4
+  ffn_layer: swiglufused
+  block_chunks: 4
+  num_register_tokens: 4
+
+teacher:
+  momentum_teacher: 0.994
+
+optim:
+  epochs: 50
+  weight_decay_end: 0.2
+  base_lr: 5.0e-05
+  warmup_epochs: 5
+  layerwise_decay: 1.0
+
+crops:
+  global_crops_size: 512
+  local_crops_size: 144
+
+evaluation:
+  eval_period_iterations: 5000

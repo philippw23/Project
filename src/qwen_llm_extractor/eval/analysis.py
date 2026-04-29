@@ -1,3 +1,11 @@
+"""Evaluation and analysis utilities for LLM extraction results.
+
+Provides three main functions:
+- ``flatten_to_dataframe`` — converts the raw list-of-dicts output into a tidy DataFrame
+- ``print_summary``        — prints per-category phrase statistics to stdout
+- ``compare_with_medbert`` — computes overlap between LLM and medbert/KeyBERT phrase sets
+"""
+
 import pandas as pd
 
 CATEGORIES = [
@@ -7,7 +15,24 @@ CATEGORIES = [
 
 
 def flatten_to_dataframe(results: list[dict], patids: list[str]) -> pd.DataFrame:
-    """One row per (patid, report_idx, category, phrase)."""
+    """Convert raw LLM extraction results into a tidy DataFrame.
+
+    Each row represents one extracted phrase for one report. Reports that
+    produced a parse error get a single row with ``category="error"``.
+    Categories that yielded no phrases get a single ``phrase="not reported"``
+    placeholder row so every report/category combination is always present.
+
+    Parameters
+    ----------
+    results : list of dicts returned by ``query_llm``, one per report.
+              Expected keys: ``befund_phrases``, ``beurteilung_phrases``, ``patid``.
+              May also contain an ``"error"`` key for failed parses.
+    patids  : parallel list of patient IDs (used as a fallback if not in result dict)
+
+    Returns
+    -------
+    pd.DataFrame with columns: ``patid``, ``report_idx``, ``category``, ``phrase``
+    """
     rows = []
     for i, result in enumerate(results):
         patid = patids[i] if i < len(patids) else ""
@@ -22,6 +47,7 @@ def flatten_to_dataframe(results: list[dict], patids: list[str]) -> pd.DataFrame
 
         for cat in CATEGORIES:
             value = result.get(cat, [])
+            # The LLM sometimes returns a semicolon-delimited string instead of a JSON array
             if isinstance(value, str):
                 phrases = [p.strip() for p in value.split(";") if p.strip()]
             elif isinstance(value, list):
@@ -30,15 +56,21 @@ def flatten_to_dataframe(results: list[dict], patids: list[str]) -> pd.DataFrame
                 phrases = []
 
             if not phrases:
-                rows.append({"patid": patid, "report_idx": i, "category": cat, "phrase": "not reported"})
+                rows.append({
+                    "patid": patid, "report_idx": i, "category": cat, "phrase": "not reported",
+                })
             else:
                 for phrase in phrases:
-                    rows.append({"patid": patid, "report_idx": i, "category": cat, "phrase": phrase.lower()})
+                    # Lowercase for case-insensitive downstream comparison and deduplication
+                    rows.append({
+                        "patid": patid, "report_idx": i, "category": cat, "phrase": phrase.lower(),
+                    })
 
     return pd.DataFrame(rows)
 
 
 def print_summary(df: pd.DataFrame) -> None:
+    """Print per-category phrase counts and top-10 most frequent phrases to stdout."""
     print("\n" + "=" * 65)
     print("LLM EXTRACTION SUMMARY")
     print("=" * 65)
@@ -71,6 +103,14 @@ def print_summary(df: pd.DataFrame) -> None:
 
 
 def compare_with_medbert(llm_df: pd.DataFrame, medbert_csv: str) -> None:
+    """Print a phrase-level overlap comparison between LLM and medbert/KeyBERT results.
+
+    Parameters
+    ----------
+    llm_df      : DataFrame produced by ``flatten_to_dataframe``
+    medbert_csv : path to a CSV with at least ``phrase`` and ``report_idx`` columns,
+                  as produced by the medbert/KeyBERT extraction pipeline
+    """
     mb = pd.read_csv(medbert_csv)
 
     llm_terms = set(llm_df[llm_df["category"] != "error"]["phrase"].str.lower())
@@ -92,6 +132,7 @@ def compare_with_medbert(llm_df: pd.DataFrame, medbert_csv: str) -> None:
 
     print("\nTop 15 LLM-only phrases (not found by medbert):")
     freq_llm = llm_df[llm_df["category"] != "error"].groupby("phrase")["report_idx"].nunique()
+    # reindex aligns the series to the subset before taking top-N
     for t in freq_llm.reindex(sorted(llm_only)).nlargest(15).index:
         print(f"  [{freq_llm[t]:>3}×]  {t}")
 
