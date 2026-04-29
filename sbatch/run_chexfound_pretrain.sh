@@ -24,21 +24,11 @@ export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PYTHONPATH=$home_dir/Project/src
 
-# CheXFound repo must be cloned at this path before submitting.
-export CHEXFOUND_ROOT=$home_dir/CheXFound
-export PYTHONPATH=$CHEXFOUND_ROOT
-
-# Copy the BoneTumorDataset into the CheXFound repo (idempotent).
-cp $home_dir/Project/src/chexfound/bone_tumor_patch/bone_tumor.py \
-   $CHEXFOUND_ROOT/chexfound/data/datasets/bone_tumor.py
-
-# Register BoneTumorDataset if not already present.
-grep -q "BoneTumorDataset" $CHEXFOUND_ROOT/chexfound/data/datasets/__init__.py || \
-    echo "from .bone_tumor import BoneTumorDataset" \
-    >> $CHEXFOUND_ROOT/chexfound/data/datasets/__init__.py
-
+# No external CheXFound repo needed — training code lives in src/chexfound/train/.
 torchrun --nproc_per_node=1 \
-    $CHEXFOUND_ROOT/chexfound/train/train.py \
-    --config-file $home_dir/Project/configs/chexfound_vitl16_bonetumor.yaml \
-    --output-dir  $home_dir/Project/results/chexfound_pretrain
+    $home_dir/Project/src/chexfound/train/pretrain.py \
+    --config   $home_dir/Project/configs/chexfound_vitl16_bonetumor.yaml \
+    --base_cfg $home_dir/Project/src/chexfound/data/config.yaml \
+    --out_dir  $home_dir/Project/results/chexfound_pretrain

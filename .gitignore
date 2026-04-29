@@ -3,3 +3,6 @@
 /results
 /wandb
 __pycache__
+src/chexfound/data/teacher_checkpoint.pth
+src/chexfound/data/config.yaml
+src/chexfound/data/results_eval_linear.json

@@ -1,25 +1,29 @@
 """Downstream malignancy classification using the CheXFound ViT-L image encoder.
 
 Supports two modes:
+  Continued pretrain (default) — loads teacher weights from the bundled iBOT
+                       checkpoint (src/chexfound/data/teacher_checkpoint.pth).
   Frozen baseline  — loads original CheXFound pretrained weights, no fine-tuning.
-  Continued pretrain — loads teacher weights from a checkpoint produced by
-                       the CheXFound iBOT continued-pretraining run.
+                     Requires --chexfound_weights and --checkpoint none.
 
 MLP input : [CLS embedding (1024-dim) | age (1, z-scored) | sex (1, binary)]
 MLP output: 3-class logits  (benign=0 / intermediate=1 / malignant=2)
 
-Usage (frozen baseline):
+Usage (continued pretrain, using bundled checkpoint):
     python src/chexfound_downstream.py \\
-        --chexfound_config  configs/chexfound_vitl16_bonetumor.yaml \\
-        --chexfound_weights ~/CheXFound/weights/chexfound_vitl16.pth \\
         --splits  results/biomedclip_pretrain/.../splits.json \\
         --excel   data/metadata.xlsx
 
-Usage (after continued pretraining):
+Usage (custom checkpoint):
     python src/chexfound_downstream.py \\
-        --chexfound_config  configs/chexfound_vitl16_bonetumor.yaml \\
-        --chexfound_weights ~/CheXFound/weights/chexfound_vitl16.pth \\
         --checkpoint results/chexfound_pretrain/model_final.pth \\
+        --splits  results/biomedclip_pretrain/.../splits.json \\
+        --excel   data/metadata.xlsx
+
+Usage (frozen baseline):
+    python src/chexfound_downstream.py \\
+        --chexfound_weights ~/CheXFound/weights/chexfound_vitl16.pth \\
+        --checkpoint none \\
         --splits  results/biomedclip_pretrain/.../splits.json \\
         --excel   data/metadata.xlsx
 """
@@ -53,10 +57,17 @@ from biomedclip.data.datasets import (
 from biomedclip.data.splits import load_age_sex_lookup
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
-from chexfound.data.transforms import build_preprocess_val_chexfound, build_train_transform_chexfound
+from chexfound.data.transforms import (
+    build_preprocess_val_chexfound,
+    build_train_transform_chexfound,
+)
 from chexfound.models.encoders import CheXFoundViT, load_continued_pretrain_weights
 
 DEFAULT_SPLITS = ROOT_DIR / "results" / "biomedclip_pretrain" / "splits.json"
+
+_CHEXFOUND_DATA = ROOT_DIR / "src" / "chexfound" / "data"
+DEFAULT_CHEXFOUND_CONFIG     = _CHEXFOUND_DATA / "config.yaml"
+DEFAULT_CHEXFOUND_CHECKPOINT = _CHEXFOUND_DATA / "teacher_checkpoint.pth"
 
 
 def train_one_epoch(
@@ -121,13 +132,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Downstream malignancy classifier on top of CheXFound ViT-L."
     )
     # ── CheXFound encoder ────────────────────────────────────────────────────
-    parser.add_argument("--chexfound_config",  required=True,
-                        help="Path to CheXFound model config YAML.")
-    parser.add_argument("--chexfound_weights", required=True,
-                        help="Path to original CheXFound pretrained .pth checkpoint.")
-    parser.add_argument("--checkpoint", default=None,
+    parser.add_argument("--chexfound_config",  default=str(DEFAULT_CHEXFOUND_CONFIG),
+                        help="Path to CheXFound model config YAML "
+                             f"(default: {DEFAULT_CHEXFOUND_CONFIG}).")
+    parser.add_argument("--chexfound_weights", default=None,
+                        help="Path to original CheXFound pretrained .pth checkpoint. "
+                             "Required only for frozen baseline mode (--checkpoint none).")
+    parser.add_argument("--checkpoint", default=str(DEFAULT_CHEXFOUND_CHECKPOINT),
                         help="Path to continued-pretrain checkpoint (teacher weights). "
-                             "Omit to use the frozen CheXFound baseline.")
+                             f"Defaults to the bundled checkpoint. "
+                             "Pass 'none' to use the frozen CheXFound baseline instead.")
 
     # ── Data / splits ────────────────────────────────────────────────────────
     parser.add_argument("--splits",    default=str(DEFAULT_SPLITS))
@@ -207,8 +221,16 @@ def main(args: argparse.Namespace) -> None:
     preprocess_val   = build_preprocess_val_chexfound()
     preprocess_train = build_train_transform_chexfound(preprocess_val)
 
-    if args.checkpoint is None:
+    checkpoint = None if args.checkpoint.lower() == "none" else args.checkpoint
+
+    if checkpoint is None:
         # Mode A: frozen CheXFound baseline — original pretrained weights, no fine-tuning.
+        if not args.chexfound_weights:
+            raise ValueError(
+                "--chexfound_weights is required for frozen baseline mode. "
+                "Provide the path to the original CheXFound .pth file, "
+                "or omit --checkpoint to use the bundled continued-pretrain checkpoint."
+            )
         print("Loading frozen CheXFound baseline (original pretrained weights).")
         encoder = CheXFoundViT(
             args.chexfound_config, args.chexfound_weights,
@@ -216,12 +238,12 @@ def main(args: argparse.Namespace) -> None:
         )
     else:
         # Mode B: load teacher weights from a continued iBOT pretraining checkpoint.
-        print(f"Loading CheXFound encoder from continued-pretrain checkpoint: {args.checkpoint}")
+        print(f"Loading CheXFound encoder from continued-pretrain checkpoint: {checkpoint}")
         encoder = CheXFoundViT(
-            args.chexfound_config, args.chexfound_weights,
+            args.chexfound_config, weights_path=None,
             lora_layers=0, r=8, alpha=16.0, load_pretrained=False,
         )
-        load_continued_pretrain_weights(encoder, args.checkpoint)
+        load_continued_pretrain_weights(encoder, checkpoint)
 
     for p in encoder.parameters():
         p.requires_grad_(False)

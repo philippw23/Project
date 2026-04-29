@@ -13,3 +13,4 @@ tqdm>=4.65.0
 accelerate>=0.27.0
 bitsandbytes>=0.43.0
 open_clip_torch>=2.24.0
+pyyaml>=6.0

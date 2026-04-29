@@ -24,28 +24,16 @@ export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
-export CHEXFOUND_ROOT=$home_dir/CheXFound
+export PYTHONPATH=$home_dir/Project/src
 
-# ── Set one of the two modes below ───────────────────────────────────────────
+# No external CheXFound repo needed.
 #
-# Mode A: frozen CheXFound baseline (no continued pretraining)
-#   Remove --checkpoint entirely.
-#
-# Mode B: after continued iBOT pretraining
-#   Set PRETRAIN_CKPT to the checkpoint saved by run_chexfound_pretrain.sh,
-#   e.g. results/chexfound_pretrain/model_final.pth
-
-PRETRAIN_CKPT=""   # leave empty for frozen baseline, or set path for Mode B
-
-CHECKPOINT_ARG=""
-if [ -n "$PRETRAIN_CKPT" ]; then
-    CHECKPOINT_ARG="--checkpoint $PRETRAIN_CKPT"
-fi
+# Mode A (frozen CheXFound baseline): add --checkpoint none
+#         and --chexfound_weights /path/to/chexfound_vitl16.pth
+# Mode B (bundled continued-pretrain checkpoint, DEFAULT): no extra flags needed.
+# Mode B (custom checkpoint): add --checkpoint /path/to/custom.pth
 
 python $home_dir/Project/src/chexfound_downstream.py \
-    --chexfound_config  $home_dir/Project/configs/chexfound_vitl16_bonetumor.yaml \
-    --chexfound_weights $home_dir/CheXFound/weights/chexfound_vitl16.pth \
-    $CHECKPOINT_ARG \
     --splits    $home_dir/Project/results/biomedclip_pretrain/splits.json \
     --excel     $home_dir/Project/data/metadata.xlsx \
     --out_dir   $home_dir/Project/results \
