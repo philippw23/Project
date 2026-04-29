@@ -12,9 +12,14 @@ Strategy:
 
 Usage:
   python src/inspect_tensor_shapes.py --model biomedclip
+  python src/inspect_tensor_shapes.py --model biomedclip --lora_layers 4
   python src/inspect_tensor_shapes.py --model chexfound \\
       --config configs/chexfound_vitl16_bonetumor.yaml \\
       --weights ~/CheXFound/weights/chexfound_vitl16.pth
+  python src/inspect_tensor_shapes.py --model chexfound \\
+      --config configs/chexfound_vitl16_bonetumor.yaml \\
+      --weights ~/CheXFound/weights/chexfound_vitl16.pth \\
+      --lora_layers 4
 """
 
 import argparse
@@ -145,15 +150,28 @@ def module_repr(module: torch.nn.Module, shapes: dict, path: str = "") -> str:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def _inspect_biomedclip(device: torch.device) -> None:
+def _inspect_biomedclip(device: torch.device, lora_layers: int = 0, lora_r: int = 8, lora_alpha: float = 16.0) -> None:
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[0]))
+    from biomedclip.models.lora import inject_lora, count_trainable_params
+
     model, _, _ = open_clip.create_model_and_transforms(BIOMEDCLIP_TAG)
+    if lora_layers > 0:
+        inject_lora(model, lora_layers, lora_r, lora_alpha)
+        n_trainable = count_trainable_params(model)
+        n_total = sum(p.numel() for p in model.parameters())
+        print(f"LoRA injected into last {lora_layers} ViT blocks (r={lora_r}, alpha={lora_alpha})")
+        print(f"Trainable params: {n_trainable:,} / {n_total:,} ({100 * n_trainable / n_total:.2f} %)\n")
     model = model.to(device).eval()
 
     dummy_image = torch.zeros(2, 3, 224, 224, device=device)
     image_shapes = collect_shapes(model.visual, dummy_image)
 
+    title = "BiomedCLIP -- Image encoder with output tensor shapes (batch=2)"
+    if lora_layers > 0:
+        title += f" [LoRA last {lora_layers} blocks]"
     print("=" * 80)
-    print("BiomedCLIP -- Image encoder with output tensor shapes (batch=2)")
+    print(title)
     print("=" * 80)
     print(module_repr(model.visual, image_shapes))
     print("=" * 80)
@@ -172,10 +190,10 @@ def _inspect_biomedclip(device: torch.device) -> None:
     print("=" * 80)
 
 
-def _inspect_chexfound(device: torch.device, config: str, weights: str) -> None:
+def _inspect_chexfound(device: torch.device, config: str, weights: str, lora_layers: int = 0) -> None:
     from chexfound.models.encoders import CheXFoundViT  # local import to avoid mandatory dep
 
-    encoder = CheXFoundViT(config, weights, lora_layers=0, r=8, alpha=16.0, load_pretrained=True)
+    encoder = CheXFoundViT(config, weights, lora_layers=lora_layers, r=8, alpha=16.0, load_pretrained=True)
     encoder = encoder.to(device).eval()
 
     # CheXFound pretrained weights use 224x224 input resolution.
@@ -199,17 +217,20 @@ def main() -> None:
     )
     parser.add_argument("--config",  default=None, help="CheXFound model config YAML (chexfound only).")
     parser.add_argument("--weights", default=None, help="CheXFound pretrained .pth checkpoint (chexfound only).")
+    parser.add_argument("--lora_layers", type=int, default=0, help="Inject LoRA into the last N ViT blocks (0 = no LoRA).")
+    parser.add_argument("--lora_r",     type=int,   default=8,    help="LoRA rank r (default: 8).")
+    parser.add_argument("--lora_alpha", type=float, default=16.0, help="LoRA alpha scaling factor (default: 16.0).")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}\n")
 
     if args.model == "biomedclip":
-        _inspect_biomedclip(device)
+        _inspect_biomedclip(device, args.lora_layers, args.lora_r, args.lora_alpha)
     else:
         if not args.config or not args.weights:
             parser.error("--config and --weights are required for --model chexfound")
-        _inspect_chexfound(device, args.config, args.weights)
+        _inspect_chexfound(device, args.config, args.weights, args.lora_layers)
 
 
 if __name__ == "__main__":

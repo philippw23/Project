@@ -8,28 +8,25 @@ from .extended import ExtendedVisionDataset
 
 
 class BoneTumorDataset(ExtendedVisionDataset):
-    """Flat folder of bone-tumour PNGs/JPEGs for iBOT continued pretraining.
+    """Bone-tumour X-ray dataset for iBOT continued pretraining.
 
-    Dataset string: "BoneTumor:split=TRAIN:root=/path/to/images"
+    Receives a pre-filtered list of image paths produced by
+    biomedclip.data.splits.build_stratified_splits so that val/test images
+    are never seen during SSL pretraining.
 
-    The 'split' argument is accepted but ignored — all images are used for SSL.
     get_target() returns a dummy 0; the iBOT training loop never uses labels.
     """
 
     def __init__(
         self,
-        root: str,
-        extra: str | None = None,
-        split: str = "TRAIN",
+        image_paths: list[Path],
+        root: str = "",
         transforms=None,
         target_transform=None,
     ) -> None:
         super().__init__(root, transforms=transforms, target_transform=target_transform)
-        extensions = {".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"}
-        self.image_paths = sorted(
-            p for p in Path(root).iterdir() if p.suffix in extensions
-        )
-        print(f"BoneTumorDataset: {len(self.image_paths)} images found in {root}")
+        self.image_paths = list(image_paths)
+        print(f"BoneTumorDataset [TRAIN]: {len(self.image_paths)} images")
 
     def get_image_data(self, index: int):
         return Image.open(self.image_paths[index]).convert("RGB")

@@ -45,6 +45,8 @@ if _SRC not in sys.path:
 from chexfound.bone_tumor_patch.bone_tumor import BoneTumorDataset
 from chexfound.models.model_factory import build_model_from_cfg
 from chexfound.models.weight_utils import load_pretrained_weights
+from biomedclip.data.splits import build_stratified_splits
+from biomedclip.utils.misc import DEFAULT_EXCEL, DEFAULT_REPORTS, DEFAULT_MASKS_DIR
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD  = (0.229, 0.224, 0.225)
@@ -394,11 +396,21 @@ def parse_dataset_path(dataset_path: str) -> tuple[str, dict]:
 def build_dataset(dataset_path: str, transform) -> torch.utils.data.Dataset:
     name, kwargs = parse_dataset_path(dataset_path)
     if name == "BoneTumor":
-        return BoneTumorDataset(
-            root=kwargs.get("root", "."),
-            split=kwargs.get("split", "TRAIN"),
-            transforms=transform,
+        import types
+        args = types.SimpleNamespace(
+            excel=kwargs.get("excel", str(DEFAULT_EXCEL)),
+            reports=kwargs.get("reports", str(DEFAULT_REPORTS)),
+            images=kwargs.get("root", "."),
+            masks=kwargs.get("masks", str(DEFAULT_MASKS_DIR)),
+            english=False,
+            downstream_train_frac=float(kwargs.get("downstream_train_frac", 0.8)),
+            downstream_val_frac=float(kwargs.get("downstream_val_frac", 0.1)),
+            test_frac=float(kwargs.get("test_frac", 0.1)),
+            seed=int(kwargs.get("seed", 42)),
         )
+        pretrain_samples, _, _, _ = build_stratified_splits(args)
+        image_paths = [s[0] for s in pretrain_samples]
+        return BoneTumorDataset(image_paths=image_paths, root=args.images, transforms=transform)
     raise ValueError(f"Unknown dataset: {name!r}. Supported: 'BoneTumor'.")
 
 
