@@ -1,378 +1,409 @@
-"""DINOv2-style Vision Transformer (ViT-L/16) — self-contained implementation.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the Apache License, Version 2.0
+# found in the LICENSE file in the root directory of this source tree.
 
-Architecture follows the CheXFound / DINOv2 specification:
-  - SwiGLU FFN with fused gate+value linear (fc1) and output (fc2)
-  - Register tokens (no positional embedding applied to them)
-  - LayerScale initialised at 1e-5
-  - uniform drop-path rate across all blocks
-  - forward_features() returns a dict with "x_norm_clstoken" / "x_norm_patchtokens"
-    so the existing encoders.py interface stays unchanged.
-  - mask_token for iBOT student-side masked prediction
-"""
-from __future__ import annotations
+# References:
+#   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
+#   https://github.com/rwightman/pytorch-image-models/tree/master/timm/models/vision_transformer.py
 
+from functools import partial
 import math
-from typing import Optional, Union
+import logging
+from typing import Sequence, Tuple, Union, Callable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch import Tensor
+import torch.utils.checkpoint
+from torch.nn.init import trunc_normal_
+
+from chexfound.layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
 
 
-# ── Stochastic depth ──────────────────────────────────────────────────────────
+logger = logging.getLogger("chexfound")
 
-def _drop_path(x: Tensor, drop_prob: float, training: bool) -> Tensor:
-    if drop_prob == 0.0 or not training:
+
+def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, include_root=False) -> nn.Module:
+    if not depth_first and include_root:
+        fn(module=module, name=name)
+    for child_name, child_module in module.named_children():
+        child_name = ".".join((name, child_name)) if name else child_name
+        named_apply(fn=fn, module=child_module, name=child_name, depth_first=depth_first, include_root=True)
+    if depth_first and include_root:
+        fn(module=module, name=name)
+    return module
+
+
+class BlockChunk(nn.ModuleList):
+    def forward(self, x):
+        for b in self:
+            x = b(x)
         return x
-    keep = 1.0 - drop_prob
-    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-    noise = x.new_empty(shape).bernoulli_(keep).div_(keep)
-    return x * noise
 
 
-class DropPath(nn.Module):
-    def __init__(self, drop_prob: float = 0.0) -> None:
-        super().__init__()
-        self.drop_prob = drop_prob
-
-    def forward(self, x: Tensor) -> Tensor:
-        return _drop_path(x, self.drop_prob, self.training)
-
-
-# ── LayerScale ────────────────────────────────────────────────────────────────
-
-class LayerScale(nn.Module):
-    def __init__(self, dim: int, init: float = 1e-5) -> None:
-        super().__init__()
-        self.gamma = nn.Parameter(init * torch.ones(dim))
-
-    def forward(self, x: Tensor) -> Tensor:
-        return x * self.gamma
-
-
-# ── Feed-forward networks ─────────────────────────────────────────────────────
-
-class SwiGLUFFN(nn.Module):
-    """SwiGLU with a single fused linear for gate+value (fc1) and output (fc2).
-
-    hidden_features is the bottleneck dimension *after* chunking fc1's output.
-    fc1 produces 2 * hidden_features so the two halves serve as gate and value.
-
-    Naming (fc1 / fc2) is intentional — it matches the LoRA injection targets in
-    lora.py and the weight keys written by the CheXFound training code.
-    """
-
+class DinoVisionTransformer(nn.Module):
     def __init__(
         self,
-        in_features: int,
-        hidden_features: int,
-        out_features: Optional[int] = None,
-        bias: bool = True,
-    ) -> None:
+        img_size=224,
+        patch_size=16,
+        in_chans=3,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        ffn_bias=True,
+        proj_bias=True,
+        drop_path_rate=0.0,
+        drop_path_uniform=False,
+        init_values=None,  # for layerscale: None or 0 => no layerscale
+        embed_layer=PatchEmbed,
+        act_layer=nn.GELU,
+        block_fn=Block,
+        ffn_layer="mlp",
+        block_chunks=1,
+        num_register_tokens=0,
+        interpolate_antialias=False,
+        interpolate_offset=0.1,
+    ):
+        """
+        Args:
+            img_size (int, tuple): input image size
+            patch_size (int, tuple): patch size
+            in_chans (int): number of input channels
+            embed_dim (int): embedding dimension
+            depth (int): depth of transformer
+            num_heads (int): number of attention heads
+            mlp_ratio (int): ratio of mlp hidden dim to embedding dim
+            qkv_bias (bool): enable bias for qkv if True
+            proj_bias (bool): enable bias for proj in attn if True
+            ffn_bias (bool): enable bias for ffn if True
+            drop_path_rate (float): stochastic depth rate
+            drop_path_uniform (bool): apply uniform drop rate across blocks
+            weight_init (str): weight init scheme
+            init_values (float): layer-scale init values
+            embed_layer (nn.Module): patch embedding layer
+            act_layer (nn.Module): MLP activation layer
+            block_fn (nn.Module): transformer block class
+            ffn_layer (str): "mlp", "swiglu", "swiglufused" or "identity"
+            block_chunks: (int) split block sequence into block_chunks units for FSDP wrap
+            num_register_tokens: (int) number of extra cls tokens (so-called "registers")
+            interpolate_antialias: (str) flag to apply anti-aliasing when interpolating positional embeddings
+            interpolate_offset: (float) work-around offset to apply when interpolating positional embeddings
+        """
         super().__init__()
-        out_features = out_features or in_features
-        self.fc1 = nn.Linear(in_features, 2 * hidden_features, bias=bias)
-        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
+        norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
-    def forward(self, x: Tensor) -> Tensor:
-        gate, val = self.fc1(x).chunk(2, dim=-1)
-        return self.fc2(F.silu(gate) * val)
-
-
-# ── Multi-head self-attention ─────────────────────────────────────────────────
-
-class Attention(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 16,
-        qkv_bias: bool = True,
-        proj_bias: bool = True,
-    ) -> None:
-        super().__init__()
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        self.num_tokens = 1
+        self.n_blocks = depth
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
-        self.qkv = nn.Linear(dim, 3 * dim, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim, bias=proj_bias)
-
-    def forward(self, x: Tensor) -> Tensor:
-        B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = qkv.unbind(0)
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        return self.proj(x)
-
-
-# ── Transformer block ─────────────────────────────────────────────────────────
-
-class Block(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
-        proj_bias: bool = True,
-        ffn_bias: bool = True,
-        drop_path_rate: float = 0.0,
-        layerscale: float = 1e-5,
-        ffn_layer: str = "swiglufused",
-    ) -> None:
-        super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = Attention(dim, num_heads, qkv_bias=qkv_bias, proj_bias=proj_bias)
-        self.ls1 = LayerScale(dim, layerscale)
-        self.drop_path1 = DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
-
-        self.norm2 = nn.LayerNorm(dim)
-        # hidden_features sized so that SwiGLU has ~same params as standard MLP:
-        # 3 * D * H  =  2 * D * (4D)  →  H = 8D/3
-        if ffn_layer == "swiglufused":
-            hidden = int(dim * mlp_ratio * 2 / 3)
-            hidden = (hidden + 15) // 16 * 16  # round up to nearest multiple of 16 (matches CheXFound training code)
-            self.mlp = SwiGLUFFN(dim, hidden, bias=ffn_bias)
-        else:
-            hidden = int(dim * mlp_ratio)
-            self.mlp = nn.Sequential(
-                nn.Linear(dim, hidden, bias=ffn_bias),
-                nn.GELU(),
-                nn.Linear(hidden, dim, bias=ffn_bias),
-            )
-        self.ls2 = LayerScale(dim, layerscale)
-        self.drop_path2 = DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity()
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
-        x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        return x
-
-
-# ── Patch embedding ───────────────────────────────────────────────────────────
-
-class PatchEmbed(nn.Module):
-    def __init__(
-        self,
-        img_size: Union[int, tuple] = 518,
-        patch_size: int = 16,
-        in_chans: int = 3,
-        embed_dim: int = 1024,
-    ) -> None:
-        super().__init__()
-        if isinstance(img_size, int):
-            img_size = (img_size, img_size)
         self.patch_size = patch_size
-        self.grid_size = (img_size[0] // patch_size, img_size[1] // patch_size)
-        self.num_patches = self.grid_size[0] * self.grid_size[1]
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.proj(x).flatten(2).transpose(1, 2)  # (B, N, D)
-
-
-# ── Vision Transformer ────────────────────────────────────────────────────────
-
-class VisionTransformer(nn.Module):
-    """DINOv2-style ViT with optional register tokens and mask token for iBOT.
-
-    forward_features() returns:
-        {
-            "x_norm_clstoken":   (B, D)    — normalised CLS token
-            "x_norm_patchtokens": (B, N, D) — normalised patch tokens (registers excluded)
-            "x_prenorm":          (B, 1+R+N, D) — pre-norm sequence (for debugging)
-        }
-    """
-
-    def __init__(
-        self,
-        img_size: int = 518,
-        patch_size: int = 16,
-        in_chans: int = 3,
-        embed_dim: int = 1024,
-        depth: int = 24,
-        num_heads: int = 16,
-        mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
-        proj_bias: bool = True,
-        ffn_bias: bool = True,
-        ffn_layer: str = "swiglufused",
-        drop_path_rate: float = 0.0,
-        drop_path_uniform: bool = True,
-        layerscale: float = 1e-5,
-        num_register_tokens: int = 0,
-        interpolate_antialias: bool = False,
-        interpolate_offset: float = 0.1,
-    ) -> None:
-        super().__init__()
-        self.patch_size = patch_size
-        self.embed_dim = embed_dim
         self.num_register_tokens = num_register_tokens
         self.interpolate_antialias = interpolate_antialias
         self.interpolate_offset = interpolate_offset
 
-        self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
-        n_patches = self.patch_embed.num_patches
+        self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        # pos_embed covers CLS + patches; register tokens get no positional signal.
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + n_patches, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
+        assert num_register_tokens >= 0
+        self.register_tokens = (
+            nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
+        )
 
-        if num_register_tokens > 0:
-            self.register_tokens = nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim))
+        if drop_path_uniform is True:
+            dpr = [drop_path_rate] * depth
         else:
-            self.register_tokens = None
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
 
-        # Learnable mask token used during iBOT student training.
-        self.mask_token = nn.Parameter(torch.zeros(1, embed_dim))
+        if ffn_layer == "mlp":
+            logger.info("using MLP layer as FFN")
+            ffn_layer = Mlp
+        elif ffn_layer == "swiglufused" or ffn_layer == "swiglu":
+            logger.info("using SwiGLU layer as FFN")
+            ffn_layer = SwiGLUFFNFused
+        elif ffn_layer == "identity":
+            logger.info("using Identity layer as FFN")
 
-        dpr_val = drop_path_rate
-        dpr = [dpr_val] * depth if drop_path_uniform else [
-            x.item() for x in torch.linspace(0, dpr_val, depth)
-        ]
+            def f(*args, **kwargs):
+                return nn.Identity()
 
-        self.blocks = nn.ModuleList([
-            Block(
+            ffn_layer = f
+        else:
+            raise NotImplementedError
+
+        blocks_list = [
+            block_fn(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
                 proj_bias=proj_bias,
                 ffn_bias=ffn_bias,
-                drop_path_rate=dpr[i],
-                layerscale=layerscale,
+                drop_path=dpr[i],
+                norm_layer=norm_layer,
+                act_layer=act_layer,
                 ffn_layer=ffn_layer,
+                init_values=init_values,
             )
             for i in range(depth)
-        ])
-        self.norm = nn.LayerNorm(embed_dim)
+        ]
+        if block_chunks > 0:
+            self.chunked_blocks = True
+            chunked_blocks = []
+            chunksize = depth // block_chunks
+            for i in range(0, depth, chunksize):
+                # this is to keep the block index consistent if we chunk the block list
+                chunked_blocks.append([nn.Identity()] * i + blocks_list[i : i + chunksize])
+            self.blocks = nn.ModuleList([BlockChunk(p) for p in chunked_blocks])
+        else:
+            self.chunked_blocks = False
+            self.blocks = nn.ModuleList(blocks_list)
 
-        self._init_weights()
+        self.norm = norm_layer(embed_dim)
+        self.head = nn.Identity()
 
-    # ── Initialisation ────────────────────────────────────────────────────────
+        self.mask_token = nn.Parameter(torch.zeros(1, embed_dim))
 
-    def _init_weights(self) -> None:
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        self.init_weights()
+
+    def init_weights(self):
+        trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.normal_(self.cls_token, std=1e-6)
         if self.register_tokens is not None:
-            nn.init.trunc_normal_(self.register_tokens, std=0.02)
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
+            nn.init.normal_(self.register_tokens, std=1e-6)
+        named_apply(init_weights_vit_timm, self)
 
-    # ── Positional encoding interpolation ─────────────────────────────────────
-
-    def _interpolate_pos_encoding(self, x: Tensor, w: int, h: int) -> Tensor:
-        """Bicubic interpolation of pos_embed for images larger/smaller than default."""
-        npatch = x.shape[1]          # current patch count
-        N = self.pos_embed.shape[1] - 1  # stored patch count
-
+    def interpolate_pos_encoding(self, x, w, h):
+        previous_dtype = x.dtype
+        npatch = x.shape[1] - 1
+        N = self.pos_embed.shape[1] - 1
         if npatch == N and w == h:
             return self.pos_embed
-
-        cls_pe = self.pos_embed[:, :1]
-        patch_pe = self.pos_embed[:, 1:]  # (1, N, D)
-
-        M = int(math.sqrt(N))
-        assert M * M == N, f"pos_embed has non-square grid ({N} patches)"
-        D = self.embed_dim
+        pos_embed = self.pos_embed.float()
+        class_pos_embed = pos_embed[:, 0]
+        patch_pos_embed = pos_embed[:, 1:]
+        dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size
-
-        kwargs: dict = {}
+        M = int(math.sqrt(N))  # Recover the number of patches in each dimension
+        assert N == M * M
+        kwargs = {}
         if self.interpolate_offset:
-            sx = float(w0 + self.interpolate_offset) / (M + self.interpolate_offset)
-            sy = float(h0 + self.interpolate_offset) / (M + self.interpolate_offset)
-            kwargs["scale_factor"] = (sy, sx)
+            # Historical kludge: add a small number to avoid floating point error in the interpolation, see https://github.com/facebookresearch/dino/issues/8
+            # Note: still needed for backward-compatibility, the underlying operators are using both output size and scale factors
+            sx = float(w0 + self.interpolate_offset) / M
+            sy = float(h0 + self.interpolate_offset) / M
+            kwargs["scale_factor"] = (sx, sy)
         else:
-            kwargs["size"] = (h0, w0)
-
-        patch_pe = (
-            patch_pe.reshape(1, M, M, D)
-            .permute(0, 3, 1, 2)
-        )
-        patch_pe = F.interpolate(
-            patch_pe,
+            # Simply specify an output size instead of a scale factor
+            kwargs["size"] = (w0, h0)
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed.reshape(1, M, M, dim).permute(0, 3, 1, 2),
             mode="bicubic",
             antialias=self.interpolate_antialias,
             **kwargs,
         )
-        patch_pe = patch_pe.permute(0, 2, 3, 1).reshape(1, -1, D)
-        return torch.cat([cls_pe, patch_pe], dim=1)
+        assert (w0, h0) == patch_pos_embed.shape[-2:]
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(previous_dtype)
 
-    # ── Token preparation ─────────────────────────────────────────────────────
+    def prepare_tokens_with_masks(self, x, masks=None):
+        B, nc, w, h = x.shape
+        x = self.patch_embed(x)
+        if masks is not None:
+            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
 
-    def _prepare_tokens(
-        self,
-        x: Tensor,
-        mask: Optional[Tensor] = None,
-    ) -> Tensor:
-        """Embed patches, apply mask token, prepend CLS + registers, add pos_embed."""
-        B, C, H, W = x.shape
-        patches = self.patch_embed(x)  # (B, N, D)
-
-        if mask is not None:
-            # mask: (B, N) bool — True marks positions to be replaced.
-            mt = self.mask_token.unsqueeze(0).expand(B, patches.shape[1], -1)
-            patches = patches * (~mask).unsqueeze(-1) + mt * mask.unsqueeze(-1)
-
-        cls = self.cls_token.expand(B, -1, -1)           # (B, 1, D)
-        pos = self._interpolate_pos_encoding(patches, W, H)  # (1, 1+N, D)
-
-        # Apply positional encoding to CLS and patches separately.
-        cls = cls + pos[:, :1]
-        patches = patches + pos[:, 1:]
+        x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = x + self.interpolate_pos_encoding(x, w, h)
 
         if self.register_tokens is not None:
-            reg = self.register_tokens.expand(B, -1, -1)  # (B, R, D) — no pos embed
-            return torch.cat([cls, reg, patches], dim=1)
-        return torch.cat([cls, patches], dim=1)
+            x = torch.cat(
+                (
+                    x[:, :1],
+                    self.register_tokens.expand(x.shape[0], -1, -1),
+                    x[:, 1:],
+                ),
+                dim=1,
+            )
 
-    # ── Forward ───────────────────────────────────────────────────────────────
+        return x
 
-    def forward_features(
-        self,
-        x: Tensor,
-        mask: Optional[Tensor] = None,
-    ) -> dict:
-        x = self._prepare_tokens(x, mask=mask)
+    def forward_features_list(self, x_list, masks_list):
+        x = [self.prepare_tokens_with_masks(x, masks) for x, masks in zip(x_list, masks_list)]
         for blk in self.blocks:
             x = blk(x)
+
+        all_x = x
+        output = []
+        for x, masks in zip(all_x, masks_list):
+            x_norm = self.norm(x)
+            output.append(
+                {
+                    "x_norm_clstoken": x_norm[:, 0],
+                    "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
+                    "x_norm_patchtokens": x_norm[:, self.num_register_tokens + 1 :],
+                    "x_prenorm": x,
+                    "masks": masks,
+                }
+            )
+        return output
+
+    def forward_features(self, x, masks=None):
+        if isinstance(x, list):
+            return self.forward_features_list(x, masks)
+
+        x = self.prepare_tokens_with_masks(x, masks)
+
+        for blk in self.blocks:
+            x = blk(x)
+
         x_norm = self.norm(x)
-        R = self.num_register_tokens
         return {
-            "x_norm_clstoken":    x_norm[:, 0],
-            "x_norm_patchtokens": x_norm[:, 1 + R:],
-            "x_prenorm":          x,
+            "x_norm_clstoken": x_norm[:, 0],
+            "x_norm_regtokens": x_norm[:, 1 : self.num_register_tokens + 1],
+            "x_norm_patchtokens": x_norm[:, self.num_register_tokens + 1 :],
+            "x_prenorm": x,
+            "masks": masks,
         }
 
-    def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
-        return self.forward_features(x, mask=mask)["x_norm_clstoken"]
+    def _get_intermediate_layers_not_chunked(self, x, n=1):
+        x = self.prepare_tokens_with_masks(x)
+        # If n is an int, take the n last blocks. If it's a list, take them
+        output, total_block_len = [], len(self.blocks)
+        blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
+        for i, blk in enumerate(self.blocks):
+            x = blk(x)
+            if i in blocks_to_take:
+                output.append(x)
+        assert len(output) == len(blocks_to_take), f"only {len(output)} / {len(blocks_to_take)} blocks found"
+        return output
+
+    def _get_intermediate_layers_chunked(self, x, n=1):
+        x = self.prepare_tokens_with_masks(x)
+        output, i, total_block_len = [], 0, len(self.blocks[-1])
+        # If n is an int, take the n last blocks. If it's a list, take them
+        blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
+        for block_chunk in self.blocks:
+            for blk in block_chunk[i:]:  # Passing the nn.Identity()
+                x = blk(x)
+                if i in blocks_to_take:
+                    output.append(x)
+                i += 1
+        assert len(output) == len(blocks_to_take), f"only {len(output)} / {len(blocks_to_take)} blocks found"
+        return output
+
+    def get_intermediate_layers(
+        self,
+        x: torch.Tensor,
+        n: Union[int, Sequence] = 1,  # Layers or n last layers to take
+        reshape: bool = False,
+        return_class_token: bool = False,
+        norm=True,
+    ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]]]:
+        if self.chunked_blocks:
+            outputs = self._get_intermediate_layers_chunked(x, n)
+        else:
+            outputs = self._get_intermediate_layers_not_chunked(x, n)
+        if norm:
+            outputs = [self.norm(out) for out in outputs]
+        class_tokens = [out[:, 0] for out in outputs]
+        outputs = [out[:, 1 + self.num_register_tokens :] for out in outputs]
+        if reshape:
+            B, _, w, h = x.shape
+            outputs = [
+                out.reshape(B, w // self.patch_size, h // self.patch_size, -1).permute(0, 3, 1, 2).contiguous()
+                for out in outputs
+            ]
+        if return_class_token:
+            return tuple(zip(outputs, class_tokens))
+        return tuple(outputs)
+
+    def forward(self, *args, is_training=False, **kwargs):
+        ret = self.forward_features(*args, **kwargs)
+        if is_training:
+            return ret
+        else:
+            return self.head(ret["x_norm_clstoken"])
+
+    def get_last_self_attention(self, x, masks=None):
+        if isinstance(x, list):
+            return self.forward_features_list(x, masks)
+
+        x = self.prepare_tokens_with_masks(x, masks)
+
+        # Run through model, at the last block just return the attention.
+        for i, blk in enumerate(self.blocks):
+            if i < len(self.blocks) - 1:
+                x = blk(x)
+            else:
+                return blk(x, return_attention=True)
 
 
-# ── Architecture presets ──────────────────────────────────────────────────────
-
-_ARCH: dict[str, dict] = {
-    "vit_small":  {"embed_dim": 384,  "depth": 12, "num_heads": 6},
-    "vit_base":   {"embed_dim": 768,  "depth": 12, "num_heads": 12},
-    "vit_large":  {"embed_dim": 1024, "depth": 24, "num_heads": 16},
-    "vit_huge":   {"embed_dim": 1280, "depth": 32, "num_heads": 16},
-}
+def init_weights_vit_timm(module: nn.Module, name: str = ""):
+    """ViT weight initialization, original timm impl (for reproducibility)"""
+    if isinstance(module, nn.Linear):
+        trunc_normal_(module.weight, std=0.02)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
 
 
-def build_vit(arch: str = "vit_large", **kwargs) -> VisionTransformer:
-    """Construct a VisionTransformer from an architecture name + optional overrides."""
-    cfg = _ARCH[arch].copy()
-    cfg.update(kwargs)
-    return VisionTransformer(**cfg)
+def vit_small(patch_size=16, num_register_tokens=0, **kwargs):
+    model = DinoVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=384,
+        depth=12,
+        num_heads=6,
+        mlp_ratio=4,
+        block_fn=partial(Block, attn_class=MemEffAttention),
+        num_register_tokens=num_register_tokens,
+        **kwargs,
+    )
+    return model
+
+
+def vit_base(patch_size=16, num_register_tokens=0, **kwargs):
+    model = DinoVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        mlp_ratio=4,
+        block_fn=partial(Block, attn_class=MemEffAttention),
+        num_register_tokens=num_register_tokens,
+        **kwargs,
+    )
+    return model
+
+
+def vit_large(patch_size=16, num_register_tokens=0, **kwargs):
+    model = DinoVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=1024,
+        depth=24,
+        num_heads=16,
+        mlp_ratio=4,
+        block_fn=partial(Block, attn_class=MemEffAttention),
+        num_register_tokens=num_register_tokens,
+        **kwargs,
+    )
+    return model
+
+
+def vit_giant2(patch_size=16, num_register_tokens=0, **kwargs):
+    """
+    Close to ViT-giant, with embed-dim 1536 and 24 heads => embed-dim per head 64
+    """
+    model = DinoVisionTransformer(
+        patch_size=patch_size,
+        embed_dim=1536,
+        depth=40,
+        num_heads=24,
+        mlp_ratio=4,
+        block_fn=partial(Block, attn_class=MemEffAttention),
+        num_register_tokens=num_register_tokens,
+        **kwargs,
+    )
+    return model

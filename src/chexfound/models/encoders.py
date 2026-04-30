@@ -70,4 +70,13 @@ class CheXFoundViT(nn.Module):
 
 def load_continued_pretrain_weights(model: CheXFoundViT, checkpoint_path: str) -> None:
     """Load teacher weights from a checkpoint saved by pretrain.py."""
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    lora_cfg = ckpt.get("lora_config") if isinstance(ckpt, dict) else None
+    if lora_cfg and lora_cfg.get("lora_layers", 0) > 0:
+        inject_lora_chexfound(
+            model.trunk,
+            lora_layers=lora_cfg["lora_layers"],
+            r=lora_cfg["lora_r"],
+            alpha=lora_cfg["lora_alpha"],
+        )
     load_pretrained_weights(model.trunk, checkpoint_path, checkpoint_key="teacher")

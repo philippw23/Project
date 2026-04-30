@@ -4,8 +4,10 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=08:00:00
+#SBATCH --time=24:00:00
+#SBATCH --exclude=aioserver2
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
+#SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.err"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -34,7 +36,9 @@ export PYTHONPATH=$home_dir/Project/src
 # Mode B (custom checkpoint): add --checkpoint /path/to/custom.pth
 
 python $home_dir/Project/src/chexfound_downstream.py \
-    --splits    $home_dir/Project/results/biomedclip_pretrain/splits.json \
+    --chexfound_weights $home_dir/Project/src/chexfound/data/teacher_checkpoint.pth \
+    --checkpoint none \
+    --splits    $home_dir/Project/results/biomedclip_pretrain/run_20260428_121303/splits.json \
     --excel     $home_dir/Project/data/metadata.xlsx \
     --out_dir   $home_dir/Project/results \
     --use_mask \

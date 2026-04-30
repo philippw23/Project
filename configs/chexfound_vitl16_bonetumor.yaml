@@ -12,7 +12,7 @@
 # are kept identical to the CheXFound paper's validated settings.
 
 MODEL:
-  WEIGHTS: '/mnt/nfs/homedirs/philippw/CheXFound/weights/chexfound_vitl16.pth'
+  WEIGHTS: '/mnt/nfs/homedirs/philippw/Project/src/chexfound/data/teacher_checkpoint.pth'
 
 dino:
   head_n_prototypes: 131072
@@ -53,3 +53,11 @@ crops:
 
 evaluation:
   eval_period_iterations: 5000
+
+# LoRA for continued pretraining — freezes the CheXFound backbone and trains
+# low-rank adapters in the last N real transformer blocks.
+# Set lora_layers: 0 to disable adapters and train all backbone weights.
+lora:
+  lora_layers: 6   # last 6 real ViT blocks, not FSDP BlockChunks
+  r: 8             # rank
+  alpha: 16.0      # scaling factor

@@ -43,10 +43,21 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from chexfound.bone_tumor_patch.bone_tumor import BoneTumorDataset
+from chexfound.loss import DINOLoss, iBOTPatchLoss, KoLeoLoss
+from chexfound.models.lora import inject_lora_chexfound
 from chexfound.models.model_factory import build_model_from_cfg
 from chexfound.models.weight_utils import load_pretrained_weights
 from biomedclip.data.splits import build_stratified_splits
 from biomedclip.utils.misc import DEFAULT_EXCEL, DEFAULT_REPORTS, DEFAULT_MASKS_DIR
+
+
+def _multicrop_collate(batch: list) -> list[torch.Tensor]:
+    """Collate a batch of (list_of_crops, target) samples into a list of (B, C, H, W) tensors.
+    Targets are discarded — pretraining uses only the crops.
+    """
+    crops_per_sample = [sample[0] for sample in batch]
+    n_crops = len(crops_per_sample[0])
+    return [torch.stack([crops_per_sample[b][i] for b in range(len(batch))]) for i in range(n_crops)]
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD  = (0.229, 0.224, 0.225)
@@ -102,167 +113,6 @@ class DINOHead(nn.Module):
         x = F.normalize(x, dim=-1)
         return self.last_layer(x)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Losses
-# ══════════════════════════════════════════════════════════════════════════════
-
-@torch.no_grad()
-def _sinkhorn(scores: torch.Tensor, eps: float = 0.05, n_iters: int = 3) -> torch.Tensor:
-    """Sinkhorn-Knopp soft-assignment producing a uniform marginal distribution."""
-    Q = torch.exp(scores / eps).T   # (K, B)
-    Q /= Q.sum()
-    K, B = Q.shape
-    r = torch.ones(K, device=scores.device) / K
-    c = torch.ones(B, device=scores.device) / B
-    for _ in range(n_iters):
-        Q *= (r / Q.sum(dim=1, keepdim=True))
-        Q *= (c / Q.sum(dim=0, keepdim=True))
-    return (Q / Q.sum(dim=0, keepdim=True)).T   # (B, K)
-
-
-class DINOLoss(nn.Module):
-    """Cross-entropy between Sinkhorn-sharpened teacher and log-softmax student."""
-
-    def __init__(
-        self,
-        n_prototypes: int,
-        student_temp: float = 0.1,
-        teacher_temp: float = 0.07,
-        warmup_teacher_temp: float = 0.04,
-        warmup_teacher_temp_epochs: int = 30,
-        n_epochs: int = 50,
-        centering: str = "sinkhorn_knopp",
-    ) -> None:
-        super().__init__()
-        self.student_temp = student_temp
-        self.centering = centering
-        self.register_buffer("center", torch.zeros(1, n_prototypes))
-        # Build teacher temperature schedule.
-        self.teacher_temp_schedule = torch.cat([
-            torch.linspace(warmup_teacher_temp, teacher_temp,
-                           warmup_teacher_temp_epochs),
-            torch.full((n_epochs - warmup_teacher_temp_epochs,), teacher_temp),
-        ])
-
-    def forward(
-        self,
-        student_out: list[torch.Tensor],
-        teacher_out: list[torch.Tensor],
-        epoch: int,
-    ) -> torch.Tensor:
-        teacher_temp = self.teacher_temp_schedule[epoch].item()
-
-        teacher_probs = self._teacher_probs(teacher_out, teacher_temp)
-        student_log_probs = [
-            F.log_softmax(s / self.student_temp, dim=-1) for s in student_out
-        ]
-
-        total_loss = torch.tensor(0.0, device=student_out[0].device)
-        n_terms = 0
-        n_teacher = len(teacher_probs)
-        n_student = len(student_log_probs)
-        for i, t in enumerate(teacher_probs):
-            for j, s in enumerate(student_log_probs):
-                if i == j and n_teacher == n_student:
-                    continue   # skip same-crop pairs when sizes match
-                total_loss -= (t * s).sum(dim=-1).mean()
-                n_terms += 1
-
-        loss = total_loss / max(n_terms, 1)
-        self._update_center(torch.cat(teacher_out))
-        return loss
-
-    def _teacher_probs(
-        self, teacher_out: list[torch.Tensor], teacher_temp: float
-    ) -> list[torch.Tensor]:
-        probs = []
-        for t in teacher_out:
-            t_centered = t - self.center
-            if self.centering == "sinkhorn_knopp":
-                probs.append(_sinkhorn(t_centered / teacher_temp))
-            else:
-                probs.append(F.softmax(t_centered / teacher_temp, dim=-1))
-        return probs
-
-    @torch.no_grad()
-    def _update_center(self, teacher_output: torch.Tensor, m: float = 0.9) -> None:
-        batch_center = teacher_output.mean(dim=0, keepdim=True)
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(batch_center)
-            batch_center /= dist.get_world_size()
-        self.center = self.center * m + batch_center * (1 - m)
-
-
-class iBOTLoss(nn.Module):
-    """Patch-level cross-entropy for iBOT masked-image-modelling."""
-
-    def __init__(
-        self,
-        n_prototypes: int,
-        student_temp: float = 0.1,
-        teacher_temp: float = 0.07,
-        centering: str = "sinkhorn_knopp",
-    ) -> None:
-        super().__init__()
-        self.student_temp = student_temp
-        self.teacher_temp = teacher_temp
-        self.centering = centering
-        self.register_buffer("center", torch.zeros(1, 1, n_prototypes))
-
-    def forward(
-        self,
-        student_patches: list[torch.Tensor],
-        teacher_patches: list[torch.Tensor],
-        masks: list[torch.Tensor],
-    ) -> torch.Tensor:
-        """
-        student_patches / teacher_patches: list of (B, N, K) logits per global crop.
-        masks: list of (B, N) bool tensors — True = masked position.
-        """
-        total_loss = torch.tensor(0.0, device=student_patches[0].device)
-        n_terms = 0
-
-        for s_patch, t_patch, mask in zip(student_patches, teacher_patches, masks):
-            if not mask.any():
-                continue
-            # Select only masked positions.
-            s_masked = s_patch[mask]   # (M, K)
-            t_masked = t_patch[mask]   # (M, K)
-
-            if self.centering == "sinkhorn_knopp":
-                t_prob = _sinkhorn((t_masked - self.center.squeeze(1)) / self.teacher_temp)
-            else:
-                t_prob = F.softmax(
-                    (t_masked - self.center.squeeze(1)) / self.teacher_temp, dim=-1
-                )
-            s_log = F.log_softmax(s_masked / self.student_temp, dim=-1)
-            total_loss -= (t_prob * s_log).sum(dim=-1).mean()
-            n_terms += 1
-
-        if n_terms > 0:
-            self._update_center(torch.cat([p.reshape(-1, p.shape[-1])
-                                           for p in teacher_patches]))
-        return total_loss / max(n_terms, 1)
-
-    @torch.no_grad()
-    def _update_center(self, t: torch.Tensor, m: float = 0.9) -> None:
-        bc = t.mean(dim=0, keepdim=True).unsqueeze(0)   # (1, 1, K)
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(bc)
-            bc /= dist.get_world_size()
-        self.center = self.center * m + bc * (1 - m)
-
-
-class KoLeoLoss(nn.Module):
-    """Kozachenko-Leonenko entropy estimator for feature diversity."""
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        f = F.normalize(features, dim=-1)
-        dots = f @ f.T                         # (B, B)
-        dots.fill_diagonal_(-1.0)              # exclude self-similarity
-        nn_sim = dots.max(dim=1).values        # nearest-neighbour cosine sim
-        return -torch.log(1.0 - nn_sim + 1e-8).mean()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -503,10 +353,9 @@ def train(cfg: dict, out_dir: Path) -> None:
     torch.manual_seed(seed + local_rank)
 
     # ── Models ───────────────────────────────────────────────────────────────
-    # Build from the bundled config.yaml (lives alongside this script's data dir).
-    # The caller may also pass a separate base_cfg; merging is done before this.
-    _cfg_path = Path(__file__).resolve().parents[2] / "data" / "config.yaml"
-    student_trunk, embed_dim = build_model_from_cfg(_cfg_path)
+    # Build from the already merged runtime config so architecture overrides in
+    # --config are actually reflected in the model.
+    student_trunk, embed_dim = build_model_from_cfg(cfg)
     teacher_trunk = copy.deepcopy(student_trunk)
 
     # Optionally warm-start from MODEL.WEIGHTS (original CheXFound checkpoint).
@@ -517,7 +366,34 @@ def train(cfg: dict, out_dir: Path) -> None:
         load_pretrained_weights(student_trunk, warm_start, checkpoint_key="teacher")
         load_pretrained_weights(teacher_trunk, warm_start, checkpoint_key="teacher")
 
-    # Teacher is never directly trained.
+    # Optionally inject LoRA into the student trunk (freezes backbone, trains adapters only).
+    lora_cfg = cfg.get("lora", {})
+    lora_layers = lora_cfg.get("lora_layers", 0)
+    if lora_layers > 0:
+        # Student and EMA teacher must have identical module structure. Inject
+        # LoRA into both trunks, then keep the teacher frozen and update it only
+        # through EMA below.
+        inject_lora_chexfound(
+            student_trunk,
+            lora_layers=lora_layers,
+            r=lora_cfg.get("r", 8),
+            alpha=lora_cfg.get("alpha", 16.0),
+        )
+        inject_lora_chexfound(
+            teacher_trunk,
+            lora_layers=lora_layers,
+            r=lora_cfg.get("r", 8),
+            alpha=lora_cfg.get("alpha", 16.0),
+        )
+        teacher_trunk.load_state_dict(student_trunk.state_dict())
+        if is_main:
+            trainable = sum(p.numel() for p in student_trunk.parameters() if p.requires_grad)
+            total     = sum(p.numel() for p in student_trunk.parameters())
+            print(f"LoRA: last {lora_layers} blocks | r={lora_cfg.get('r', 8)} | "
+                  f"trainable trunk params: {trainable:,} / {total:,} "
+                  f"({100 * trainable / total:.2f}%)")
+
+    # Teacher is never directly trained (plain ViT, no LoRA).
     for p in teacher_trunk.parameters():
         p.requires_grad_(False)
 
@@ -553,19 +429,19 @@ def train(cfg: dict, out_dir: Path) -> None:
 
     # ── Losses ───────────────────────────────────────────────────────────────
     dino_loss = DINOLoss(
-        n_prototypes=dino_prototypes,
-        centering=centering,
-        warmup_teacher_temp=warmup_t_temp,
-        teacher_temp=teacher_temp,
-        warmup_teacher_temp_epochs=warmup_t_epochs,
-        n_epochs=n_epochs,
+        out_dim=dino_prototypes,
     ).to(device)
-    ibot_loss = iBOTLoss(
-        n_prototypes=ibot_prototypes,
-        centering=centering,
-        teacher_temp=teacher_temp,
+    ibot_loss = iBOTPatchLoss(
+        patch_out_dim=ibot_prototypes,
     ).to(device)
     koleo_loss = KoLeoLoss().to(device)
+
+    # Teacher temperature schedule — warm up from warmup_t_temp to teacher_temp.
+    teacher_temp_schedule = [
+        warmup_t_temp + (teacher_temp - warmup_t_temp) * i / max(warmup_t_epochs - 1, 1)
+        if i < warmup_t_epochs else teacher_temp
+        for i in range(n_epochs)
+    ]
 
     # ── Dataset ──────────────────────────────────────────────────────────────
     aug = MultiCropAugmentation(
@@ -588,6 +464,7 @@ def train(cfg: dict, out_dir: Path) -> None:
         num_workers=n_workers,
         pin_memory=device.type == "cuda",
         drop_last=True,
+        collate_fn=_multicrop_collate,
     )
     # Use epoch_len to limit steps per epoch (matching CheXFound convention).
     steps_per_epoch = min(epoch_len, len(loader))
@@ -595,7 +472,7 @@ def train(cfg: dict, out_dir: Path) -> None:
 
     # ── Optimiser ────────────────────────────────────────────────────────────
     all_params = (
-        list(student_trunk.parameters())
+        [p for p in student_trunk.parameters() if p.requires_grad]
         + list(dino_head_s.parameters())
         + (list(ibot_head_s.parameters()) if ibot_separate else [])
     )
@@ -640,7 +517,7 @@ def train(cfg: dict, out_dir: Path) -> None:
         t0 = time.time()
 
         data_iter: Iterator = iter(loader)
-        for step in range(steps_per_epoch):
+        for _ in range(steps_per_epoch):
             # Update LR, WD, teacher momentum.
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_schedule[global_step]
@@ -654,15 +531,8 @@ def train(cfg: dict, out_dir: Path) -> None:
                 data_iter = iter(loader)
                 batch = next(data_iter)
 
-            # batch is a list of crops (MultiCropAugmentation.__call__).
-            # DataLoader collates each crop across the batch → list of (B, C, H, W).
-            if isinstance(batch, (list, tuple)) and isinstance(batch[0], list):
-                # DataLoader stacked the list-of-tensors from each sample.
-                crops = [torch.stack([b[i] for b in batch]).to(device)
-                         for i in range(len(batch[0]))]
-            else:
-                # Already stacked by collate_fn.
-                crops = [c.to(device) for c in batch[0]]
+            # _multicrop_collate returns a list of (B, C, H, W) tensors, one per crop.
+            crops = [c.to(device) for c in batch]
 
             global_crops = crops[:2]
             local_crops  = crops[2:]
@@ -676,25 +546,36 @@ def train(cfg: dict, out_dir: Path) -> None:
             ]
 
             # ── Teacher forward (no grad, no masking) ────────────────────────
+            t_temp = teacher_temp_schedule[epoch]
             with torch.no_grad():
                 teacher_out_g: list[dict] = []
                 for gc in global_crops:
-                    teacher_out_g.append(
-                        teacher_trunk.forward_features(gc)
-                    )
+                    teacher_out_g.append(teacher_trunk.forward_features(gc))
 
-                teacher_cls   = [o["x_norm_clstoken"]    for o in teacher_out_g]
-                teacher_patch = [o["x_norm_patchtokens"]  for o in teacher_out_g]
-                teacher_dino  = [dino_head_t(c) for c in teacher_cls]
-                teacher_ibot  = [ibot_head_t(p) for p in teacher_patch]
+                teacher_cls   = [o["x_norm_clstoken"]   for o in teacher_out_g]
+                teacher_patch = [o["x_norm_patchtokens"] for o in teacher_out_g]
+                teacher_dino_raw = [dino_head_t(c) for c in teacher_cls]
+                teacher_ibot_raw = [ibot_head_t(p) for p in teacher_patch]
+
+                # Center and sharpen teacher outputs before passing to losses.
+                if centering == "sinkhorn_knopp":
+                    teacher_dino = [dino_loss.sinkhorn_knopp_teacher(t, t_temp)
+                                    for t in teacher_dino_raw]
+                else:
+                    teacher_dino = [dino_loss.softmax_center_teacher(t, t_temp)
+                                    for t in teacher_dino_raw]
+                teacher_ibot = [ibot_loss.softmax_center_teacher(t, t_temp)
+                                for t in teacher_ibot_raw]
 
             # ── Student forward (with masking on global crops) ───────────────
             with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
                 student_dino_logits: list[torch.Tensor] = []
                 student_ibot_logits: list[torch.Tensor] = []
+                student_cls_tokens:  list[torch.Tensor] = []
 
                 for gc, mask in zip(global_crops, masks):
-                    feat = student_trunk.forward_features(gc, mask=mask)
+                    feat = student_trunk.forward_features(gc, masks=mask)
+                    student_cls_tokens.append(feat["x_norm_clstoken"])
                     student_dino_logits.append(dino_head_s(feat["x_norm_clstoken"]))
                     student_ibot_logits.append(ibot_head_s(feat["x_norm_patchtokens"]))
 
@@ -703,18 +584,25 @@ def train(cfg: dict, out_dir: Path) -> None:
                     student_dino_logits.append(dino_head_s(feat["x_norm_clstoken"]))
 
                 # ── Losses ───────────────────────────────────────────────────
-                loss_dino = dino_loss(student_dino_logits, teacher_dino, epoch)
-                loss_ibot = ibot_loss(student_ibot_logits, teacher_ibot, masks)
-                # KoLeo on global-crop CLS tokens for diversity.
-                all_cls = torch.cat([
-                    student_trunk.forward_features(gc)["x_norm_clstoken"]
-                    for gc in global_crops
-                ])
-                loss_koleo = koleo_loss(all_cls)
+                n_dino_terms = len(student_dino_logits) * len(teacher_dino)
+                loss_dino  = dino_loss(student_dino_logits, teacher_dino) / n_dino_terms
+                loss_ibot  = sum(
+                    ibot_loss(s, t, mask)
+                    for s, t, mask in zip(student_ibot_logits, teacher_ibot, masks)
+                ) / len(global_crops)
+                loss_koleo = koleo_loss(torch.cat(student_cls_tokens))
 
                 loss = (dino_weight  * loss_dino
                         + ibot_weight  * loss_ibot
                         + koleo_weight * loss_koleo)
+
+            # Async center updates for next step (outside autocast, use raw logits).
+            dino_loss.update_center(torch.cat(teacher_dino_raw))
+            # Pass only masked patch tokens — shape (1, total_masked, K) — matching original.
+            masked_teacher_ibot = torch.cat(
+                [t[mask] for t, mask in zip(teacher_ibot_raw, masks)], dim=0
+            ).unsqueeze(0)
+            ibot_loss.update_center(masked_teacher_ibot)
 
             # ── Optimiser step ───────────────────────────────────────────────
             optimizer.zero_grad(set_to_none=True)
@@ -765,6 +653,11 @@ def train(cfg: dict, out_dir: Path) -> None:
                 "optimizer": optimizer.state_dict(),
                 "dino_loss_center": dino_loss.center,
                 "ibot_loss_center": ibot_loss.center,
+                "lora_config": {
+                    "lora_layers": lora_layers,
+                    "lora_r": lora_cfg.get("r", 8),
+                    "lora_alpha": lora_cfg.get("alpha", 16.0),
+                },
             }
             torch.save(ckpt, out_dir / "checkpoint_last.pth")
             if (epoch + 1) % save_freq == 0:
