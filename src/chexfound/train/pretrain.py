@@ -243,7 +243,7 @@ def parse_dataset_path(dataset_path: str) -> tuple[str, dict]:
     return name, kwargs
 
 
-def build_dataset(dataset_path: str, transform) -> torch.utils.data.Dataset:
+def build_dataset(dataset_path: str, transform, out_dir: Path) -> torch.utils.data.Dataset:
     name, kwargs = parse_dataset_path(dataset_path)
     if name == "BoneTumor":
         import types
@@ -257,6 +257,7 @@ def build_dataset(dataset_path: str, transform) -> torch.utils.data.Dataset:
             downstream_val_frac=float(kwargs.get("downstream_val_frac", 0.1)),
             test_frac=float(kwargs.get("test_frac", 0.1)),
             seed=int(kwargs.get("seed", 42)),
+            out_dir=str(out_dir),
         )
         pretrain_samples, _, _, _ = build_stratified_splits(args)
         image_paths = [s[0] for s in pretrain_samples]
@@ -311,7 +312,8 @@ def train(cfg: dict, out_dir: Path) -> None:
 
     n_epochs         = optim_cfg.get("epochs", 50)
     batch_per_gpu    = train_cfg.get("batch_size_per_gpu", 4)
-    n_workers        = min(train_cfg.get("num_workers", 4), 8)
+    _cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", 4))
+    n_workers        = min(train_cfg.get("num_workers", 4), _cpus)
     epoch_len        = train_cfg.get("OFFICIAL_EPOCH_LENGTH", 2500)
     save_freq        = train_cfg.get("saveckp_freq", 10)
     seed             = train_cfg.get("seed", 0)
@@ -331,8 +333,8 @@ def train(cfg: dict, out_dir: Path) -> None:
     dino_nlayers     = dino_cfg.get("head_nlayers", 3)
     ibot_prototypes  = ibot_cfg.get("head_n_prototypes", 131072)
     ibot_bottleneck  = ibot_cfg.get("head_bottleneck_dim", 256)
-    ibot_hidden      = dino_cfg.get("head_hidden_dim", 2048)
-    ibot_nlayers     = dino_cfg.get("head_nlayers", 3)
+    ibot_hidden      = ibot_cfg.get("head_hidden_dim", 2048)
+    ibot_nlayers     = ibot_cfg.get("head_nlayers", 3)
     mask_prob        = ibot_cfg.get("mask_sample_probability", 0.5)
     mask_min         = ibot_cfg.get("mask_ratio_min_max", [0.1, 0.5])[0]
     mask_max         = ibot_cfg.get("mask_ratio_min_max", [0.1, 0.5])[1]
@@ -404,7 +406,11 @@ def train(cfg: dict, out_dir: Path) -> None:
     dino_head_s = DINOHead(embed_dim, dino_prototypes,
                            hidden_dim=dino_hidden, bottleneck_dim=dino_bottleneck,
                            nlayers=dino_nlayers).to(device)
-    dino_head_t = copy.deepcopy(dino_head_s)
+    # deepcopy fails on weight_norm layers — instantiate a fresh head and copy weights instead
+    dino_head_t = DINOHead(embed_dim, dino_prototypes,
+                           hidden_dim=dino_hidden, bottleneck_dim=dino_bottleneck,
+                           nlayers=dino_nlayers).to(device)
+    dino_head_t.load_state_dict(dino_head_s.state_dict())
     for p in dino_head_t.parameters():
         p.requires_grad_(False)
 
@@ -413,19 +419,23 @@ def train(cfg: dict, out_dir: Path) -> None:
         ibot_head_s = DINOHead(embed_dim, ibot_prototypes,
                                hidden_dim=ibot_hidden, bottleneck_dim=ibot_bottleneck,
                                nlayers=ibot_nlayers).to(device)
-        ibot_head_t = copy.deepcopy(ibot_head_s)
+        ibot_head_t = DINOHead(embed_dim, ibot_prototypes,
+                               hidden_dim=ibot_hidden, bottleneck_dim=ibot_bottleneck,
+                               nlayers=ibot_nlayers).to(device)
+        ibot_head_t.load_state_dict(ibot_head_s.state_dict())
         for p in ibot_head_t.parameters():
             p.requires_grad_(False)
     else:
         ibot_head_s = dino_head_s
         ibot_head_t = dino_head_t
 
-    # Wrap in DDP only when multi-GPU.
+    # Heads wrapped in DDP (use standard forward). student_trunk is NOT wrapped in DDP
+    # because we need forward_features() which DDP does not expose — gradients are
+    # synced manually after backward instead.
     if world_size > 1:
-        student_trunk  = nn.parallel.DistributedDataParallel(student_trunk,  device_ids=[local_rank])
-        dino_head_s    = nn.parallel.DistributedDataParallel(dino_head_s,    device_ids=[local_rank])
+        dino_head_s = nn.parallel.DistributedDataParallel(dino_head_s, device_ids=[local_rank])
         if ibot_separate:
-            ibot_head_s = nn.parallel.DistributedDataParallel(ibot_head_s,   device_ids=[local_rank])
+            ibot_head_s = nn.parallel.DistributedDataParallel(ibot_head_s, device_ids=[local_rank])
 
     # ── Losses ───────────────────────────────────────────────────────────────
     dino_loss = DINOLoss(
@@ -451,7 +461,7 @@ def train(cfg: dict, out_dir: Path) -> None:
         local_crops_size=local_size,
         n_local_crops=n_local,
     )
-    dataset = build_dataset(train_cfg["dataset_path"], transform=aug)
+    dataset = build_dataset(train_cfg["dataset_path"], transform=aug, out_dir=out_dir)
     sampler = (
         torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True)
         if world_size > 1 else None
@@ -493,7 +503,7 @@ def train(cfg: dict, out_dir: Path) -> None:
     mom_schedule = cosine_schedule(start=momentum_start, end=momentum_end,
                                    n_steps=total_steps)
 
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
     # ── Number of patches (needed for mask generation) ───────────────────────
     n_patches = (global_size // student_cfg.get("patch_size", 16)) ** 2
@@ -545,30 +555,50 @@ def train(cfg: dict, out_dir: Path) -> None:
                 for _ in global_crops
             ]
 
-            # ── Teacher forward (no grad, no masking) ────────────────────────
+            # ── Teacher forward (no grad) ─────────────────────────────────────
             t_temp = teacher_temp_schedule[epoch]
             with torch.no_grad():
                 teacher_out_g: list[dict] = []
                 for gc in global_crops:
                     teacher_out_g.append(teacher_trunk.forward_features(gc))
 
-                teacher_cls   = [o["x_norm_clstoken"]   for o in teacher_out_g]
-                teacher_patch = [o["x_norm_patchtokens"] for o in teacher_out_g]
+                teacher_cls = [o["x_norm_clstoken"] for o in teacher_out_g]
                 teacher_dino_raw = [dino_head_t(c) for c in teacher_cls]
-                teacher_ibot_raw = [ibot_head_t(p) for p in teacher_patch]
 
-                # Center and sharpen teacher outputs before passing to losses.
+                # iBOT: run head on masked positions only — avoids (B, N, K) OOM.
+                # Each element: (num_masked, K)
+                teacher_ibot_masked = [
+                    ibot_head_t(out["x_norm_patchtokens"][mask])
+                    for out, mask in zip(teacher_out_g, masks)
+                ]
+
+                # Center and sharpen DINO teacher outputs.
                 if centering == "sinkhorn_knopp":
                     teacher_dino = [dino_loss.sinkhorn_knopp_teacher(t, t_temp)
                                     for t in teacher_dino_raw]
                 else:
                     teacher_dino = [dino_loss.softmax_center_teacher(t, t_temp)
                                     for t in teacher_dino_raw]
-                teacher_ibot = [ibot_loss.softmax_center_teacher(t, t_temp)
-                                for t in teacher_ibot_raw]
+
+                # iBOT: apply pending center update, then softmax on masked tokens.
+                # softmax_center_teacher expects (B, N, K); bypass it directly.
+                ibot_loss.apply_center_update()
+                teacher_ibot = [
+                    F.softmax((t - ibot_loss.center.view(1, -1)) / t_temp, dim=-1)
+                    for t in teacher_ibot_masked
+                ]  # each: (num_masked, K)
+
+            # Center updates before student forward — frees large teacher tensors
+            # early. Incremental sum avoids a (total_masked, K) cat OOM.
+            dino_loss.update_center(torch.cat(teacher_dino_raw))
+            _ibot_sum = sum(t.sum(0, keepdim=True) for t in teacher_ibot_masked)
+            _ibot_n   = sum(t.shape[0] for t in teacher_ibot_masked)
+            if _ibot_n > 0:  # skip if all images happened to have no mask this step
+                ibot_loss.update_center((_ibot_sum / _ibot_n).unsqueeze(0))  # (1, 1, K)
+            del teacher_dino_raw, teacher_ibot_masked, _ibot_sum
 
             # ── Student forward (with masking on global crops) ───────────────
-            with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+            with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
                 student_dino_logits: list[torch.Tensor] = []
                 student_ibot_logits: list[torch.Tensor] = []
                 student_cls_tokens:  list[torch.Tensor] = []
@@ -577,7 +607,8 @@ def train(cfg: dict, out_dir: Path) -> None:
                     feat = student_trunk.forward_features(gc, masks=mask)
                     student_cls_tokens.append(feat["x_norm_clstoken"])
                     student_dino_logits.append(dino_head_s(feat["x_norm_clstoken"]))
-                    student_ibot_logits.append(ibot_head_s(feat["x_norm_patchtokens"]))
+                    # iBOT: only process masked patches to avoid (B, N, K) OOM.
+                    student_ibot_logits.append(ibot_head_s(feat["x_norm_patchtokens"][mask]))
 
                 for lc in local_crops:
                     feat = student_trunk.forward_features(lc)
@@ -587,7 +618,7 @@ def train(cfg: dict, out_dir: Path) -> None:
                 n_dino_terms = len(student_dino_logits) * len(teacher_dino)
                 loss_dino  = dino_loss(student_dino_logits, teacher_dino) / n_dino_terms
                 loss_ibot  = sum(
-                    ibot_loss(s, t, mask)
+                    ibot_loss.forward_masked(s, t, mask)
                     for s, t, mask in zip(student_ibot_logits, teacher_ibot, masks)
                 ) / len(global_crops)
                 loss_koleo = koleo_loss(torch.cat(student_cls_tokens))
@@ -596,17 +627,15 @@ def train(cfg: dict, out_dir: Path) -> None:
                         + ibot_weight  * loss_ibot
                         + koleo_weight * loss_koleo)
 
-            # Async center updates for next step (outside autocast, use raw logits).
-            dino_loss.update_center(torch.cat(teacher_dino_raw))
-            # Pass only masked patch tokens — shape (1, total_masked, K) — matching original.
-            masked_teacher_ibot = torch.cat(
-                [t[mask] for t, mask in zip(teacher_ibot_raw, masks)], dim=0
-            ).unsqueeze(0)
-            ibot_loss.update_center(masked_teacher_ibot)
-
             # ── Optimiser step ───────────────────────────────────────────────
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            # student_trunk is not DDP-wrapped — manually all-reduce its LoRA grads.
+            if world_size > 1:
+                for p in student_trunk.parameters():
+                    if p.requires_grad and p.grad is not None:
+                        dist.all_reduce(p.grad)
+                        p.grad.div_(world_size)
             if clip_grad > 0:
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(all_params, clip_grad)
@@ -614,9 +643,8 @@ def train(cfg: dict, out_dir: Path) -> None:
             scaler.update()
 
             # ── Teacher EMA ──────────────────────────────────────────────────
-            _s_trunk = student_trunk.module if world_size > 1 else student_trunk
-            _s_dino  = dino_head_s.module  if world_size > 1 else dino_head_s
-            update_teacher(_s_trunk, teacher_trunk, momentum)
+            _s_dino = dino_head_s.module if world_size > 1 else dino_head_s
+            update_teacher(student_trunk, teacher_trunk, momentum)
             update_teacher(_s_dino, dino_head_t, momentum)
             if ibot_separate:
                 _s_ibot = ibot_head_s.module if world_size > 1 else ibot_head_s
@@ -645,10 +673,9 @@ def train(cfg: dict, out_dir: Path) -> None:
             (out_dir / "log.json").write_text(json.dumps(log, indent=2))
 
             # Save checkpoint.
-            _s_trunk = student_trunk.module if world_size > 1 else student_trunk
             ckpt = {
                 "epoch": epoch + 1,
-                "student": _s_trunk.state_dict(),
+                "student": student_trunk.state_dict(),
                 "teacher": teacher_trunk.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "dino_loss_center": dino_loss.center,

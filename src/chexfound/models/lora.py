@@ -45,7 +45,15 @@ def _wrap_linear(parent: nn.Module, attr: str, r: int, alpha: float) -> bool:
 
 
 def _wrap_mlp_linears(mlp: nn.Module, r: int, alpha: float) -> None:
-    # timm-style MLP uses fc1/fc2; upstream CheXFound SwiGLU uses w12/w3.
+    # xFormers fused SwiGLU accesses .weight directly inside its CUDA kernel,
+    # bypassing LoRALinear.forward entirely — wrapping breaks the kernel.
+    try:
+        from xformers.ops.swiglu_op import SwiGLU
+        if isinstance(mlp, SwiGLU):
+            return
+    except ImportError:
+        pass
+    # timm-style MLP uses fc1/fc2; non-fused CheXFound SwiGLU uses w12/w3.
     if _wrap_linear(mlp, "fc1", r, alpha) | _wrap_linear(mlp, "fc2", r, alpha):
         return
     if _wrap_linear(mlp, "w12", r, alpha) | _wrap_linear(mlp, "w3", r, alpha):

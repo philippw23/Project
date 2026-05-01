@@ -36,8 +36,7 @@ export PYTHONPATH=$home_dir/Project/src
 # Mode B (custom checkpoint): add --checkpoint /path/to/custom.pth
 
 python $home_dir/Project/src/chexfound_downstream.py \
-    --chexfound_weights $home_dir/Project/src/chexfound/data/teacher_checkpoint.pth \
-    --checkpoint none \
+    --checkpoint $home_dir/Project/results/chexfound_pretrain/checkpoint_last.pth \
     --splits    $home_dir/Project/results/biomedclip_pretrain/run_20260428_121303/splits.json \
     --excel     $home_dir/Project/data/metadata.xlsx \
     --out_dir   $home_dir/Project/results \
