@@ -1,0 +1,42 @@
+program: src/chexfound/train/pretrain.py
+project: chexfound-pretrain
+entity: philipp-wiese
+method: bayes
+run_cap: 20
+metric:
+  name: train/loss_total
+  goal: minimize
+
+parameters:
+  base_lr:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 2.0e-4
+  lora_r:
+    values: [4, 8, 16, 32]
+  lora_layers:
+    values: [2, 4, 6]
+  momentum_teacher:
+    distribution: uniform
+    min: 0.990
+    max: 0.9995
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --config
+  - configs/chexfound_vitl16_bonetumor.yaml
+  - --base_cfg
+  - src/chexfound/data/config.yaml
+  - --out_dir
+  - results/chexfound_pretrain_sweep
+  - --wandb_project
+  - chexfound-pretrain
+  - --wandb_entity
+  - philipp-wiese
+  - --epochs
+  - "20"
+  - --batch_size
+  - "4"
+  - --sweep

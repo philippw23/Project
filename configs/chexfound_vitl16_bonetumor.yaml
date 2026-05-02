@@ -24,7 +24,7 @@ ibot:
   head_n_prototypes: 131072
 
 train:
-  batch_size_per_gpu: 4
+  batch_size_per_gpu: 14
   dataset_path: "BoneTumor:root=/mnt/nfs/homedirs/philippw/Project/data/images"
   centering: sinkhorn_knopp
   OFFICIAL_EPOCH_LENGTH: 2500

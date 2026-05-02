@@ -1,10 +1,9 @@
-"""Self-contained CheXFound iBOT continued-pretraining script.
+"""CheXFound iBOT continued-pretraining script using SSLMetaArch.
 
-Implements the joint DINO + iBOT (masked-image-modelling) objective used by
-CheXFound, without any dependency on the external CheXFound / DINOv2 repository.
-
-Architecture and hyperparameter defaults are taken directly from
-configs/chexfound_vitl16_bonetumor.yaml (which overrides src/chexfound/data/config.yaml).
+Implements the joint DINO + iBOT (masked-image-modelling) objective via
+SSLMetaArch, which matches the upstream CheXFound training logic exactly:
+block-based rectangular masking (MaskingGenerator), correct DINO loss
+normalisation, and KoLeo regularisation per the original CheXFound paper.
 
 Usage (single GPU via torchrun):
     torchrun --nproc_per_node=1 src/chexfound/train/pretrain.py \\
@@ -12,7 +11,7 @@ Usage (single GPU via torchrun):
         --base_cfg src/chexfound/data/config.yaml \\
         --out_dir  results/chexfound_pretrain
 
-The script saves checkpoints as:
+Checkpoints are saved as:
     results/chexfound_pretrain/
         checkpoint_ep{N}.pth   — periodic snapshots
         checkpoint_last.pth    — always overwritten with the latest epoch
@@ -20,220 +19,80 @@ The script saves checkpoints as:
 from __future__ import annotations
 
 import argparse
-import copy
 import json
-import math
 import os
 import sys
 import time
+from functools import partial
 from pathlib import Path
-from typing import Iterator
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 import yaml
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
-from torchvision import transforms
 
-# Make project root importable when called via torchrun from the project root.
-_SRC = str(Path(__file__).resolve().parents[3])  # …/Project/src
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+# Add …/Project/src to sys.path so `chexfound` and `biomedclip` are importable
+# regardless of how the script is invoked (torchrun, wandb agent, pytest, etc.).
+_SRC = str(Path(__file__).resolve().parents[2])  # …/Project/src
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from chexfound.bone_tumor_patch.bone_tumor import BoneTumorDataset
-from chexfound.loss import DINOLoss, iBOTPatchLoss, KoLeoLoss
+from chexfound.data import DataAugmentationDINO, MaskingGenerator, collate_data_and_cast
 from chexfound.models.lora import inject_lora_chexfound
-from chexfound.models.model_factory import build_model_from_cfg
 from chexfound.models.weight_utils import load_pretrained_weights
+from chexfound.train.ssl_meta_arch import SSLMetaArch
+from chexfound.utils.utils import CosineScheduler, fix_random_seeds
 from biomedclip.data.splits import build_stratified_splits
 from biomedclip.utils.misc import DEFAULT_EXCEL, DEFAULT_REPORTS, DEFAULT_MASKS_DIR
 
 
-def _multicrop_collate(batch: list) -> list[torch.Tensor]:
-    """Collate a batch of (list_of_crops, target) samples into a list of (B, C, H, W) tensors.
-    Targets are discarded — pretraining uses only the crops.
-    """
-    crops_per_sample = [sample[0] for sample in batch]
-    n_crops = len(crops_per_sample[0])
-    return [torch.stack([crops_per_sample[b][i] for b in range(len(batch))]) for i in range(n_crops)]
-
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD  = (0.229, 0.224, 0.225)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# Projection heads
+# Config helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-class DINOHead(nn.Module):
-    """MLP projection head followed by a weight-normalised prototype layer.
-
-    Architecture (nlayers=3):
-        Linear(in_dim → hidden_dim) → GELU
-        Linear(hidden_dim → hidden_dim) → GELU
-        Linear(hidden_dim → bottleneck_dim)
-        L2-normalise
-        WeightNorm-Linear(bottleneck_dim → n_prototypes, no bias)
-    """
-
-    def __init__(
-        self,
-        in_dim: int,
-        out_dim: int,
-        hidden_dim: int = 2048,
-        bottleneck_dim: int = 384,
-        nlayers: int = 3,
-    ) -> None:
-        super().__init__()
-        nlayers = max(1, nlayers)
-        layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim)]
-        for _ in range(nlayers - 2):
-            layers += [nn.GELU(), nn.Linear(hidden_dim, hidden_dim)]
-        layers += [nn.GELU(), nn.Linear(hidden_dim, bottleneck_dim)]
-        self.mlp = nn.Sequential(*layers)
-        self._init_weights()
-        # Weight-normalised prototype layer (bias frozen at zero).
-        self.last_layer = nn.utils.weight_norm(
-            nn.Linear(bottleneck_dim, out_dim, bias=False)
-        )
-        self.last_layer.weight_g.data.fill_(1.0)
-        self.last_layer.weight_g.requires_grad_(False)
-
-    def _init_weights(self) -> None:
-        for m in self.mlp.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.mlp(x)
-        x = F.normalize(x, dim=-1)
-        return self.last_layer(x)
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Multi-crop data augmentation
-# ══════════════════════════════════════════════════════════════════════════════
-
-class MultiCropAugmentation:
-    """Produces n_global_crops global views + n_local_crops local views.
-
-    Returns a list: [global_0, global_1, local_0, …, local_{n-1}]
-    """
-
-    def __init__(
-        self,
-        global_crops_scale: tuple = (0.32, 1.0),
-        local_crops_scale: tuple = (0.05, 0.32),
-        global_crops_size: int = 512,
-        local_crops_size: int = 144,
-        n_local_crops: int = 8,
-    ) -> None:
-        flip_blur = [
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.GaussianBlur(kernel_size=23, sigma=(0.1, 2.0)),
-        ]
-        normalize = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ])
-        color_jitter = transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)
-
-        self.global_tf = transforms.Compose([
-            transforms.RandomResizedCrop(global_crops_size, scale=global_crops_scale,
-                                         interpolation=transforms.InterpolationMode.BICUBIC),
-            *flip_blur,
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            normalize,
-        ])
-        self.local_tf = transforms.Compose([
-            transforms.RandomResizedCrop(local_crops_size, scale=local_crops_scale,
-                                         interpolation=transforms.InterpolationMode.BICUBIC),
-            *flip_blur,
-            transforms.RandomApply([color_jitter], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            normalize,
-        ])
-        self.n_local_crops = n_local_crops
-
-    def __call__(self, img) -> list[torch.Tensor]:
-        crops = [self.global_tf(img), self.global_tf(img)]
-        crops += [self.local_tf(img) for _ in range(self.n_local_crops)]
-        return crops
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# iBOT patch masking
-# ══════════════════════════════════════════════════════════════════════════════
-
-def generate_patch_masks(
-    batch_size: int,
-    n_patches: int,
-    mask_ratio_min: float = 0.1,
-    mask_ratio_max: float = 0.5,
-    mask_sample_probability: float = 0.5,
-    device: torch.device = torch.device("cpu"),
-) -> torch.Tensor:
-    """Return a (B, N) bool mask — True = replace with mask token."""
-    masks = torch.zeros(batch_size, n_patches, dtype=torch.bool, device=device)
-    for b in range(batch_size):
-        if torch.rand(1).item() > mask_sample_probability:
-            continue
-        ratio = mask_ratio_min + torch.rand(1).item() * (mask_ratio_max - mask_ratio_min)
-        n_masked = max(1, int(ratio * n_patches))
-        idx = torch.randperm(n_patches, device=device)[:n_masked]
-        masks[b, idx] = True
-    return masks
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Cosine / linear schedules
-# ══════════════════════════════════════════════════════════════════════════════
-
-def cosine_schedule(
-    start: float,
-    end: float,
-    n_steps: int,
-    warmup_steps: int = 0,
-    warmup_start: float = 0.0,
-) -> list[float]:
-    """Cosine decay from *start* to *end* over *n_steps*, with optional warmup."""
-    schedule = []
-    for i in range(n_steps):
-        if i < warmup_steps:
-            v = warmup_start + (start - warmup_start) * i / max(warmup_steps, 1)
+def merge_configs(base_path: str | None, override_path: str) -> dict:
+    """Deep-merge override YAML on top of base YAML (override wins)."""
+    cfg: dict = {}
+    if base_path and Path(base_path).is_file():
+        with open(base_path, encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    with open(override_path, encoding="utf-8") as fh:
+        override = yaml.safe_load(fh) or {}
+    for section, values in override.items():
+        if isinstance(values, dict) and isinstance(cfg.get(section), dict):
+            cfg[section] = {**cfg[section], **values}
         else:
-            t = (i - warmup_steps) / max(n_steps - warmup_steps, 1)
-            v = end + 0.5 * (start - end) * (1 + math.cos(math.pi * t))
-        schedule.append(v)
-    return schedule
+            cfg[section] = values
+    return cfg
+
+
+def _apply_sweep_cfg(cfg: dict) -> None:
+    """Override Tier-1 pretrain hyperparams from wandb.config (called after wandb.init)."""
+    wc = wandb.config
+    if "base_lr" in wc:
+        cfg.setdefault("optim", {})["base_lr"] = wc["base_lr"]
+    if "lora_r" in wc:
+        cfg.setdefault("lora", {})["r"] = int(wc["lora_r"])
+    if "lora_layers" in wc:
+        cfg.setdefault("lora", {})["lora_layers"] = int(wc["lora_layers"])
+    if "momentum_teacher" in wc:
+        cfg.setdefault("teacher", {})["momentum_teacher"] = wc["momentum_teacher"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Teacher EMA update
+# Dataset
 # ══════════════════════════════════════════════════════════════════════════════
 
-@torch.no_grad()
-def update_teacher(
-    student: nn.Module,
-    teacher: nn.Module,
-    momentum: float,
-) -> None:
-    for ps, pt in zip(student.parameters(), teacher.parameters()):
-        pt.data.mul_(momentum).add_(ps.data, alpha=1.0 - momentum)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Dataset / config helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-def parse_dataset_path(dataset_path: str) -> tuple[str, dict]:
-    """Parse 'DatasetName:key=val:key=val' into (name, kwargs)."""
+def _parse_dataset_path(dataset_path: str) -> tuple[str, dict]:
     parts = dataset_path.split(":")
     name = parts[0]
     kwargs: dict = {}
@@ -244,7 +103,7 @@ def parse_dataset_path(dataset_path: str) -> tuple[str, dict]:
 
 
 def build_dataset(dataset_path: str, transform, out_dir: Path) -> torch.utils.data.Dataset:
-    name, kwargs = parse_dataset_path(dataset_path)
+    name, kwargs = _parse_dataset_path(dataset_path)
     if name == "BoneTumor":
         import types
         args = types.SimpleNamespace(
@@ -265,34 +124,32 @@ def build_dataset(dataset_path: str, transform, out_dir: Path) -> torch.utils.da
     raise ValueError(f"Unknown dataset: {name!r}. Supported: 'BoneTumor'.")
 
 
-def merge_configs(base_path: str | None, override_path: str) -> dict:
-    """Deep-merge override YAML on top of base YAML (override wins)."""
-    cfg: dict = {}
-    if base_path and Path(base_path).is_file():
-        with open(base_path, encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
-    with open(override_path, encoding="utf-8") as fh:
-        override = yaml.safe_load(fh) or {}
-    for section, values in override.items():
-        if isinstance(values, dict) and isinstance(cfg.get(section), dict):
-            cfg[section] = {**cfg[section], **values}
-        else:
-            cfg[section] = values
-    return cfg
+# ══════════════════════════════════════════════════════════════════════════════
+# EMA update (single-GPU — bypasses FSDP module list in SSLMetaArch)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@torch.no_grad()
+def _ema_update(model: SSLMetaArch, momentum: float) -> None:
+    for k in model.student.keys():
+        for ps, pt in zip(model.student[k].parameters(), model.teacher[k].parameters()):
+            pt.data.mul_(momentum).add_(ps.data, alpha=1.0 - momentum)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Training loop
 # ══════════════════════════════════════════════════════════════════════════════
 
-def train(cfg: dict, out_dir: Path) -> None:
+def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     # ── Distributed setup ────────────────────────────────────────────────────
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     is_main = local_rank == 0
 
-    if world_size > 1:
-        dist.init_process_group("nccl")
+    # Always initialise — iBOTPatchLoss/DINOLoss call dist.all_reduce()
+    # unconditionally, even for world_size=1.
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend)
+    if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
 
     device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
@@ -301,219 +158,177 @@ def train(cfg: dict, out_dir: Path) -> None:
         print(f"Output dir : {out_dir}")
         print(f"Device     : {device}  |  world_size={world_size}")
 
-    # ── Config ───────────────────────────────────────────────────────────────
-    train_cfg   = cfg.get("train",   {})
-    student_cfg = cfg.get("student", {})
-    teacher_cfg = cfg.get("teacher", {})
-    optim_cfg   = cfg.get("optim",   {})
-    dino_cfg    = cfg.get("dino",    {})
-    ibot_cfg    = cfg.get("ibot",    {})
-    crops_cfg   = cfg.get("crops",   {})
+    # ── Extract scalar hyperparams from the merged dict ──────────────────────
+    train_cfg   = cfg_dict.get("train",   {})
+    optim_cfg   = cfg_dict.get("optim",   {})
+    teacher_cfg = cfg_dict.get("teacher", {})
+    crops_cfg   = cfg_dict.get("crops",   {})
+    student_cfg = cfg_dict.get("student", {})
+    ibot_cfg    = cfg_dict.get("ibot",    {})
 
-    n_epochs         = optim_cfg.get("epochs", 50)
-    batch_per_gpu    = train_cfg.get("batch_size_per_gpu", 4)
-    _cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", 4))
-    n_workers        = min(train_cfg.get("num_workers", 4), _cpus)
-    epoch_len        = train_cfg.get("OFFICIAL_EPOCH_LENGTH", 2500)
-    save_freq        = train_cfg.get("saveckp_freq", 10)
-    seed             = train_cfg.get("seed", 0)
-    warmup_epochs    = optim_cfg.get("warmup_epochs", 5)
-    base_lr          = optim_cfg.get("base_lr", 5e-5)
-    min_lr           = optim_cfg.get("min_lr", 1e-6)
-    wd_start         = optim_cfg.get("weight_decay", 0.04)
-    wd_end           = optim_cfg.get("weight_decay_end", 0.2)
-    clip_grad        = optim_cfg.get("clip_grad", 3.0)
+    n_epochs      = optim_cfg.get("epochs", 50)
+    batch_per_gpu = train_cfg.get("batch_size_per_gpu", 4)
+    _cpus         = int(os.environ.get("SLURM_CPUS_PER_TASK", 4))
+    n_workers     = min(train_cfg.get("num_workers", 4), _cpus)
+    epoch_len     = train_cfg.get("OFFICIAL_EPOCH_LENGTH", 2500)
+    save_freq     = train_cfg.get("saveckp_freq", 10)
+    seed          = train_cfg.get("seed", 0)
 
-    dino_weight      = dino_cfg.get("loss_weight", 1.0)
-    ibot_weight      = ibot_cfg.get("loss_weight", 3.0)
-    koleo_weight     = dino_cfg.get("koleo_loss_weight", 0.1)
-    dino_prototypes  = dino_cfg.get("head_n_prototypes", 131072)
-    dino_bottleneck  = dino_cfg.get("head_bottleneck_dim", 384)
-    dino_hidden      = dino_cfg.get("head_hidden_dim", 2048)
-    dino_nlayers     = dino_cfg.get("head_nlayers", 3)
-    ibot_prototypes  = ibot_cfg.get("head_n_prototypes", 131072)
-    ibot_bottleneck  = ibot_cfg.get("head_bottleneck_dim", 256)
-    ibot_hidden      = ibot_cfg.get("head_hidden_dim", 2048)
-    ibot_nlayers     = ibot_cfg.get("head_nlayers", 3)
-    mask_prob        = ibot_cfg.get("mask_sample_probability", 0.5)
-    mask_min         = ibot_cfg.get("mask_ratio_min_max", [0.1, 0.5])[0]
-    mask_max         = ibot_cfg.get("mask_ratio_min_max", [0.1, 0.5])[1]
-    centering        = train_cfg.get("centering", "sinkhorn_knopp")
+    base_lr    = optim_cfg.get("base_lr", 5e-5)
+    min_lr     = optim_cfg.get("min_lr", 1e-6)
+    wd_start   = optim_cfg.get("weight_decay", 0.04)
+    wd_end     = optim_cfg.get("weight_decay_end", 0.2)
+    clip_grad  = optim_cfg.get("clip_grad", 3.0)
+    warmup_epochs = optim_cfg.get("warmup_epochs", 5)
+    freeze_last_layer_epochs = optim_cfg.get("freeze_last_layer_epochs", 1)
+    beta1 = optim_cfg.get("adamw_beta1", 0.9)
+    beta2 = optim_cfg.get("adamw_beta2", 0.999)
 
-    momentum_start   = teacher_cfg.get("momentum_teacher", 0.994)
-    momentum_end     = teacher_cfg.get("final_momentum_teacher", 1.0)
-    warmup_t_temp    = teacher_cfg.get("warmup_teacher_temp", 0.04)
-    teacher_temp     = teacher_cfg.get("teacher_temp", 0.07)
-    warmup_t_epochs  = teacher_cfg.get("warmup_teacher_temp_epochs", 30)
+    momentum_start  = teacher_cfg.get("momentum_teacher", 0.994)
+    momentum_end    = teacher_cfg.get("final_momentum_teacher", 1.0)
+    warmup_t_temp   = teacher_cfg.get("warmup_teacher_temp", 0.04)
+    teacher_temp    = teacher_cfg.get("teacher_temp", 0.07)
+    warmup_t_epochs = teacher_cfg.get("warmup_teacher_temp_epochs", 30)
 
-    global_size      = crops_cfg.get("global_crops_size", 512)
-    local_size       = crops_cfg.get("local_crops_size", 144)
-    global_scale     = tuple(crops_cfg.get("global_crops_scale", [0.32, 1.0]))
-    local_scale      = tuple(crops_cfg.get("local_crops_scale", [0.05, 0.32]))
-    n_local          = crops_cfg.get("local_crops_number", 8)
+    patch_size   = student_cfg.get("patch_size", 16)
+    global_size  = crops_cfg.get("global_crops_size", 512)
+    local_size   = crops_cfg.get("local_crops_size", 144)
+    global_scale = tuple(crops_cfg.get("global_crops_scale", [0.32, 1.0]))
+    local_scale  = tuple(crops_cfg.get("local_crops_scale", [0.05, 0.32]))
+    n_local      = crops_cfg.get("local_crops_number", 8)
 
-    torch.manual_seed(seed + local_rank)
+    mask_prob = ibot_cfg.get("mask_sample_probability", 0.5)
+    mask_min  = ibot_cfg.get("mask_ratio_min_max", [0.1, 0.5])[0]
+    mask_max  = ibot_cfg.get("mask_ratio_min_max", [0.1, 0.5])[1]
 
-    # ── Models ───────────────────────────────────────────────────────────────
-    # Build from the already merged runtime config so architecture overrides in
-    # --config are actually reflected in the model.
-    student_trunk, embed_dim = build_model_from_cfg(cfg)
-    teacher_trunk = copy.deepcopy(student_trunk)
+    n_patches = (global_size // patch_size) ** 2
 
-    # Optionally warm-start from MODEL.WEIGHTS (original CheXFound checkpoint).
-    warm_start = cfg.get("MODEL", {}).get("WEIGHTS", "")
+    fix_random_seeds(seed + local_rank)
+
+    # ── Prepare OmegaConf config for SSLMetaArch ─────────────────────────────
+    # Disable ShardedGradScaler — backprop_loss will call loss.backward() directly,
+    # and we manage the optimizer step ourselves in the outer loop.
+    cfg_dict.setdefault("compute_precision", {})["grad_scaler"] = False
+    # Warm-start is handled below; suppress SSLMetaArch's internal loading.
+    cfg_dict.setdefault("student", {})["pretrained_weights"] = ""
+    # Ensure layerwise LR decay defaults are present for get_params_groups().
+    cfg_dict["optim"].setdefault("layerwise_decay", 1.0)
+    cfg_dict["optim"].setdefault("patch_embed_lr_mult", 0.2)
+
+    cfg_obj = OmegaConf.create(cfg_dict)
+
+    # ── Build model ──────────────────────────────────────────────────────────
+    model = SSLMetaArch(cfg_obj)
+    # Skip the FSDP stream-sync path — not applicable for single-GPU.
+    model.need_to_synchronize_fsdp_streams = False
+    # Replace update_teacher() with a direct parameter EMA (no FSDP module list).
+    model.update_teacher = lambda m: _ema_update(model, m)
+
+    lora_cfg    = cfg_dict.get("lora", {})
+    lora_layers = lora_cfg.get("lora_layers", 0)
+    lora_r      = lora_cfg.get("r", 8)
+    lora_alpha  = lora_cfg.get("alpha", 16.0)
+
+    # Warm-start BEFORE LoRA injection so checkpoint key names match.
+    # LoRA injection renames e.g. attn.qkv.weight → attn.qkv.linear.weight;
+    # loading after injection would leave those 48 backbone weights at random init.
+    warm_start = cfg_dict.get("MODEL", {}).get("WEIGHTS", "")
     if warm_start and Path(warm_start).is_file():
         if is_main:
-            print(f"Warm-starting from {warm_start}")
-        load_pretrained_weights(student_trunk, warm_start, checkpoint_key="teacher")
-        load_pretrained_weights(teacher_trunk, warm_start, checkpoint_key="teacher")
+            print(f"Warm-starting backbone from {warm_start}")
+        load_pretrained_weights(model.student.backbone, warm_start, checkpoint_key="teacher")
+        load_pretrained_weights(model.teacher.backbone, warm_start, checkpoint_key="teacher")
 
-    # Optionally inject LoRA into the student trunk (freezes backbone, trains adapters only).
-    lora_cfg = cfg.get("lora", {})
-    lora_layers = lora_cfg.get("lora_layers", 0)
+    # Inject LoRA after warm-start so pretrained weights land in the right slots.
     if lora_layers > 0:
-        # Student and EMA teacher must have identical module structure. Inject
-        # LoRA into both trunks, then keep the teacher frozen and update it only
-        # through EMA below.
-        inject_lora_chexfound(
-            student_trunk,
-            lora_layers=lora_layers,
-            r=lora_cfg.get("r", 8),
-            alpha=lora_cfg.get("alpha", 16.0),
-        )
-        inject_lora_chexfound(
-            teacher_trunk,
-            lora_layers=lora_layers,
-            r=lora_cfg.get("r", 8),
-            alpha=lora_cfg.get("alpha", 16.0),
-        )
-        teacher_trunk.load_state_dict(student_trunk.state_dict())
-        if is_main:
-            trainable = sum(p.numel() for p in student_trunk.parameters() if p.requires_grad)
-            total     = sum(p.numel() for p in student_trunk.parameters())
-            print(f"LoRA: last {lora_layers} blocks | r={lora_cfg.get('r', 8)} | "
-                  f"trainable trunk params: {trainable:,} / {total:,} "
-                  f"({100 * trainable / total:.2f}%)")
+        inject_lora_chexfound(model.student.backbone, lora_layers=lora_layers, r=lora_r, alpha=lora_alpha)
+        inject_lora_chexfound(model.teacher.backbone, lora_layers=lora_layers, r=lora_r, alpha=lora_alpha)
+        # Teacher backbone already has the same pretrained weights as student;
+        # sync so both have identical (random) LoRA initialisations too.
+        model.teacher.backbone.load_state_dict(model.student.backbone.state_dict())
 
-    # Teacher is never directly trained (plain ViT, no LoRA).
-    for p in teacher_trunk.parameters():
+    # Re-freeze all teacher parameters (LoRA injection may have unfrozen some).
+    for p in model.teacher.parameters():
         p.requires_grad_(False)
 
-    student_trunk = student_trunk.to(device)
-    teacher_trunk = teacher_trunk.to(device)
+    model = model.to(device)
+    model.train()  # keeps teacher in eval() via SSLMetaArch.train()
 
-    # Projection heads.
-    dino_head_s = DINOHead(embed_dim, dino_prototypes,
-                           hidden_dim=dino_hidden, bottleneck_dim=dino_bottleneck,
-                           nlayers=dino_nlayers).to(device)
-    # deepcopy fails on weight_norm layers — instantiate a fresh head and copy weights instead
-    dino_head_t = DINOHead(embed_dim, dino_prototypes,
-                           hidden_dim=dino_hidden, bottleneck_dim=dino_bottleneck,
-                           nlayers=dino_nlayers).to(device)
-    dino_head_t.load_state_dict(dino_head_s.state_dict())
-    for p in dino_head_t.parameters():
-        p.requires_grad_(False)
+    if is_main:
+        trainable = sum(p.numel() for p in model.student.parameters() if p.requires_grad)
+        total     = sum(p.numel() for p in model.parameters())
+        print(f"Student trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
+        if lora_layers > 0:
+            print(f"LoRA: last {lora_layers} blocks | r={lora_r} | alpha={lora_alpha}")
 
-    ibot_separate = ibot_cfg.get("separate_head", True)
-    if ibot_separate:
-        ibot_head_s = DINOHead(embed_dim, ibot_prototypes,
-                               hidden_dim=ibot_hidden, bottleneck_dim=ibot_bottleneck,
-                               nlayers=ibot_nlayers).to(device)
-        ibot_head_t = DINOHead(embed_dim, ibot_prototypes,
-                               hidden_dim=ibot_hidden, bottleneck_dim=ibot_bottleneck,
-                               nlayers=ibot_nlayers).to(device)
-        ibot_head_t.load_state_dict(ibot_head_s.state_dict())
-        for p in ibot_head_t.parameters():
-            p.requires_grad_(False)
-    else:
-        ibot_head_s = dino_head_s
-        ibot_head_t = dino_head_t
-
-    # Heads wrapped in DDP (use standard forward). student_trunk is NOT wrapped in DDP
-    # because we need forward_features() which DDP does not expose — gradients are
-    # synced manually after backward instead.
-    if world_size > 1:
-        dino_head_s = nn.parallel.DistributedDataParallel(dino_head_s, device_ids=[local_rank])
-        if ibot_separate:
-            ibot_head_s = nn.parallel.DistributedDataParallel(ibot_head_s, device_ids=[local_rank])
-
-    # ── Losses ───────────────────────────────────────────────────────────────
-    dino_loss = DINOLoss(
-        out_dim=dino_prototypes,
-    ).to(device)
-    ibot_loss = iBOTPatchLoss(
-        patch_out_dim=ibot_prototypes,
-    ).to(device)
-    koleo_loss = KoLeoLoss().to(device)
-
-    # Teacher temperature schedule — warm up from warmup_t_temp to teacher_temp.
-    teacher_temp_schedule = [
-        warmup_t_temp + (teacher_temp - warmup_t_temp) * i / max(warmup_t_epochs - 1, 1)
-        if i < warmup_t_epochs else teacher_temp
-        for i in range(n_epochs)
-    ]
-
-    # ── Dataset ──────────────────────────────────────────────────────────────
-    aug = MultiCropAugmentation(
+    # ── Augmentation + DataLoader ─────────────────────────────────────────────
+    aug = DataAugmentationDINO(
         global_crops_scale=global_scale,
         local_crops_scale=local_scale,
+        local_crops_number=n_local,
         global_crops_size=global_size,
         local_crops_size=local_size,
-        n_local_crops=n_local,
     )
+
     dataset = build_dataset(train_cfg["dataset_path"], transform=aug, out_dir=out_dir)
     sampler = (
         torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True)
         if world_size > 1 else None
     )
+
+    mask_generator = MaskingGenerator(
+        input_size=(global_size // patch_size, global_size // patch_size),
+        num_masking_patches=int(n_patches * mask_max),
+    )
+    collate_fn = partial(
+        collate_data_and_cast,
+        mask_ratio_tuple=(mask_min, mask_max),
+        mask_probability=mask_prob,
+        dtype=torch.float32,
+        n_tokens=n_patches,
+        mask_generator=mask_generator,
+    )
+
     loader = DataLoader(
         dataset,
         batch_size=batch_per_gpu,
         shuffle=(sampler is None),
         sampler=sampler,
         num_workers=n_workers,
-        pin_memory=device.type == "cuda",
+        pin_memory=(device.type == "cuda"),
         drop_last=True,
-        collate_fn=_multicrop_collate,
+        collate_fn=collate_fn,
     )
-    # Use epoch_len to limit steps per epoch (matching CheXFound convention).
+
     steps_per_epoch = min(epoch_len, len(loader))
-    total_steps = n_epochs * steps_per_epoch
+    total_steps     = n_epochs * steps_per_epoch
 
-    # ── Optimiser ────────────────────────────────────────────────────────────
-    all_params = (
-        [p for p in student_trunk.parameters() if p.requires_grad]
-        + list(dino_head_s.parameters())
-        + (list(ibot_head_s.parameters()) if ibot_separate else [])
-    )
-    optimizer = torch.optim.AdamW(
-        all_params,
-        lr=base_lr,
-        betas=(optim_cfg.get("adamw_beta1", 0.9), optim_cfg.get("adamw_beta2", 0.999)),
-        weight_decay=wd_start,
-    )
-
-    lr_schedule = cosine_schedule(
-        start=base_lr, end=min_lr,
-        n_steps=total_steps,
-        warmup_steps=warmup_epochs * steps_per_epoch,
-        warmup_start=min_lr,
-    )
-    wd_schedule = cosine_schedule(start=wd_start, end=wd_end, n_steps=total_steps)
-    mom_schedule = cosine_schedule(start=momentum_start, end=momentum_end,
-                                   n_steps=total_steps)
-
-    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
-
-    # ── Number of patches (needed for mask generation) ───────────────────────
-    n_patches = (global_size // student_cfg.get("patch_size", 16)) ** 2
-
-    # ── Training loop ────────────────────────────────────────────────────────
     if is_main:
         print(f"\nStarting iBOT training: {n_epochs} epochs × {steps_per_epoch} steps")
-        print(f"  Dataset  : {len(dataset)} images")
-        print(f"  Batch    : {batch_per_gpu} × {world_size} GPU(s)")
+        print(f"  Dataset : {len(dataset)} images")
+        print(f"  Batch   : {batch_per_gpu} × {world_size} GPU(s)")
 
+    # ── Optimizer & schedules ─────────────────────────────────────────────────
+    param_groups = list(model.get_params_groups())
+    optimizer = torch.optim.AdamW(param_groups, lr=base_lr, weight_decay=wd_start, betas=(beta1, beta2))
+
+    lr_schedule  = CosineScheduler(base_lr, min_lr,    total_steps,
+                                   warmup_iters=warmup_epochs * steps_per_epoch,
+                                   start_warmup_value=min_lr)
+    wd_schedule  = CosineScheduler(wd_start,  wd_end,  total_steps)
+    mom_schedule = CosineScheduler(momentum_start, momentum_end, total_steps)
+
+    # Linear warmup of teacher temperature over warmup_t_epochs, then constant.
+    teacher_temp_schedule = [
+        warmup_t_temp + (teacher_temp - warmup_t_temp) * i / max(warmup_t_epochs - 1, 1)
+        if i < warmup_t_epochs else teacher_temp
+        for i in range(n_epochs)
+    ]
+
+    # All student params for gradient clipping (same set as optimizer params).
+    all_trainable = [p for p in model.student.parameters() if p.requires_grad]
+
+    # ── Training loop ─────────────────────────────────────────────────────────
     global_step = 0
     log: list[dict] = []
 
@@ -521,181 +336,107 @@ def train(cfg: dict, out_dir: Path) -> None:
         if sampler is not None:
             sampler.set_epoch(epoch)
 
+        # Freeze/unfreeze prototype last layer during initial epochs.
+        freeze_last = epoch < freeze_last_layer_epochs
+        for g in optimizer.param_groups:
+            if g.get("is_last_layer", False):
+                for p in g["params"]:
+                    p.requires_grad_(not freeze_last)
+
+        t_temp = teacher_temp_schedule[epoch]
         epoch_losses: dict[str, float] = {
-            "dino": 0.0, "ibot": 0.0, "koleo": 0.0, "total": 0.0
+            k: 0.0 for k in ["dino_local", "dino_global", "ibot", "koleo", "total"]
         }
         t0 = time.time()
+        n_steps_done = 0
 
-        data_iter: Iterator = iter(loader)
+        data_iter = iter(loader)
         for _ in range(steps_per_epoch):
-            # Update LR, WD, teacher momentum.
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr_schedule[global_step]
-                pg["weight_decay"] = wd_schedule[global_step]
+            # Per-step schedule values.
+            lr_val   = lr_schedule[global_step]
+            wd_val   = wd_schedule[global_step]
             momentum = mom_schedule[global_step]
 
-            # ── Fetch batch ──────────────────────────────────────────────────
+            for g in optimizer.param_groups:
+                g["lr"] = lr_val * g.get("lr_multiplier", 1.0)
+                if not g.get("is_last_layer", False):
+                    g["weight_decay"] = wd_val * g.get("wd_multiplier", 1.0)
+
             try:
-                batch = next(data_iter)
+                images = next(data_iter)
             except StopIteration:
                 data_iter = iter(loader)
-                batch = next(data_iter)
+                images = next(data_iter)
 
-            # _multicrop_collate returns a list of (B, C, H, W) tensors, one per crop.
-            crops = [c.to(device) for c in batch]
-
-            global_crops = crops[:2]
-            local_crops  = crops[2:]
-            B = global_crops[0].shape[0]
-
-            # ── Generate iBOT masks for global crops ─────────────────────────
-            masks = [
-                generate_patch_masks(B, n_patches, mask_min, mask_max,
-                                     mask_prob, device)
-                for _ in global_crops
-            ]
-
-            # ── Teacher forward (no grad) ─────────────────────────────────────
-            t_temp = teacher_temp_schedule[epoch]
-            with torch.no_grad():
-                teacher_out_g: list[dict] = []
-                for gc in global_crops:
-                    teacher_out_g.append(teacher_trunk.forward_features(gc))
-
-                teacher_cls = [o["x_norm_clstoken"] for o in teacher_out_g]
-                teacher_dino_raw = [dino_head_t(c) for c in teacher_cls]
-
-                # iBOT: run head on masked positions only — avoids (B, N, K) OOM.
-                # Each element: (num_masked, K)
-                teacher_ibot_masked = [
-                    ibot_head_t(out["x_norm_patchtokens"][mask])
-                    for out, mask in zip(teacher_out_g, masks)
-                ]
-
-                # Center and sharpen DINO teacher outputs.
-                if centering == "sinkhorn_knopp":
-                    teacher_dino = [dino_loss.sinkhorn_knopp_teacher(t, t_temp)
-                                    for t in teacher_dino_raw]
-                else:
-                    teacher_dino = [dino_loss.softmax_center_teacher(t, t_temp)
-                                    for t in teacher_dino_raw]
-
-                # iBOT: apply pending center update, then softmax on masked tokens.
-                # softmax_center_teacher expects (B, N, K); bypass it directly.
-                ibot_loss.apply_center_update()
-                teacher_ibot = [
-                    F.softmax((t - ibot_loss.center.view(1, -1)) / t_temp, dim=-1)
-                    for t in teacher_ibot_masked
-                ]  # each: (num_masked, K)
-
-            # Center updates before student forward — frees large teacher tensors
-            # early. Incremental sum avoids a (total_masked, K) cat OOM.
-            dino_loss.update_center(torch.cat(teacher_dino_raw))
-            _ibot_sum = sum(t.sum(0, keepdim=True) for t in teacher_ibot_masked)
-            _ibot_n   = sum(t.shape[0] for t in teacher_ibot_masked)
-            if _ibot_n > 0:  # skip if all images happened to have no mask this step
-                ibot_loss.update_center((_ibot_sum / _ibot_n).unsqueeze(0))  # (1, 1, K)
-            del teacher_dino_raw, teacher_ibot_masked, _ibot_sum
-
-            # ── Student forward (with masking on global crops) ───────────────
-            with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-                student_dino_logits: list[torch.Tensor] = []
-                student_ibot_logits: list[torch.Tensor] = []
-                student_cls_tokens:  list[torch.Tensor] = []
-
-                for gc, mask in zip(global_crops, masks):
-                    feat = student_trunk.forward_features(gc, masks=mask)
-                    student_cls_tokens.append(feat["x_norm_clstoken"])
-                    student_dino_logits.append(dino_head_s(feat["x_norm_clstoken"]))
-                    # iBOT: only process masked patches to avoid (B, N, K) OOM.
-                    student_ibot_logits.append(ibot_head_s(feat["x_norm_patchtokens"][mask]))
-
-                for lc in local_crops:
-                    feat = student_trunk.forward_features(lc)
-                    student_dino_logits.append(dino_head_s(feat["x_norm_clstoken"]))
-
-                # ── Losses ───────────────────────────────────────────────────
-                n_dino_terms = len(student_dino_logits) * len(teacher_dino)
-                loss_dino  = dino_loss(student_dino_logits, teacher_dino) / n_dino_terms
-                loss_ibot  = sum(
-                    ibot_loss.forward_masked(s, t, mask)
-                    for s, t, mask in zip(student_ibot_logits, teacher_ibot, masks)
-                ) / len(global_crops)
-                loss_koleo = koleo_loss(torch.cat(student_cls_tokens))
-
-                loss = (dino_weight  * loss_dino
-                        + ibot_weight  * loss_ibot
-                        + koleo_weight * loss_koleo)
-
-            # ── Optimiser step ───────────────────────────────────────────────
             optimizer.zero_grad(set_to_none=True)
-            scaler.scale(loss).backward()
-            # student_trunk is not DDP-wrapped — manually all-reduce its LoRA grads.
-            if world_size > 1:
-                for p in student_trunk.parameters():
-                    if p.requires_grad and p.grad is not None:
-                        dist.all_reduce(p.grad)
-                        p.grad.div_(world_size)
+
+            # forward_backward() runs the full forward pass and calls
+            # loss.backward() internally (fp16_scaler is None).
+            loss_dict = model.forward_backward(images, t_temp)
+
             if clip_grad > 0:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(all_params, clip_grad)
-            scaler.step(optimizer)
-            scaler.update()
+                nn.utils.clip_grad_norm_(all_trainable, clip_grad)
+            optimizer.step()
+            model.update_teacher(momentum)
 
-            # ── Teacher EMA ──────────────────────────────────────────────────
-            _s_dino = dino_head_s.module if world_size > 1 else dino_head_s
-            update_teacher(student_trunk, teacher_trunk, momentum)
-            update_teacher(_s_dino, dino_head_t, momentum)
-            if ibot_separate:
-                _s_ibot = ibot_head_s.module if world_size > 1 else ibot_head_s
-                update_teacher(_s_ibot, ibot_head_t, momentum)
+            # Accumulate for epoch logging.
+            epoch_losses["dino_local"]  += loss_dict.get("dino_local_crops_loss",  torch.tensor(0.0)).item()
+            epoch_losses["dino_global"] += loss_dict.get("dino_global_crops_loss", torch.tensor(0.0)).item()
+            epoch_losses["ibot"]        += loss_dict.get("ibot_loss",              torch.tensor(0.0)).item()
+            epoch_losses["koleo"]       += loss_dict.get("koleo_loss",             torch.tensor(0.0)).item()
+            epoch_losses["total"]       += sum(v.item() for v in loss_dict.values())
 
-            # Accumulate for logging.
-            epoch_losses["dino"]  += loss_dino.item()
-            epoch_losses["ibot"]  += loss_ibot.item()
-            epoch_losses["koleo"] += loss_koleo.item()
-            epoch_losses["total"] += loss.item()
-
-            global_step += 1
+            global_step    += 1
+            n_steps_done   += 1
 
         # ── End-of-epoch logging & checkpointing ─────────────────────────────
         if is_main:
-            avg = {k: v / steps_per_epoch for k, v in epoch_losses.items()}
+            n = max(n_steps_done, 1)
+            avg = {k: v / n for k, v in epoch_losses.items()}
             lr  = optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t0
             print(
                 f"Epoch {epoch + 1:03d}/{n_epochs} | "
-                f"total={avg['total']:.4f} dino={avg['dino']:.4f} "
+                f"total={avg['total']:.4f} "
+                f"dino_l={avg['dino_local']:.4f} dino_g={avg['dino_global']:.4f} "
                 f"ibot={avg['ibot']:.4f} koleo={avg['koleo']:.4f} | "
                 f"lr={lr:.2e} | {elapsed:.0f}s"
             )
             log.append({"epoch": epoch + 1, **avg, "lr": lr})
             (out_dir / "log.json").write_text(json.dumps(log, indent=2))
 
-            # Save checkpoint.
+            if use_wandb:
+                wandb.log({
+                    "epoch":                  epoch + 1,
+                    "train/loss_total":       avg["total"],
+                    "train/loss_dino_local":  avg["dino_local"],
+                    "train/loss_dino_global": avg["dino_global"],
+                    "train/loss_ibot":        avg["ibot"],
+                    "train/loss_koleo":       avg["koleo"],
+                    "train/lr":               lr,
+                })
+
             ckpt = {
-                "epoch": epoch + 1,
-                "student": student_trunk.state_dict(),
-                "teacher": teacher_trunk.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "dino_loss_center": dino_loss.center,
-                "ibot_loss_center": ibot_loss.center,
+                "epoch":      epoch + 1,
+                "student":    model.student.state_dict(),
+                "teacher":    model.teacher.state_dict(),
+                "optimizer":  optimizer.state_dict(),
                 "lora_config": {
                     "lora_layers": lora_layers,
-                    "lora_r": lora_cfg.get("r", 8),
-                    "lora_alpha": lora_cfg.get("alpha", 16.0),
+                    "lora_r":      lora_r,
+                    "lora_alpha":  lora_alpha,
                 },
             }
             torch.save(ckpt, out_dir / "checkpoint_last.pth")
             if (epoch + 1) % save_freq == 0:
                 torch.save(ckpt, out_dir / f"checkpoint_ep{epoch + 1:03d}.pth")
 
-    if world_size > 1:
-        dist.destroy_process_group()
+    dist.destroy_process_group()
 
     if is_main:
-        print("\nTraining complete.")
-        print(f"Final checkpoint: {out_dir / 'checkpoint_last.pth'}")
+        print(f"\nTraining complete. Final checkpoint: {out_dir / 'checkpoint_last.pth'}")
+        if use_wandb:
+            wandb.finish()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -704,23 +445,31 @@ def train(cfg: dict, out_dir: Path) -> None:
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CheXFound iBOT continued pretraining")
-    p.add_argument(
-        "--config", required=True,
-        help="Path to the override YAML (e.g. configs/chexfound_vitl16_bonetumor.yaml).",
-    )
-    p.add_argument(
-        "--base_cfg", default=None,
-        help="Optional base YAML to merge beneath --config "
-             "(e.g. src/chexfound/data/config.yaml).",
-    )
-    p.add_argument(
-        "--out_dir", required=True,
-        help="Directory for checkpoints and logs.",
-    )
+    p.add_argument("--config",   required=True,  help="Path to the override YAML.")
+    p.add_argument("--base_cfg", default=None,   help="Optional base YAML to merge beneath --config.")
+    p.add_argument("--out_dir",  required=True,  help="Directory for checkpoints and logs.")
+    p.add_argument("--epochs",     type=int, default=None, help="Override epochs (useful for sweep trials).")
+    p.add_argument("--batch_size", type=int, default=None, help="Override batch_size_per_gpu.")
+    p.add_argument("--sweep",  action="store_true", help="Read hyperparams from wandb.config (W&B sweep mode).")
+    p.add_argument("--wandb",  action="store_true", help="Enable W&B logging without a sweep.")
+    p.add_argument("--wandb_project", default="chexfound-pretrain")
+    p.add_argument("--wandb_entity",  default=None)
     return p.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args()
     cfg  = merge_configs(args.base_cfg, args.config)
-    train(cfg, Path(args.out_dir))
+
+    if args.epochs is not None:
+        cfg.setdefault("optim",  {})["epochs"]            = args.epochs
+    if args.batch_size is not None:
+        cfg.setdefault("train", {})["batch_size_per_gpu"] = args.batch_size
+
+    use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
+    if use_wandb:
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity)
+        if args.sweep:
+            _apply_sweep_cfg(cfg)
+
+    train(cfg, Path(args.out_dir), use_wandb=use_wandb)

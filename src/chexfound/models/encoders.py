@@ -41,7 +41,7 @@ class CheXFoundViT(nn.Module):
         load_pretrained: bool = True,
     ) -> None:
         super().__init__()
-        self.trunk, embed_dim = build_model_from_cfg(config_path, only_teacher=True)
+        self.trunk, _, embed_dim = build_model_from_cfg(config_path, only_teacher=True)
         if embed_dim != VIT_DIM:
             raise ValueError(f"Expected embed_dim={VIT_DIM}, got {embed_dim}")
 

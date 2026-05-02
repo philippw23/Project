@@ -8,6 +8,7 @@
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 #SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.err"
 
+
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
@@ -27,18 +28,17 @@ export PYTHONPATH=$home_dir/Project/src
 # but nvmlInit fails. This must be set before Python imports torch.
 unset PYTORCH_NVML_BASED_CUDA_CHECK
 export PYTORCH_NO_CUDA_MEMORY_CACHING=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo Environment activated
 
 echo "CUDA/NVML preflight:"
-nvidia-smi || {
-    echo "nvidia-smi failed on $(hostname); requeue on a healthy GPU node or ask admin to restart/fix the NVIDIA driver."
-    exit 1
-}
+nvidia-smi || echo "WARNING: nvidia-smi failed on $(hostname) (NVML mismatch) — CUDA may still work."
 
 # Run the Python script
 NGPUS=${SLURM_GPUS_ON_NODE:-1}
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python -m torch.distributed.run --nproc_per_node=$NGPUS \
     $home_dir/Project/src/chexfound/train/pretrain.py \
-    --config   $home_dir/Project/configs/chexfound_vitl16_bonetumor.yaml \
-    --base_cfg $home_dir/Project/src/chexfound/data/config.yaml \
-    --out_dir  $home_dir/Project/results/chexfound_pretrain/job_${SLURM_JOBID}
+    --config     $home_dir/Project/configs/chexfound_vitl16_bonetumor.yaml \
+    --base_cfg   $home_dir/Project/src/chexfound/data/config.yaml \
+    --out_dir    $home_dir/Project/results/chexfound_pretrain/job_${SLURM_JOBID} \
+    --batch_size 4
