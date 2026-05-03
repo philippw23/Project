@@ -32,5 +32,5 @@ export PYTHONUNBUFFERED=1
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 $python_path $home_dir/Project/src/inspect_tensor_shapes.py \
     --model   chexfound \
-    --config  $home_dir/Project/configs/chexfound_vitl16_bonetumor.yaml \
+    --config  $home_dir/Project/src/chexfound/configs/chexfound_vitl16_bonetumor.yaml \
     --weights $home_dir/Project/src/chexfound/data/teacher_checkpoint.pth

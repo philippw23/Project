@@ -26,7 +26,7 @@ command:
   - ${interpreter}
   - ${program}
   - --config
-  - configs/chexfound_vitl16_bonetumor.yaml
+  - src/chexfound/configs/chexfound_vitl16_bonetumor.yaml
   - --base_cfg
   - src/chexfound/data/config.yaml
   - --out_dir

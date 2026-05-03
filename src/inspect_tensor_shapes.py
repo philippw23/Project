@@ -2,7 +2,7 @@
 
 Supports:
   biomedclip  — BiomedCLIP ViT-B/16 image + PubMedBERT text encoder
-  chexfound   — CheXFound ViT-L/16 image encoder (requires --config / --weights)
+  chexfound   — CheXFound ViT-L/16 image encoder (requires --config)
 
 Strategy:
   1. Register a forward hook on every submodule to record its output shape.
@@ -14,11 +14,9 @@ Usage:
   python src/inspect_tensor_shapes.py --model biomedclip
   python src/inspect_tensor_shapes.py --model biomedclip --lora_layers 4
   python src/inspect_tensor_shapes.py --model chexfound \\
-      --config configs/chexfound_vitl16_bonetumor.yaml \\
-      --weights ~/CheXFound/weights/chexfound_vitl16.pth
+      --config src/chexfound/configs/chexfound_vitl16_bonetumor.yaml
   python src/inspect_tensor_shapes.py --model chexfound \\
-      --config configs/chexfound_vitl16_bonetumor.yaml \\
-      --weights ~/CheXFound/weights/chexfound_vitl16.pth \\
+      --config src/chexfound/configs/chexfound_vitl16_bonetumor.yaml \\
       --lora_layers 4
 """
 
@@ -190,22 +188,124 @@ def _inspect_biomedclip(device: torch.device, lora_layers: int = 0, lora_r: int 
     print("=" * 80)
 
 
-def _inspect_chexfound(device: torch.device, config: str, weights: str, lora_layers: int = 0) -> None:
-    from chexfound.models.encoders import CheXFoundViT  # local import to avoid mandatory dep
+def _inspect_chexfound(
+    device: torch.device,
+    config: str,
+    weights: str,
+    lora_layers: int = 0,
+    base_cfg: str | None = None,
+) -> None:
+    import yaml as _yaml
+    from pathlib import Path as _Path
+    from chexfound.models.encoders import CheXFoundViT
+    from chexfound.models.lora import inject_lora_chexfound
+    from chexfound.layers import DINOHead
 
-    encoder = CheXFoundViT(config, weights, lora_layers=lora_layers, r=8, alpha=16.0, load_pretrained=True)
+    # ── Single checkpoint load ────────────────────────────────────────────────
+    _teacher_sd = None
+    if weights and _Path(weights).is_file():
+        _raw = torch.load(weights, map_location="cpu", weights_only=False)
+        _teacher_sd = _raw.get("teacher", _raw)
+
+    # ── Merge base config + override to get head dimensions ──────────────────
+    _cfg: dict = {}
+    _default_base = _Path(__file__).parent / "chexfound/data/config.yaml"
+    _base_path = _Path(base_cfg) if base_cfg else _default_base
+    if _base_path.is_file():
+        with open(_base_path) as _fh:
+            _cfg = _yaml.safe_load(_fh) or {}
+    with open(config) as _fh:
+        _override = _yaml.safe_load(_fh) or {}
+    for _sec, _val in _override.items():
+        if isinstance(_val, dict) and isinstance(_cfg.get(_sec), dict):
+            _cfg[_sec] = {**_cfg[_sec], **_val}
+        else:
+            _cfg[_sec] = _val
+
+    # ── Build backbone (no internal load, no LoRA yet) ───────────────────────
+    # load_pretrained=False avoids a second torch.load inside CheXFoundViT.
+    # lora_layers=0 keeps weight key names clean so the manual load below matches.
+    encoder = CheXFoundViT(config, weights_path=None,
+                           lora_layers=0, r=8, alpha=16.0,
+                           load_pretrained=False)
+    if _teacher_sd is not None:
+        _backbone_sd = {
+            (k[len("backbone."):] if k.startswith("backbone.") else k): v
+            for k, v in _teacher_sd.items()
+            if not k.startswith(("dino_head.", "ibot_head."))
+        }
+        _msg = encoder.trunk.load_state_dict(_backbone_sd, strict=False)
+        print(f"Backbone: loaded {len(_backbone_sd) - len(_msg.missing_keys)}"
+              f"/{len(_backbone_sd)} keys "
+              f"(missing={len(_msg.missing_keys)}, unexpected={len(_msg.unexpected_keys)})")
+    # Inject LoRA AFTER backbone weights are loaded so key names still match.
+    if lora_layers > 0:
+        inject_lora_chexfound(encoder.trunk, lora_layers, r=8, alpha=16.0)
     encoder = encoder.to(device).eval()
 
-    # CheXFound pretrained weights use 224x224 input resolution.
-    dummy_image = torch.zeros(2, 3, 224, 224, device=device)
-
-    # trunk.forward() returns the CLS token tensor (DINOv2 style).
+    # ── Backbone inspection ──────────────────────────────────────────────────
+    # Use the training resolution (512×512) so shapes reflect the actual run.
+    global_crops_size = _cfg.get("crops", {}).get("global_crops_size", 512)
+    dummy_image = torch.zeros(2, 3, global_crops_size, global_crops_size, device=device)
     image_shapes = collect_shapes(encoder.trunk, dummy_image)
 
     print("=" * 80)
-    print("CheXFound ViT-L/16 -- Image encoder with output tensor shapes (batch=2)")
+    title = f"CheXFound ViT-L/16 backbone -- output tensor shapes (batch=2, {global_crops_size}×{global_crops_size})"
+    if lora_layers > 0:
+        title += f" [LoRA last {lora_layers} blocks]"
+    print(title)
     print("=" * 80)
     print(module_repr(encoder.trunk, image_shapes))
+    print("=" * 80)
+    print()
+
+    # ── Build heads from merged config ───────────────────────────────────────
+    _dino_cfg = _cfg.get("dino", {})
+    _ibot_cfg  = _cfg.get("ibot",  {})
+    dino_head = DINOHead(
+        in_dim=1024,
+        out_dim=_dino_cfg.get("head_n_prototypes", 131072),
+        hidden_dim=_dino_cfg.get("head_hidden_dim", 2048),
+        bottleneck_dim=_dino_cfg.get("head_bottleneck_dim", 384),
+        nlayers=_dino_cfg.get("head_nlayers", 3),
+    )
+    ibot_head = DINOHead(
+        in_dim=1024,
+        out_dim=_ibot_cfg.get("head_n_prototypes", 131072),
+        hidden_dim=_ibot_cfg.get("head_hidden_dim", 2048),
+        bottleneck_dim=_ibot_cfg.get("head_bottleneck_dim", 256),
+        nlayers=_ibot_cfg.get("head_nlayers", 3),
+    )
+    if _teacher_sd is not None:
+        _dino_sd = {k[len("dino_head."):]: v
+                    for k, v in _teacher_sd.items() if k.startswith("dino_head.")}
+        _ibot_sd = {k[len("ibot_head."):]: v
+                    for k, v in _teacher_sd.items() if k.startswith("ibot_head.")}
+        if _dino_sd:
+            dino_head.load_state_dict(_dino_sd, strict=True)
+            print(f"DINO head: loaded {len(_dino_sd)} keys from checkpoint")
+        if _ibot_sd:
+            ibot_head.load_state_dict(_ibot_sd, strict=True)
+            print(f"iBOT head: loaded {len(_ibot_sd)} keys from checkpoint")
+    dino_head = dino_head.to(device).eval()
+    ibot_head = ibot_head.to(device).eval()
+
+    # ── Head inspections ─────────────────────────────────────────────────────
+    dummy_embed = torch.zeros(2, 1024, device=device)
+
+    dino_shapes = collect_shapes(dino_head, dummy_embed)
+    print("=" * 80)
+    print("CheXFound DINO head -- output tensor shapes (batch=2, embed_dim=1024)")
+    print("=" * 80)
+    print(module_repr(dino_head, dino_shapes))
+    print("=" * 80)
+    print()
+
+    ibot_shapes = collect_shapes(ibot_head, dummy_embed)
+    print("=" * 80)
+    print("CheXFound iBOT head -- output tensor shapes (batch=2, embed_dim=1024)")
+    print("=" * 80)
+    print(module_repr(ibot_head, ibot_shapes))
     print("=" * 80)
 
 
@@ -215,8 +315,9 @@ def main() -> None:
         "--model", choices=["biomedclip", "chexfound"], default="biomedclip",
         help="Which model to inspect (default: biomedclip).",
     )
-    parser.add_argument("--config",  default=None, help="CheXFound model config YAML (chexfound only).")
-    parser.add_argument("--weights", default=None, help="CheXFound pretrained .pth checkpoint (chexfound only).")
+    parser.add_argument("--config",   default=None, help="CheXFound model config YAML (chexfound only).")
+    parser.add_argument("--base_cfg", default=None, help="Base YAML to merge beneath --config for head dimensions (chexfound only).")
+    parser.add_argument("--weights",  default=None, help="Optional CheXFound checkpoint to load before inspection.")
     parser.add_argument("--lora_layers", type=int, default=0, help="Inject LoRA into the last N ViT blocks (0 = no LoRA).")
     parser.add_argument("--lora_r",     type=int,   default=8,    help="LoRA rank r (default: 8).")
     parser.add_argument("--lora_alpha", type=float, default=16.0, help="LoRA alpha scaling factor (default: 16.0).")
@@ -228,9 +329,9 @@ def main() -> None:
     if args.model == "biomedclip":
         _inspect_biomedclip(device, args.lora_layers, args.lora_r, args.lora_alpha)
     else:
-        if not args.config or not args.weights:
-            parser.error("--config and --weights are required for --model chexfound")
-        _inspect_chexfound(device, args.config, args.weights, args.lora_layers)
+        if not args.config:
+            parser.error("--config is required for --model chexfound")
+        _inspect_chexfound(device, args.config, args.weights, args.lora_layers, base_cfg=args.base_cfg)
 
 
 if __name__ == "__main__":

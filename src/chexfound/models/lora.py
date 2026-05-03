@@ -3,7 +3,9 @@ from __future__ import annotations
 import warnings
 from typing import Iterable
 
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from biomedclip.models.lora import LoRALinear
 
@@ -44,20 +46,49 @@ def _wrap_linear(parent: nn.Module, attr: str, r: int, alpha: float) -> bool:
     return True
 
 
-def _wrap_mlp_linears(mlp: nn.Module, r: int, alpha: float) -> None:
+class LoRASwiGLUFFN(nn.Module):
+    """LoRA adapter for xFormers/local SwiGLU FFNs.
+
+    xFormers' fused SwiGLU kernel reads the wrapped linears directly, so plain
+    LoRALinear replacement can be skipped by the fused forward. This wrapper
+    keeps the frozen w12/w3 weights and runs an explicit SwiGLU forward with
+    trainable low-rank branches.
+    """
+
+    def __init__(self, swiglu: nn.Module, r: int, alpha: float) -> None:
+        super().__init__()
+        if not isinstance(getattr(swiglu, "w12", None), nn.Linear):
+            raise TypeError(f"Expected {swiglu.__class__.__name__}.w12 to be nn.Linear")
+        if not isinstance(getattr(swiglu, "w3", None), nn.Linear):
+            raise TypeError(f"Expected {swiglu.__class__.__name__}.w3 to be nn.Linear")
+        self.w12 = LoRALinear(swiglu.w12, r, alpha)
+        self.w3 = LoRALinear(swiglu.w3, r, alpha)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x12 = self.w12(x)
+        x1, x2 = x12.chunk(2, dim=-1)
+        return self.w3(F.silu(x1) * x2)
+
+
+def _wrap_mlp_linears(mlp: nn.Module, r: int, alpha: float) -> nn.Module:
+    if isinstance(mlp, LoRASwiGLUFFN):
+        return mlp
+
     # xFormers fused SwiGLU accesses .weight directly inside its CUDA kernel,
-    # bypassing LoRALinear.forward entirely — wrapping breaks the kernel.
+    # bypassing LoRALinear.forward entirely. Wrap the full FFN and run the
+    # SwiGLU math explicitly so the low-rank branch participates.
     try:
         from xformers.ops.swiglu_op import SwiGLU
         if isinstance(mlp, SwiGLU):
-            return
+            return LoRASwiGLUFFN(mlp, r, alpha)
     except ImportError:
         pass
+
     # timm-style MLP uses fc1/fc2; non-fused CheXFound SwiGLU uses w12/w3.
     if _wrap_linear(mlp, "fc1", r, alpha) | _wrap_linear(mlp, "fc2", r, alpha):
-        return
+        return mlp
     if _wrap_linear(mlp, "w12", r, alpha) | _wrap_linear(mlp, "w3", r, alpha):
-        return
+        return mlp
     raise AttributeError(
         "Could not find supported MLP linear names. Expected fc1/fc2 or w12/w3."
     )
@@ -101,7 +132,7 @@ def inject_lora_chexfound(
         block = blocks[i]
         _wrap_linear(block.attn, "qkv", r, alpha)
         _wrap_linear(block.attn, "proj", r, alpha)
-        _wrap_mlp_linears(block.mlp, r, alpha)
+        block.mlp = _wrap_mlp_linears(block.mlp, r, alpha)
 
 
 def count_trainable_params(module: nn.Module) -> int:

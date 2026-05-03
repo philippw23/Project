@@ -38,12 +38,12 @@ student:
   num_register_tokens: 4
 
 teacher:
-  momentum_teacher: 0.994
+  momentum_teacher: 0.997
 
 optim:
   epochs: 50
   weight_decay_end: 0.2
-  base_lr: 5.0e-05
+  base_lr: 1.0e-05
   warmup_epochs: 5
   layerwise_decay: 1.0
 
@@ -58,6 +58,8 @@ evaluation:
 # low-rank adapters in the last N real transformer blocks.
 # Set lora_layers: 0 to disable adapters and train all backbone weights.
 lora:
-  lora_layers: 6   # last 6 real ViT blocks, not FSDP BlockChunks
-  r: 8             # rank
+  lora_layers: 4   # last 4 real ViT blocks, not FSDP BlockChunks
+  r: 4             # rank
   alpha: 16.0      # scaling factor
+  head_mode: frozen          # frozen | unfreeze_after | train
+  head_unfreeze_epoch: 10    # only used with head_mode: unfreeze_after

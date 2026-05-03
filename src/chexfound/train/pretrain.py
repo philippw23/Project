@@ -7,7 +7,7 @@ normalisation, and KoLeo regularisation per the original CheXFound paper.
 
 Usage (single GPU via torchrun):
     torchrun --nproc_per_node=1 src/chexfound/train/pretrain.py \\
-        --config   configs/chexfound_vitl16_bonetumor.yaml \\
+        --config   src/chexfound/configs/chexfound_vitl16_bonetumor.yaml \\
         --base_cfg src/chexfound/data/config.yaml \\
         --out_dir  results/chexfound_pretrain
 
@@ -48,7 +48,6 @@ if _SRC not in sys.path:
 from chexfound.bone_tumor_patch.bone_tumor import BoneTumorDataset
 from chexfound.data import DataAugmentationDINO, MaskingGenerator, collate_data_and_cast
 from chexfound.models.lora import inject_lora_chexfound
-from chexfound.models.weight_utils import load_pretrained_weights
 from chexfound.train.ssl_meta_arch import SSLMetaArch
 from chexfound.utils.utils import CosineScheduler, fix_random_seeds
 from biomedclip.data.splits import build_stratified_splits
@@ -224,25 +223,61 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     # Replace update_teacher() with a direct parameter EMA (no FSDP module list).
     model.update_teacher = lambda m: _ema_update(model, m)
 
-    lora_cfg    = cfg_dict.get("lora", {})
-    lora_layers = lora_cfg.get("lora_layers", 0)
-    lora_r      = lora_cfg.get("r", 8)
-    lora_alpha  = lora_cfg.get("alpha", 16.0)
+    lora_cfg            = cfg_dict.get("lora", {})
+    lora_layers         = lora_cfg.get("lora_layers", 0)
+    lora_r              = lora_cfg.get("r", 8)
+    lora_alpha          = lora_cfg.get("alpha", 16.0)
+    head_mode           = lora_cfg.get("head_mode", "frozen")
+    head_unfreeze_epoch = lora_cfg.get("head_unfreeze_epoch", 10)
 
     # Warm-start BEFORE LoRA injection so checkpoint key names match.
     # LoRA injection renames e.g. attn.qkv.weight → attn.qkv.linear.weight;
     # loading after injection would leave those 48 backbone weights at random init.
+    # Single torch.load covers backbone + heads to avoid redundant NFS reads.
     warm_start = cfg_dict.get("MODEL", {}).get("WEIGHTS", "")
     if warm_start and Path(warm_start).is_file():
         if is_main:
-            print(f"Warm-starting backbone from {warm_start}")
-        load_pretrained_weights(model.student.backbone, warm_start, checkpoint_key="teacher")
-        load_pretrained_weights(model.teacher.backbone, warm_start, checkpoint_key="teacher")
+            print(f"Warm-starting from {warm_start}")
+        _raw        = torch.load(warm_start, map_location="cpu", weights_only=False)
+        _teacher_sd = _raw.get("teacher", _raw)
+
+        # Backbone: strip "backbone." prefix so keys match the trunk module.
+        _backbone_sd = {
+            (k[len("backbone."):] if k.startswith("backbone.") else k): v
+            for k, v in _teacher_sd.items()
+            if not k.startswith(("dino_head.", "ibot_head."))
+        }
+        _msg = model.student.backbone.load_state_dict(_backbone_sd, strict=False)
+        model.teacher.backbone.load_state_dict(_backbone_sd, strict=False)
+        if is_main:
+            print(f"  backbone : {len(_backbone_sd)} keys "
+                  f"(missing={len(_msg.missing_keys)}, "
+                  f"unexpected={len(_msg.unexpected_keys)})")
+
+        # Heads: load into student then copy to teacher so both start identically.
+        # Previously both heads were randomly initialized from separate factory calls,
+        # meaning teacher targets were based on a different random state than the student.
+        _dino_sd = {k[len("dino_head."):]: v
+                    for k, v in _teacher_sd.items() if k.startswith("dino_head.")}
+        _ibot_sd = {k[len("ibot_head."):]: v
+                    for k, v in _teacher_sd.items() if k.startswith("ibot_head.")}
+        if _dino_sd:
+            model.student.dino_head.load_state_dict(_dino_sd, strict=True)
+            model.teacher.dino_head.load_state_dict(_dino_sd, strict=True)
+            if is_main:
+                print(f"  dino_head: {len(_dino_sd)} keys (student + teacher synced)")
+        if _ibot_sd and "ibot_head" in model.student:
+            model.student.ibot_head.load_state_dict(_ibot_sd, strict=True)
+            model.teacher.ibot_head.load_state_dict(_ibot_sd, strict=True)
+            if is_main:
+                print(f"  ibot_head: {len(_ibot_sd)} keys (student + teacher synced)")
 
     # Inject LoRA after warm-start so pretrained weights land in the right slots.
     if lora_layers > 0:
-        inject_lora_chexfound(model.student.backbone, lora_layers=lora_layers, r=lora_r, alpha=lora_alpha)
-        inject_lora_chexfound(model.teacher.backbone, lora_layers=lora_layers, r=lora_r, alpha=lora_alpha)
+        inject_lora_chexfound(
+            model.student.backbone, lora_layers=lora_layers, r=lora_r, alpha=lora_alpha)
+        inject_lora_chexfound(
+            model.teacher.backbone, lora_layers=lora_layers, r=lora_r, alpha=lora_alpha)
         # Teacher backbone already has the same pretrained weights as student;
         # sync so both have identical (random) LoRA initialisations too.
         model.teacher.backbone.load_state_dict(model.student.backbone.state_dict())
@@ -250,6 +285,18 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     # Re-freeze all teacher parameters (LoRA injection may have unfrozen some).
     for p in model.teacher.parameters():
         p.requires_grad_(False)
+
+    # Collect student head modules once — reused for freeze/unfreeze throughout.
+    _head_modules = [model.student.dino_head]
+    if "ibot_head" in model.student:
+        _head_modules.append(model.student.ibot_head)
+
+    # frozen     : heads excluded from updates entirely; stable pretrained targets.
+    # unfreeze_after: heads frozen initially, unfrozen at head_unfreeze_epoch.
+    # train      : heads fully trainable from checkpoint init (default before this change).
+    if head_mode in ("frozen", "unfreeze_after"):
+        for _hm in _head_modules:
+            _hm.requires_grad_(False)
 
     model = model.to(device)
     model.train()  # keeps teacher in eval() via SSLMetaArch.train()
@@ -260,6 +307,8 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
         print(f"Student trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
         if lora_layers > 0:
             print(f"LoRA: last {lora_layers} blocks | r={lora_r} | alpha={lora_alpha}")
+        print(f"Head mode: {head_mode}" +
+              (f" (unfreeze at epoch {head_unfreeze_epoch})" if head_mode == "unfreeze_after" else ""))
 
     # ── Augmentation + DataLoader ─────────────────────────────────────────────
     aug = DataAugmentationDINO(
@@ -309,8 +358,17 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
         print(f"  Batch   : {batch_per_gpu} × {world_size} GPU(s)")
 
     # ── Optimizer & schedules ─────────────────────────────────────────────────
+    # unfreeze_after: heads must enter param groups now so they can be updated
+    # once unfrozen, even though they start frozen. Re-freeze immediately after.
+    if head_mode == "unfreeze_after":
+        for _hm in _head_modules:
+            _hm.requires_grad_(True)
     param_groups = list(model.get_params_groups())
-    optimizer = torch.optim.AdamW(param_groups, lr=base_lr, weight_decay=wd_start, betas=(beta1, beta2))
+    if head_mode == "unfreeze_after":
+        for _hm in _head_modules:
+            _hm.requires_grad_(False)
+    optimizer = torch.optim.AdamW(
+        param_groups, lr=base_lr, weight_decay=wd_start, betas=(beta1, beta2))
 
     lr_schedule  = CosineScheduler(base_lr, min_lr,    total_steps,
                                    warmup_iters=warmup_epochs * steps_per_epoch,
@@ -325,8 +383,8 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
         for i in range(n_epochs)
     ]
 
-    # All student params for gradient clipping (same set as optimizer params).
-    all_trainable = [p for p in model.student.parameters() if p.requires_grad]
+    # Clip all params that are in the optimizer (covers newly-unfrozen heads too).
+    all_trainable = [p for g in optimizer.param_groups for p in g["params"]]
 
     # ── Training loop ─────────────────────────────────────────────────────────
     global_step = 0
@@ -342,6 +400,17 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
             if g.get("is_last_layer", False):
                 for p in g["params"]:
                     p.requires_grad_(not freeze_last)
+
+        # Head mode: unfreeze heads at the configured epoch.
+        # Runs after is_last_layer so it correctly overrides for head last-layers.
+        if head_mode == "unfreeze_after":
+            head_trainable = epoch >= head_unfreeze_epoch
+            for _hm in _head_modules:
+                _hm.requires_grad_(head_trainable)
+            if is_main and epoch == head_unfreeze_epoch:
+                n_head = sum(p.numel() for _hm in _head_modules
+                             for p in _hm.parameters())
+                print(f"Epoch {epoch + 1:03d}: heads unfrozen ({n_head:,} params)")
 
         t_temp = teacher_temp_schedule[epoch]
         epoch_losses: dict[str, float] = {
@@ -422,9 +491,11 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
                 "teacher":    model.teacher.state_dict(),
                 "optimizer":  optimizer.state_dict(),
                 "lora_config": {
-                    "lora_layers": lora_layers,
-                    "lora_r":      lora_r,
-                    "lora_alpha":  lora_alpha,
+                    "lora_layers":         lora_layers,
+                    "lora_r":              lora_r,
+                    "lora_alpha":          lora_alpha,
+                    "head_mode":           head_mode,
+                    "head_unfreeze_epoch": head_unfreeze_epoch,
                 },
             }
             torch.save(ckpt, out_dir / "checkpoint_last.pth")

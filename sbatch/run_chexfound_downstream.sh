@@ -17,16 +17,16 @@ echo SLURM assigned me these nodes:
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 
 MY_CONDA_ENV="master"
-export CONDA_EXE=$home_dir/miniconda3/bin/conda
-source $home_dir/miniconda3/etc/profile.d/conda.sh
-conda activate $MY_CONDA_ENV
-echo Environment activated
-
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
-export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin:$PATH
 export PYTHONPATH=$home_dir/Project/src
+unset PYTORCH_NVML_BASED_CUDA_CHECK
+export PYTORCH_NO_CUDA_MEMORY_CACHING=1
+echo Environment activated
 
 # No external CheXFound repo needed.
 #
@@ -35,9 +35,9 @@ export PYTHONPATH=$home_dir/Project/src
 # Mode B (bundled continued-pretrain checkpoint, DEFAULT): no extra flags needed.
 # Mode B (custom checkpoint): add --checkpoint /path/to/custom.pth
 
-python $home_dir/Project/src/chexfound_downstream.py \
-    --checkpoint $home_dir/Project/results/chexfound_pretrain/checkpoint_last.pth \
-    --splits    $home_dir/Project/results/biomedclip_pretrain/run_20260428_121303/splits.json \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfound_downstream.py \
+    --checkpoint $home_dir/Project/results/chexfound_pretrain/job_6291/checkpoint_last.pth \
+    --splits    $home_dir/Project/results/chexfound_pretrain/job_6291/biomedclip_pretrain/splits.json \
     --excel     $home_dir/Project/data/metadata.xlsx \
     --out_dir   $home_dir/Project/results \
     --use_mask \
