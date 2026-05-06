@@ -1,0 +1,94 @@
+experiment_name: 'gloria_bonetumor_lora'
+phase: 'pretrain'
+
+lightning:
+    trainer:
+        gpus: '1'
+        max_epochs: 50
+        distributed_backend: 'dp'
+        gradient_clip_val: 0.25
+        lr: 0.00005
+        precision: 16
+        accumulate_grad_batches: 3
+        val_check_interval: null
+    checkpoint_callback:
+        monitor: 'val_loss'
+        dirpath: '/mnt/nfs/homedirs/philippw/Project/results/gloria_bonetumor/ckpt'
+        save_last: true
+        mode: min
+        save_top_k: 5
+    early_stopping_callback:
+        monitor: 'val_loss'
+        min_delta: 0.00
+        patience: 10
+        verbose: False
+        mode: 'min'
+    logger:
+        logger_type: 'WandbLogger'
+        save_dir: '/mnt/nfs/homedirs/philippw/Project/logs'
+        project: 'gloria-bonetumor'
+
+model:
+    norm: false
+    pretrain_ckpt: '/mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt'
+    gloria:
+        local_loss_weight: 1.0
+        global_loss_weight: 1.0
+        temp1: 4.0
+        temp2: 5.0
+        temp3: 10.0
+    vision:
+        model_name: 'resnet_50'
+        freeze_cnn: false
+        pretrained: false
+        lora:
+            lora_layers: 2
+            r: 16
+            alpha: 32.0
+    text:
+        bert_type: "emilyalsentzer/Bio_ClinicalBERT"
+        last_n_layers: 4
+        aggregate_method: 'sum'
+        norm: false
+        embedding_dim: 768
+        freeze_bert: true
+        agg_tokens: true
+
+data:
+    dataset: bonetumor
+    splits_path: '/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_20260424_154249/splits.json'
+    seed: 42
+    text:
+        word_num: 97
+        captions_per_image: 97
+        full_report: true
+    image:
+        imsize: 256
+
+transforms:
+    norm: 'half'
+    random_crop:
+        crop_size: 224
+    random_horizontal_flip: 0.5
+    random_affine:
+        degrees: 10
+        translate: [0.05, 0.05]
+        scale: [0.9, 1.1]
+    color_jitter:
+        bightness: [0.6, 1.4]
+        contrast: [0.6, 1.4]
+
+train:
+    update_interval: 50
+    batch_size: 16
+    num_workers: 4
+    nvis: 4
+    rand_vis: false
+    optimizer:
+        name: 'AdamW'
+        weight_decay: 0.01
+    scheduler:
+        name: 'plateau'
+        monitor: 'val_loss'
+        inerval: 'epoch'
+        frequency: 1

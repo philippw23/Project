@@ -1,31 +1,36 @@
-"""Downstream malignancy classification using the CheXFound ViT-L image encoder.
+"""Unified downstream malignancy classification script for all baselines.
 
-Supports two modes:
-  Continued pretrain (default) — loads teacher weights from the bundled iBOT
-                       checkpoint (src/chexfound/data/teacher_checkpoint.pth).
-  Frozen baseline  — loads original CheXFound pretrained weights, no fine-tuning.
-                     Requires --chexfound_weights and --checkpoint none.
+Supports three baselines via --baseline:
+  biomedclip — BiomedCLIP ViT-B/16 (512 or 768-dim)
+  chexfound  — CheXFound ViT-L/16 (1024-dim)
 
-MLP input : [CLS embedding (1024-dim) | age (1, z-scored) | sex (1, binary)]
+MLP input : [image_embedding | age (1, z-scored) | sex (1, binary)]
 MLP output: 3-class logits  (benign=0 / intermediate=1 / malignant=2)
 
-Usage (continued pretrain, using bundled checkpoint):
-    python src/chexfound_downstream.py \\
-        --splits  results/biomedclip_pretrain/.../splits.json \\
-        --excel   data/metadata.xlsx
+Usage (BiomedCLIP, pretrained checkpoint):
+    python src/downstream.py \\
+        --baseline biomedclip \\
+        --biomedclip_checkpoint results/biomedclip_pretrain/.../best_val_checkpoint.pt \\
+        --splits results/biomedclip_pretrain/.../splits.json \\
+        --excel  data/metadata.xlsx
 
-Usage (custom checkpoint):
-    python src/chexfound_downstream.py \\
-        --checkpoint results/chexfound_pretrain/model_final.pth \\
-        --splits  results/biomedclip_pretrain/.../splits.json \\
-        --excel   data/metadata.xlsx
+Usage (BiomedCLIP, frozen vanilla):
+    python src/downstream.py \\
+        --baseline biomedclip --freezed_biomedclip \\
+        --splits ... --excel ...
 
-Usage (frozen baseline):
-    python src/chexfound_downstream.py \\
-        --chexfound_weights ~/CheXFound/weights/chexfound_vitl16.pth \\
-        --checkpoint none \\
-        --splits  results/biomedclip_pretrain/.../splits.json \\
-        --excel   data/metadata.xlsx
+Usage (CheXFound, continued-pretrain checkpoint):
+    python src/downstream.py \\
+        --baseline chexfound \\
+        --chexfound_checkpoint results/chexfound_pretrain/.../checkpoint_last.pth \\
+        --splits ... --excel ...
+
+Usage (CheXFound, frozen original weights):
+    python src/downstream.py \\
+        --baseline chexfound \\
+        --chexfound_checkpoint none \\
+        --chexfound_weights /path/to/chexfound_vitl16.pth \\
+        --splits ... --excel ...
 """
 
 from __future__ import annotations
@@ -57,11 +62,6 @@ from biomedclip.data.datasets import (
 from biomedclip.data.splits import load_age_sex_lookup
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
-from chexfound.data.transforms import (
-    build_preprocess_val_chexfound,
-    build_train_transform_chexfound,
-)
-from chexfound.models.encoders import CheXFoundViT, load_continued_pretrain_weights
 
 DEFAULT_SPLITS = ROOT_DIR / "results" / "biomedclip_pretrain" / "splits.json"
 
@@ -69,6 +69,117 @@ _CHEXFOUND_DATA = ROOT_DIR / "src" / "chexfound" / "data"
 DEFAULT_CHEXFOUND_CONFIG     = _CHEXFOUND_DATA / "config.yaml"
 DEFAULT_CHEXFOUND_CHECKPOINT = _CHEXFOUND_DATA / "teacher_checkpoint.pth"
 
+
+# ── Encoder building ─────────────────────────────────────────────────────────
+
+def build_encoder(
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[nn.Module, object, object, int]:
+    """Return (encoder, train_transform, val_transform, embed_dim) for the selected baseline.
+
+    The returned encoder is frozen (all requires_grad=False) and placed on device.
+    """
+    if args.baseline == "biomedclip":
+        return _build_biomedclip_encoder(args, device)
+    elif args.baseline == "chexfound":
+        return _build_chexfound_encoder(args, device)
+    else:
+        raise ValueError(f"Unknown baseline: {args.baseline!r}")
+
+
+def _build_biomedclip_encoder(
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[nn.Module, object, object, int]:
+    import open_clip
+    from biomedclip.utils.misc import MODEL_TAG
+    from biomedclip.data.transforms import build_train_transform
+    from biomedclip.models.lora import inject_lora
+
+    print(f"Loading BiomedCLIP model: {MODEL_TAG}")
+    model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
+
+    if args.freezed_biomedclip:
+        print("Using vanilla BiomedCLIP encoder (no checkpoint, no LoRA).")
+    else:
+        ckpt = torch.load(args.biomedclip_checkpoint, map_location="cpu", weights_only=False)
+        lora_cfg = ckpt.get("lora_config") or {}
+        if not lora_cfg:
+            raise RuntimeError(
+                f"Checkpoint '{args.biomedclip_checkpoint}' has no 'lora_config'. "
+                "Re-run pretraining with the current biomedclip_pretrain.py."
+            )
+        inject_lora(model, lora_cfg["lora_layers"], lora_cfg["lora_r"], lora_cfg["lora_alpha"])
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(
+            f"Loaded BiomedCLIP checkpoint: {args.biomedclip_checkpoint} "
+            f"(epoch {ckpt['epoch']}, val_loss={ckpt['val_loss']:.4f})"
+        )
+
+    if args.use_projected_features:
+        encoder = model.visual.to(device)
+        embed_dim = 512
+        print("BiomedCLIP encoder: projected features (512-dim)")
+    else:
+        encoder = model.visual.trunk.to(device)
+        embed_dim = 768
+        print("BiomedCLIP encoder: pre-projection ViT features (768-dim)")
+
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+    encoder.eval()
+
+    preprocess_train = build_train_transform(preprocess_val)
+    return encoder, preprocess_train, preprocess_val, embed_dim
+
+
+def _build_chexfound_encoder(
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[nn.Module, object, object, int]:
+    from chexfound.data.transforms import (
+        build_preprocess_val_chexfound,
+        build_train_transform_chexfound,
+    )
+    from chexfound.models.encoders import CheXFoundViT, load_continued_pretrain_weights
+
+    preprocess_val   = build_preprocess_val_chexfound()
+    preprocess_train = build_train_transform_chexfound(preprocess_val)
+
+    checkpoint = (
+        None if args.chexfound_checkpoint.lower() == "none" else args.chexfound_checkpoint
+    )
+
+    if checkpoint is None:
+        if not args.chexfound_weights:
+            raise ValueError(
+                "--chexfound_weights is required for frozen baseline mode. "
+                "Provide the path to the original CheXFound .pth file, "
+                "or omit --chexfound_checkpoint to use the bundled checkpoint."
+            )
+        print("Loading frozen CheXFound baseline (original pretrained weights).")
+        encoder = CheXFoundViT(
+            args.chexfound_config, args.chexfound_weights,
+            lora_layers=0, r=8, alpha=16.0, load_pretrained=True,
+        )
+    else:
+        print(f"Loading CheXFound encoder from continued-pretrain checkpoint: {checkpoint}")
+        encoder = CheXFoundViT(
+            args.chexfound_config, weights_path=None,
+            lora_layers=0, r=8, alpha=16.0, load_pretrained=False,
+        )
+        load_continued_pretrain_weights(encoder, checkpoint)
+
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+    encoder = encoder.to(device)
+    encoder.eval()
+
+    return encoder, preprocess_train, preprocess_val, 1024
+
+
+# ── Training / evaluation ─────────────────────────────────────────────────────
 
 def train_one_epoch(
     mlp: nn.Module,
@@ -88,7 +199,7 @@ def train_one_epoch(
         lbl    = batch["label"].to(device)
 
         with torch.no_grad():
-            emb = F.normalize(encoder(images), dim=-1)  # (B, 1024), unit norm
+            emb = F.normalize(encoder(images), dim=-1)
 
         optimizer.zero_grad()
         logits = mlp(emb, age, sex)
@@ -123,40 +234,54 @@ def evaluate(
     return total_loss / len(loader), float(acc), preds, labels
 
 
+# ── Argparse ─────────────────────────────────────────────────────────────────
+
 def _str_to_bool(v: str) -> bool:
     return str(v).lower() not in ("false", "0", "no", "none")
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Downstream malignancy classifier on top of CheXFound ViT-L."
+        description="Unified downstream malignancy classifier for BiomedCLIP / CheXFound."
     )
-    # ── CheXFound encoder ────────────────────────────────────────────────────
+
+    # ── Baseline selector ────────────────────────────────────────────────────
+    parser.add_argument("--baseline", required=True,
+                        choices=["biomedclip", "chexfound"],
+                        help="Which pretrained encoder to use.")
+
+    # ── BiomedCLIP-specific args ─────────────────────────────────────────────
+    parser.add_argument("--biomedclip_checkpoint",
+                        default=str(ROOT_DIR / "results" / "biomedclip_pretrain" / "best_r1_checkpoint.pt"),
+                        help="Path to BiomedCLIP pretrain checkpoint. Ignored when --baseline chexfound.")
+    parser.add_argument("--freezed_biomedclip", action="store_true",
+                        help="Use vanilla BiomedCLIP weights without a fine-tuned checkpoint.")
+    parser.add_argument("--use_projected_features", nargs="?", const=True,
+                        type=_str_to_bool, default=False,
+                        help="512-dim projected CLIP embedding instead of 768-dim ViT features.")
+
+    # ── CheXFound-specific args ───────────────────────────────────────────────
     parser.add_argument("--chexfound_config",  default=str(DEFAULT_CHEXFOUND_CONFIG),
-                        help="Path to CheXFound model config YAML "
-                             f"(default: {DEFAULT_CHEXFOUND_CONFIG}).")
+                        help="CheXFound model config YAML.")
     parser.add_argument("--chexfound_weights", default=None,
-                        help="Path to original CheXFound pretrained .pth checkpoint. "
-                             "Required only for frozen baseline mode (--checkpoint none).")
-    parser.add_argument("--checkpoint", default=str(DEFAULT_CHEXFOUND_CHECKPOINT),
-                        help="Path to continued-pretrain checkpoint (teacher weights). "
-                             f"Defaults to the bundled checkpoint. "
-                             "Pass 'none' to use the frozen CheXFound baseline instead.")
+                        help="Original CheXFound .pth checkpoint (frozen baseline mode only).")
+    parser.add_argument("--chexfound_checkpoint", default=str(DEFAULT_CHEXFOUND_CHECKPOINT),
+                        help="Continued-pretrain checkpoint. Pass 'none' for frozen baseline mode.")
 
-    # ── Data / splits ────────────────────────────────────────────────────────
-    parser.add_argument("--splits",    default=str(DEFAULT_SPLITS))
-    parser.add_argument("--excel",     default=str(DEFAULT_EXCEL))
-    parser.add_argument("--out_dir",   default=str(DEFAULT_OUT_DIR))
-    parser.add_argument("--use_mask",  action="store_true")
+    # ── Data / splits ─────────────────────────────────────────────────────────
+    parser.add_argument("--splits",   default=str(DEFAULT_SPLITS))
+    parser.add_argument("--excel",    default=str(DEFAULT_EXCEL))
+    parser.add_argument("--out_dir",  default=str(DEFAULT_OUT_DIR))
+    parser.add_argument("--use_mask", action="store_true")
 
-    # ── Training hyperparameters ─────────────────────────────────────────────
-    parser.add_argument("--epochs",       type=int,   default=50)
-    parser.add_argument("--batch_size",   type=int,   default=64)
-    parser.add_argument("--lr",           type=float, default=1e-3)
-    parser.add_argument("--dropout",      type=float, default=0.3)
-    parser.add_argument("--meta_embed_dim", type=int, default=16)
-    parser.add_argument("--hidden_dims",  type=str, nargs="+", default=[256, 128])
-    parser.add_argument("--weight_decay", type=float, default=0.01)
+    # ── Training hyperparameters ──────────────────────────────────────────────
+    parser.add_argument("--epochs",        type=int,   default=50)
+    parser.add_argument("--batch_size",    type=int,   default=64)
+    parser.add_argument("--lr",            type=float, default=1e-3)
+    parser.add_argument("--dropout",       type=float, default=0.3)
+    parser.add_argument("--meta_embed_dim", type=int,  default=16)
+    parser.add_argument("--hidden_dims",   type=str,   nargs="+", default=[256, 128])
+    parser.add_argument("--weight_decay",  type=float, default=0.01)
 
     # ── Loss function ─────────────────────────────────────────────────────────
     parser.add_argument("--loss", default="ce",
@@ -172,7 +297,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)
     parser.add_argument("--wandb",         action="store_true")
-    parser.add_argument("--wandb_project", default="chexfound-downstream")
+    parser.add_argument("--wandb_project", default=None,
+                        help="W&B project name. Defaults to '{baseline}-downstream'.")
     parser.add_argument("--wandb_run",     default=None)
     parser.add_argument("--wandb_entity",  default=None)
     parser.add_argument("--sweep",         action="store_true")
@@ -181,29 +307,36 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     raw = " ".join(str(x) for x in args.hidden_dims)
     args.hidden_dims = [int(x) for x in raw.strip("[]").replace(",", " ").split()]
+
+    if args.wandb_project is None:
+        args.wandb_project = f"{args.baseline}-downstream"
+
     return args
 
 
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     cfg = wandb.config
-    for key in (
+    sweep_keys = (
         "lr", "dropout", "meta_embed_dim", "weight_decay", "loss",
         "class_weighting", "label_smoothing", "focal_gamma", "cb_beta",
-        "ldam_max_margin", "ldam_scale", "batch_size",
-    ):
+        "ldam_max_margin", "ldam_scale", "batch_size", "use_projected_features",
+    )
+    for key in sweep_keys:
         if key in cfg:
             setattr(args, key, cfg[key])
     if "hidden_dims" in cfg:
         args.hidden_dims = list(cfg["hidden_dims"])
 
 
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 def main(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"Device: {device}  |  Baseline: {args.baseline}")
 
-    # ── W&B initialisation ────────────────────────────────────────────────────
+    # ── W&B ──────────────────────────────────────────────────────────────────
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
     if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
         warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
@@ -217,40 +350,10 @@ def main(args: argparse.Namespace) -> None:
         if args.sweep:
             _apply_sweep_config(args)
 
-    # ── Encoder loading ───────────────────────────────────────────────────────
-    preprocess_val   = build_preprocess_val_chexfound()
-    preprocess_train = build_train_transform_chexfound(preprocess_val)
+    # ── Encoder ───────────────────────────────────────────────────────────────
+    encoder, preprocess_train, preprocess_val, embed_dim = build_encoder(args, device)
 
-    checkpoint = None if args.checkpoint.lower() == "none" else args.checkpoint
-
-    if checkpoint is None:
-        # Mode A: frozen CheXFound baseline — original pretrained weights, no fine-tuning.
-        if not args.chexfound_weights:
-            raise ValueError(
-                "--chexfound_weights is required for frozen baseline mode. "
-                "Provide the path to the original CheXFound .pth file, "
-                "or omit --checkpoint to use the bundled continued-pretrain checkpoint."
-            )
-        print("Loading frozen CheXFound baseline (original pretrained weights).")
-        encoder = CheXFoundViT(
-            args.chexfound_config, args.chexfound_weights,
-            lora_layers=0, r=8, alpha=16.0, load_pretrained=True,
-        )
-    else:
-        # Mode B: load teacher weights from a continued iBOT pretraining checkpoint.
-        print(f"Loading CheXFound encoder from continued-pretrain checkpoint: {checkpoint}")
-        encoder = CheXFoundViT(
-            args.chexfound_config, weights_path=None,
-            lora_layers=0, r=8, alpha=16.0, load_pretrained=False,
-        )
-        load_continued_pretrain_weights(encoder, checkpoint)
-
-    for p in encoder.parameters():
-        p.requires_grad_(False)
-    encoder = encoder.to(device)
-    encoder.eval()
-
-    # ── Data preparation ──────────────────────────────────────────────────────
+    # ── Data ──────────────────────────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
 
@@ -300,7 +403,6 @@ def main(args: argparse.Namespace) -> None:
     val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader_raw,  device)
     test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
 
-    # embed_dim inferred from actual shape → MLP adapts automatically to 1024.
     embed_dim = val_emb.shape[1]
     print(f"Embedding dim: {embed_dim}")
 
@@ -334,7 +436,7 @@ def main(args: argparse.Namespace) -> None:
     criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    out_dir = Path(args.out_dir) / "chexfound_downstream"
+    out_dir = Path(args.out_dir) / f"{args.baseline}_downstream"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     run_id    = (wandb.run.id if use_wandb and wandb.run else None) or "local"

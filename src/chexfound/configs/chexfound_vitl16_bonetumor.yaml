@@ -41,7 +41,7 @@ teacher:
   momentum_teacher: 0.997
 
 optim:
-  epochs: 50
+  epochs: 30
   weight_decay_end: 0.2
   base_lr: 1.0e-05
   warmup_epochs: 5
@@ -61,5 +61,5 @@ lora:
   lora_layers: 4   # last 4 real ViT blocks, not FSDP BlockChunks
   r: 4             # rank
   alpha: 16.0      # scaling factor
-  head_mode: frozen          # frozen | unfreeze_after | train
+  head_mode: unfreeze_after          # frozen | unfreeze_after | train
   head_unfreeze_epoch: 10    # only used with head_mode: unfreeze_after

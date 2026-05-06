@@ -31,4 +31,4 @@ $python_path $home_dir/Project/src/llm_extractor.py \
     --reports $home_dir/Project/data/text/translated_reports.json \
     --out_dir $home_dir/Project/results \
     --english \
-    --max 15
+    #--max 15

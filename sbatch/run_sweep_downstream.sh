@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 #SBATCH --exclude=aioserver2
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 
@@ -13,7 +13,7 @@
 #        wandb sweep src/biomedclip/eval/sweep_downstream.yaml
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_downstream.sh
-SWEEP_ID="philipp-wiese/chexfound-downstream/tgmv8ukl"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
+SWEEP_ID="philipp-wiese/chexfound-downstream/yffe4gxa"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
 
 if [ -z "$SWEEP_ID" ]; then
     echo "ERROR: Set SWEEP_ID in this script before submitting."
