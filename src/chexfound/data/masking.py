@@ -9,6 +9,25 @@ import numpy as np
 
 
 class MaskingGenerator:
+    """Generates random rectangular block masks over a 2-D patch grid.
+
+    Masks are produced in patch-grid coordinates, so every masked position
+    corresponds to exactly one fully-masked patch token. The masking strategy
+    repeatedly places random rectangles with random aspect ratios until the
+    requested number of patches is covered.
+
+    Args:
+        input_size: Height and width of the patch grid as ``(H, W)`` or a
+            single integer for a square grid (e.g. 32 for a 512px image with
+            16px patches).
+        num_masking_patches: Maximum and default number of patches to mask.
+        min_num_patches: Minimum area (in patches) of a single mask rectangle.
+        max_num_patches: Maximum area of a single rectangle. Defaults to
+            ``num_masking_patches``.
+        min_aspect: Minimum aspect ratio of a mask rectangle.
+        max_aspect: Maximum aspect ratio. Defaults to ``1 / min_aspect``.
+    """
+
     def __init__(
         self,
         input_size,
@@ -47,6 +66,21 @@ class MaskingGenerator:
         return self.height, self.width
 
     def _mask(self, mask, max_mask_patches):
+        """Attempt to place one random rectangle onto ``mask``.
+
+        Tries up to 10 times to find a valid rectangle (random area and aspect
+        ratio) that fits within the grid and does not exceed ``max_mask_patches``
+        new patches. Stops and returns as soon as one valid rectangle is placed.
+
+        Args:
+            mask: Boolean numpy array of shape ``(H, W)`` tracking already-masked
+                patches. Modified in-place.
+            max_mask_patches: Maximum number of *new* patches this rectangle may
+                cover (already-masked patches do not count).
+
+        Returns:
+            Number of newly masked patches added (0 if no valid rectangle found).
+        """
         delta = 0
         for _ in range(10):
             target_area = random.uniform(self.min_num_patches, max_mask_patches)
@@ -70,6 +104,19 @@ class MaskingGenerator:
         return delta
 
     def __call__(self, num_masking_patches=0):
+        """Generate a patch mask with the requested number of masked patches.
+
+        Repeatedly calls ``_mask`` to place rectangles until ``num_masking_patches``
+        positions are covered or no further progress is possible.
+
+        Args:
+            num_masking_patches: Target number of patches to mask. Pass 0 to
+                return an all-False mask (no masking).
+
+        Returns:
+            Boolean numpy array of shape ``(H, W)`` where ``True`` marks a
+            masked patch position.
+        """
         mask = np.zeros(shape=self.get_shape(), dtype=bool)
         mask_count = 0
         while mask_count < num_masking_patches:

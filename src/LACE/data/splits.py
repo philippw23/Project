@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from biomedclip.data.splits import _stratified_split_two
-from LACE.data.datasets import InternalTripleDataset
+from LACE.data.datasets import InternalDatasetV2, InternalTripleDataset
 
 
 def _normalise_id(val: str) -> str:
@@ -197,4 +197,28 @@ def build_pretrain_datasets_lace(
 
     train_ds = InternalTripleDataset(train_samp, preprocess_train, tokenizer, max_text_len)
     val_ds   = InternalTripleDataset(val_samp,   preprocess_val,   tokenizer, max_text_len)
+    return train_ds, val_ds
+
+
+def build_pretrain_datasets_lace_v2(
+    pretrain_samples: list[dict],
+    preprocess_train,
+    preprocess_val,
+    tokenizer,
+    seed: int,
+    monitor_val_frac: float = 0.1,
+    max_text_len: int = 128,
+) -> tuple[InternalDatasetV2, InternalDatasetV2]:
+    """90/10 random split of pretrain_samples into train and monitor-val datasets (v2)."""
+    rng     = random.Random(seed)
+    indices = list(range(len(pretrain_samples)))
+    rng.shuffle(indices)
+    split      = int(len(indices) * (1.0 - monitor_val_frac))
+    train_samp = [pretrain_samples[i] for i in indices[:split]]
+    val_samp   = [pretrain_samples[i] for i in indices[split:]]
+
+    print(f"Pretrain loop split (v2): {len(train_samp)} train / {len(val_samp)} monitor-val")
+
+    train_ds = InternalDatasetV2(train_samp, preprocess_train, tokenizer, max_text_len)
+    val_ds   = InternalDatasetV2(val_samp,   preprocess_val,   tokenizer, max_text_len)
     return train_ds, val_ds

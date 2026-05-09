@@ -276,6 +276,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # ── Training hyperparameters ──────────────────────────────────────────────
     parser.add_argument("--epochs",        type=int,   default=50)
+    parser.add_argument("--patience",      type=int,   default=10)
     parser.add_argument("--batch_size",    type=int,   default=64)
     parser.add_argument("--lr",            type=float, default=1e-3)
     parser.add_argument("--dropout",       type=float, default=0.3)
@@ -444,7 +445,8 @@ def main(args: argparse.Namespace) -> None:
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_loss = float("inf")
-    print(f"\nTraining MLP for {args.epochs} epochs\n")
+    patience_counter = 0
+    print(f"\nTraining MLP for {args.epochs} epochs (patience={args.patience})\n")
 
     for epoch in range(1, args.epochs + 1):
         train_loss                               = train_one_epoch(mlp, encoder, train_loader, optimizer, criterion, device)
@@ -468,8 +470,14 @@ def main(args: argparse.Namespace) -> None:
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            patience_counter = 0
             torch.save({"epoch": epoch, "mlp_state_dict": mlp.state_dict(), "val_loss": val_loss},
                        ckpt_path)
+        else:
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                print(f"Early stopping at epoch {epoch} (no improvement for {args.patience} epochs).")
+                break
 
     # ── Test evaluation ───────────────────────────────────────────────────────
     mlp.load_state_dict(

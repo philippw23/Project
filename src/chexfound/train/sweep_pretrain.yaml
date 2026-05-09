@@ -2,7 +2,7 @@ program: src/chexfound/train/pretrain.py
 project: chexfound-pretrain
 entity: philipp-wiese
 method: bayes
-run_cap: 20
+run_cap: 30
 metric:
   name: train/loss_total
   goal: minimize
@@ -20,6 +20,10 @@ parameters:
     distribution: uniform
     min: 0.990
     max: 0.9995
+  head_mode:
+    values: [unfreeze_after]
+  head_unfreeze_epoch:
+    values: [5, 10]
 
 command:
   - ${env}
@@ -36,7 +40,7 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --epochs
-  - "20"
+  - "30"
   - --batch_size
   - "4"
   - --sweep

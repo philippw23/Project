@@ -8,6 +8,42 @@ import random
 
 
 def collate_data_and_cast(samples_list, mask_ratio_tuple, mask_probability, dtype, n_tokens=None, mask_generator=None):
+    """Collate a batch of DINO/iBOT samples and generate iBOT patch masks.
+
+    Stacks global and local crops from all samples, then assigns a randomly
+    sampled patch mask to each global-crop image. A fraction ``mask_probability``
+    of images receive a non-zero mask whose mask ratio is drawn uniformly from
+    ``mask_ratio_tuple = (min_ratio, max_ratio)`` via linearly spaced probability
+    bins. The remaining images get an all-zero mask (no patches masked).
+
+    Args:
+        samples_list: List of ``(augmented_dict, label)`` tuples returned by the
+            dataset. ``augmented_dict`` must contain ``"global_crops"`` and
+            ``"local_crops"`` keys with pre-transformed tensors.
+        mask_ratio_tuple: ``(min_ratio, max_ratio)`` controlling the range of
+            masked-patch fractions for the iBOT objective.
+        mask_probability: Fraction of images in the batch that receive a
+            non-zero mask (e.g. 0.5 masks half the batch).
+        dtype: Target dtype for the stacked crop tensors (e.g. ``torch.float32``).
+        n_tokens: Total number of patch tokens per image
+            (``(global_crops_size // patch_size) ** 2``).
+        mask_generator: Callable that accepts an integer number of patches to
+            mask and returns a 2-D boolean array of shape
+            ``(n_patches_h, n_patches_w)``.
+
+    Returns:
+        dict with keys:
+            - ``collated_global_crops``: ``(B, C, H, W)`` tensor of global crops.
+            - ``collated_local_crops``: ``(B*n_local, C, h, w)`` tensor of local crops.
+            - ``collated_masks``: ``(B, N)`` bool tensor; ``True`` = masked patch.
+            - ``mask_indices_list``: 1-D tensor of flat indices of all masked patches.
+            - ``masks_weight``: Per-patch loss weight (``1 / n_masked_in_image``),
+              broadcast to masked positions only.
+            - ``upperbound``: Sum of maximum masked-patch counts across masked
+              images; used to pre-allocate buffers in the iBOT loss.
+            - ``n_masked_patches``: Scalar tensor with the total number of masked
+              patches across the batch.
+    """
     n_global_crops = len(samples_list[0][0]["global_crops"])
     n_local_crops = len(samples_list[0][0]["local_crops"])
 

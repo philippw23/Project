@@ -4,15 +4,13 @@ import open_clip
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
 
 from biomedclip.utils.misc import MODEL_TAG
 from LACE.models.lora import inject_lora_vit, count_trainable_params
 
-VIT_DIM          = 768
-BERT_DIM         = 768
-EMBED_DIM        = 256
-GERMAN_MEDBERT_TAG = "smanjil/German-MedBERT"
+VIT_DIM   = 768
+BERT_DIM  = 768
+EMBED_DIM = 256
 
 
 class ProjectionHead(nn.Module):
@@ -72,54 +70,65 @@ class SharedViT(nn.Module):
         return self._features(images)[:, 1:, :]
 
 
-class GermanMedBERT(nn.Module):
-    """Frozen smanjil/German-MedBERT with trainable projection heads.
+class BiomedCLIPTextEncoder(nn.Module):
+    """BiomedCLIP PubMedBERT text encoder with trainable projection heads.
 
-    BERT weights are frozen throughout; only cls_proj and word_proj are trained.
-    self.tokenizer is exposed for use in data loading.
+    Transformer weights are frozen; cls_proj and word_proj are trained.
+    self.tokenizer is exposed for data loading.
+
+    encode_beurteilung  →  CLS projection for L_ITA
+    encode_befund       →  (CLS, word projections) for L_sim phrase attention
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(GERMAN_MEDBERT_TAG)
-        self.bert = AutoModel.from_pretrained(GERMAN_MEDBERT_TAG)
-        for p in self.bert.parameters():
+        _model, _, _ = open_clip.create_model_and_transforms(MODEL_TAG)
+        self.transformer = _model.text.transformer
+        self.tokenizer   = open_clip.get_tokenizer(MODEL_TAG)
+        del _model
+        for p in self.transformer.parameters():
             p.requires_grad_(False)
 
         self.cls_proj  = ProjectionHead(BERT_DIM, EMBED_DIM)
         self.word_proj = ProjectionHead(BERT_DIM, EMBED_DIM)
 
-        n_bert = sum(p.numel() for p in self.bert.parameters())
-        n_proj = sum(p.numel() for p in self.cls_proj.parameters()) + \
-                 sum(p.numel() for p in self.word_proj.parameters())
-        print(f"GermanMedBERT: frozen BERT ({n_bert:,} params) + trainable projections ({n_proj:,} params)")
+        n_bert = sum(p.numel() for p in self.transformer.parameters())
+        n_proj = (sum(p.numel() for p in self.cls_proj.parameters()) +
+                  sum(p.numel() for p in self.word_proj.parameters()))
+        print(
+            f"BiomedCLIPTextEncoder: frozen transformer ({n_bert:,} params) + "
+            f"trainable projections ({n_proj:,} params)"
+        )
 
     @torch.no_grad()
-    def _bert_forward(
+    def _forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        out = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        seq = out.last_hidden_state
-        return seq[:, 0, :], seq
+    ) -> torch.Tensor:
+        out = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
+        return out.last_hidden_state  # [B, L, 768]
 
     def encode_beurteilung(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Projected CLS embedding of beurteilung text for L_ITA. Returns [B, 256]."""
-        cls, _ = self._bert_forward(input_ids, attention_mask)
-        return self.cls_proj(cls)
+        """Projected CLS of Beurteilung text for L_ITA. Returns [B, 256]."""
+        seq = self._forward(input_ids, attention_mask)
+        return self.cls_proj(seq[:, 0, :])
 
     def encode_befund(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """CLS and word embeddings of befund text for L_sim.
-        Returns (cls [B, 256], word_embs [B, L, 256]).
+        """CLS + word-token projections of Befund text for L_sim.
+
+        Returns (z_cls [B, 256], proj_words [B, L, 256]).
+        z_cls is kept for API compatibility; sim_loss_v2 uses proj_words only.
         """
-        cls, all_tokens = self._bert_forward(input_ids, attention_mask)
-        return self.cls_proj(cls), self.word_proj(all_tokens)
+        seq = self._forward(input_ids, attention_mask)
+        B, L, D = seq.shape
+        proj_words = self.word_proj(seq.reshape(-1, D)).reshape(B, L, EMBED_DIM)
+        return self.cls_proj(seq[:, 0, :]), proj_words

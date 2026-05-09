@@ -28,6 +28,8 @@ train:
   dataset_path: "BoneTumor:root=/mnt/nfs/homedirs/philippw/Project/data/images"
   centering: sinkhorn_knopp
   OFFICIAL_EPOCH_LENGTH: 2500
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0
 
 student:
   arch: vit_large

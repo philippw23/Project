@@ -13,6 +13,72 @@ from LACE.data.transforms import extract_centered_crop, rasterize_shapes, mask_t
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
+class InternalDatasetV2(Dataset):
+    """LACE v2 internal dataset — full image only, no crop.
+
+    Returns the same text fields as InternalTripleDataset but drops crop_image.
+    patch_labels (GT mask in 196-patch space) is still included so that
+    MaskTokenModule can be supervised via seg_loss on samples where has_mask=True.
+    """
+
+    def __init__(
+        self,
+        samples: list[dict],
+        preprocess,
+        tokenizer,
+        max_text_len: int = 128,
+    ) -> None:
+        self.samples      = samples
+        self.preprocess   = preprocess
+        self.tokenizer    = tokenizer
+        self.max_text_len = max_text_len
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        s           = self.samples[idx]
+        image_path  = Path(s["image"])
+        mask_path   = Path(s["mask"])
+        beurteilung = str(s.get("beurteilung") or "").strip()
+        befund      = str(s.get("befund") or "").strip()
+
+        image      = Image.open(image_path).convert("RGB")
+        full_image = self.preprocess(image)
+
+        has_mask = mask_path.exists()
+        if has_mask:
+            mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
+            has_mask = bool(np.any(mask_arr > 0))
+            patch_labels = mask_to_patch_labels(mask_arr) if has_mask else \
+                torch.zeros(196, dtype=torch.float32)
+        else:
+            patch_labels = torch.zeros(196, dtype=torch.float32)
+
+        def _tokenize(text: str) -> dict:
+            return self.tokenizer(
+                text if text else "[PAD]",
+                max_length=self.max_text_len,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+
+        b_enc = _tokenize(beurteilung)
+        f_enc = _tokenize(befund)
+
+        return {
+            "full_image":       full_image,
+            "beurteilung_ids":  b_enc["input_ids"].squeeze(0),
+            "beurteilung_mask": b_enc["attention_mask"].squeeze(0),
+            "befund_ids":       f_enc["input_ids"].squeeze(0),
+            "befund_mask":      f_enc["attention_mask"].squeeze(0),
+            "patch_labels":     patch_labels,
+            "has_mask":         torch.tensor(has_mask, dtype=torch.bool),
+            "has_befund":       torch.tensor(bool(befund), dtype=torch.bool),
+        }
+
+
 class InternalTripleDataset(Dataset):
     """Returns all fields needed for L_ITA, L_sim, and internal L_ortho.
 

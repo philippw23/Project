@@ -4,7 +4,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=72:00:00
+#SBATCH --time=120:00:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 
 # Usage:
@@ -12,7 +12,7 @@
 #        wandb sweep src/biomedclip/train/sweep_pretrain.yaml
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_pretrain.sh
-SWEEP_ID="philipp-wiese/chexfound-pretrain/6yrughti"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
+SWEEP_ID="philipp-wiese/chexfound-pretrain/hgakk4sm"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
 
 if [ -z "$SWEEP_ID" ]; then
     echo "ERROR: Set SWEEP_ID in this script before submitting."

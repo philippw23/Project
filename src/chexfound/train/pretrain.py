@@ -85,6 +85,10 @@ def _apply_sweep_cfg(cfg: dict) -> None:
         cfg.setdefault("lora", {})["lora_layers"] = int(wc["lora_layers"])
     if "momentum_teacher" in wc:
         cfg.setdefault("teacher", {})["momentum_teacher"] = wc["momentum_teacher"]
+    if "head_mode" in wc:
+        cfg.setdefault("lora", {})["head_mode"] = wc["head_mode"]
+    if "head_unfreeze_epoch" in wc:
+        cfg.setdefault("lora", {})["head_unfreeze_epoch"] = int(wc["head_unfreeze_epoch"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -140,6 +144,16 @@ def _ema_update(model: SSLMetaArch, momentum: float) -> None:
 
 def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     # ── Distributed setup ────────────────────────────────────────────────────
+    # When launched via plain `python` (e.g. W&B sweep agent) rather than
+    # torchrun, the env:// rendezvous variables are absent. Set single-GPU
+    # defaults so dist.init_process_group succeeds.
+    if "RANK" not in os.environ:
+        os.environ.setdefault("RANK", "0")
+        os.environ.setdefault("LOCAL_RANK", "0")
+        os.environ.setdefault("WORLD_SIZE", "1")
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "29500")
+
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     is_main = local_rank == 0
@@ -172,6 +186,8 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     epoch_len     = train_cfg.get("OFFICIAL_EPOCH_LENGTH", 2500)
     save_freq     = train_cfg.get("saveckp_freq", 10)
     seed          = train_cfg.get("seed", 0)
+    es_patience   = train_cfg.get("early_stopping_patience", None)   # None = disabled
+    es_min_delta  = train_cfg.get("early_stopping_min_delta", 0.0)
 
     base_lr    = optim_cfg.get("base_lr", 5e-5)
     min_lr     = optim_cfg.get("min_lr", 1e-6)
@@ -387,8 +403,11 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     all_trainable = [p for g in optimizer.param_groups for p in g["params"]]
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    global_step = 0
+    global_step   = 0
     log: list[dict] = []
+    best_loss     = float("inf")
+    no_improve    = 0
+    stop_training = False
 
     for epoch in range(n_epochs):
         if sampler is not None:
@@ -502,6 +521,28 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
             if (epoch + 1) % save_freq == 0:
                 torch.save(ckpt, out_dir / f"checkpoint_ep{epoch + 1:03d}.pth")
 
+            if es_patience is not None:
+                if avg["total"] < best_loss - es_min_delta:
+                    best_loss = avg["total"]
+                    no_improve = 0
+                    torch.save(ckpt, out_dir / "checkpoint_best.pth")
+                    print(f"  New best loss: {best_loss:.4f} — saved checkpoint_best.pth")
+                else:
+                    no_improve += 1
+                    print(f"  No improvement for {no_improve}/{es_patience} epochs "
+                          f"(best={best_loss:.4f})")
+                    if no_improve >= es_patience:
+                        stop_training = True
+                        print(f"Early stopping triggered after epoch {epoch + 1}.")
+
+        # Broadcast stop decision from rank-0 to all other ranks.
+        if world_size > 1:
+            stop_flag = torch.tensor(int(stop_training), device=device)
+            dist.broadcast(stop_flag, src=0)
+            stop_training = bool(stop_flag.item())
+        if stop_training:
+            break
+
     dist.destroy_process_group()
 
     if is_main:
@@ -525,6 +566,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--wandb",  action="store_true", help="Enable W&B logging without a sweep.")
     p.add_argument("--wandb_project", default="chexfound-pretrain")
     p.add_argument("--wandb_entity",  default=None)
+    p.add_argument("--early_stopping_patience", type=int, default=None,
+                   help="Stop if total loss does not improve for this many epochs. "
+                        "Overrides train.early_stopping_patience in the config.")
+    p.add_argument("--early_stopping_min_delta", type=float, default=None,
+                   help="Minimum loss decrease to count as improvement (default 0.0).")
     return p.parse_args(argv)
 
 
@@ -536,6 +582,10 @@ if __name__ == "__main__":
         cfg.setdefault("optim",  {})["epochs"]            = args.epochs
     if args.batch_size is not None:
         cfg.setdefault("train", {})["batch_size_per_gpu"] = args.batch_size
+    if args.early_stopping_patience is not None:
+        cfg.setdefault("train", {})["early_stopping_patience"] = args.early_stopping_patience
+    if args.early_stopping_min_delta is not None:
+        cfg.setdefault("train", {})["early_stopping_min_delta"] = args.early_stopping_min_delta
 
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
     if use_wandb:
@@ -543,4 +593,11 @@ if __name__ == "__main__":
         if args.sweep:
             _apply_sweep_cfg(cfg)
 
-    train(cfg, Path(args.out_dir), use_wandb=use_wandb)
+    # Each sweep run gets its own subdirectory named after the W&B run ID
+    # so checkpoints from different runs don't overwrite each other.
+    if use_wandb and wandb.run is not None:
+        out_dir = Path(args.out_dir) / wandb.run.id
+    else:
+        out_dir = Path(args.out_dir)
+
+    train(cfg, out_dir, use_wandb=use_wandb)

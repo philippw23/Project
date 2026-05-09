@@ -80,6 +80,91 @@ def sim_loss(
     return (F.cross_entropy(logits_il, labels) + F.cross_entropy(logits_li, labels)) / 2.0
 
 
+def sim_loss_v2(
+    proj_patches: torch.Tensor,
+    proj_words: torch.Tensor,
+    H_soft: torch.Tensor,
+    logit_scale: torch.Tensor,
+    phrase_temp: float = 0.07,
+) -> torch.Tensor:
+    """Local lesion-phrase alignment via heatmap pooling and phrase attention.
+
+    Steps (following diagram formulas exactly):
+      1. H_mean = H_soft.mean(dim=1)                               [B, m]
+         (each H_i is a softmax dist → H_mean also sums to 1)
+      2. v_local = normalize(H_mean @ proj_patches)                [B, D]
+         lesion-weighted patch pool
+      3. α_j = softmax(sim(v_local, t_j) / τ_s)                   [B, J]
+         v_local attends over phrase tokens
+      4. t̂ = normalize(Σ α_j * t_j)                               [B, D]
+         phrase-attended text representation
+      5. s_{ik} = sim(v_local_i, t̂_k) * τ                        [B, B]
+      6. w_{ik} = softmax(t̂ · t̂^T / τ_s)   (soft semantic targets)
+      7. L_sim = ½(L_{i→t} + L_{t→i})  with soft InfoNCE
+
+    Args:
+        proj_patches:  [B, m, D]  L2-normalised patch embeddings (vit.patch_proj)
+        proj_words:    [B, J, D]  L2-normalised word token embeddings (befund)
+        H_soft:        [B, N, m]  softmax heatmaps from MaskTokenModule
+        logit_scale:   scalar     contrastive temperature τ
+        phrase_temp:   float      τ_s for phrase attention + soft label targets
+    """
+    # 1–2. lesion-weighted patch pool
+    H_mean  = H_soft.mean(dim=1)                                    # [B, m]
+    v_local = F.normalize(
+        (H_mean.unsqueeze(1) @ proj_patches).squeeze(1), dim=-1
+    )                                                                # [B, D]
+
+    # 3–4. v_local-guided phrase attention → t̂
+    attn_logits = torch.bmm(
+        v_local.unsqueeze(1), proj_words.transpose(1, 2)
+    ).squeeze(1) / phrase_temp                                       # [B, J]
+    alpha = F.softmax(attn_logits, dim=-1)                           # [B, J]
+    t_hat = F.normalize(
+        (alpha.unsqueeze(1) @ proj_words).squeeze(1), dim=-1
+    )                                                                # [B, D]
+
+    # 5. batch similarity matrix
+    tau = logit_scale.exp().clamp(max=100.0)
+    s   = v_local @ t_hat.t() * tau                                  # [B, B]
+
+    # 6. soft semantic targets from t̂-t̂ similarity
+    with torch.no_grad():
+        r = t_hat @ t_hat.t() / phrase_temp                         # [B, B]
+        w = F.softmax(r, dim=-1)                                     # [B, B]
+
+    # 7. soft InfoNCE (image→text and text→image)
+    L_i2t = -(w * F.log_softmax(s,     dim=-1)).sum(-1).mean()
+    L_t2i = -(w * F.log_softmax(s.t(), dim=-1)).sum(-1).mean()
+    return (L_i2t + L_t2i) / 2.0
+
+
+def seg_loss(
+    H_logits: torch.Tensor,
+    gt_patch_labels: torch.Tensor,
+) -> torch.Tensor:
+    """Segmentation loss: Dice + BCE on mean heatmap vs GT patch labels.
+
+    Args:
+        H_logits:        [B, N, m]  raw logits from MaskTokenModule
+        gt_patch_labels: [B, m]     float32, 1 = lesion patch, 0 = background
+    """
+    pred_logits = H_logits.mean(dim=1)           # [B, m]
+    pred_probs  = torch.sigmoid(pred_logits)     # [B, m]
+    gt = gt_patch_labels.float()
+
+    # soft Dice
+    inter = (pred_probs * gt).sum(-1)
+    dice  = 1.0 - (
+        2.0 * inter / (pred_probs.sum(-1) + gt.sum(-1) + 1e-8)
+    ).mean()
+
+    # BCE (per patch independently)
+    bce = F.binary_cross_entropy_with_logits(pred_logits, gt)
+
+    return dice + bce
+
+
 def ortho_loss(
     patch_tokens: torch.Tensor,
     patch_labels: torch.Tensor,
