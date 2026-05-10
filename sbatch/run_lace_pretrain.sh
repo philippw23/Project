@@ -26,10 +26,10 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/lace_pretrain.py \
-    --excel        $home_dir/Project/data/metadata.xlsx \
-    --reports      $home_dir/Project/data/text/translated_reports.json \
-    --images       $home_dir/Project/data/images \
-    --masks        $home_dir/Project/data/segmentations \
+    --excel        $home_dir/Project/data/internal_dataset/metadata.xlsx \
+    --reports      $home_dir/Project/data/internal_dataset/text/translated_reports.json \
+    --images       $home_dir/Project/data/internal_dataset/images \
+    --masks        $home_dir/Project/data/internal_dataset/segmentations \
     --btxrd_images $home_dir/Project/data/BTXRD/images \
     --btxrd_annots $home_dir/Project/data/BTXRD/Annotations \
     --out_dir      $home_dir/Project/results \

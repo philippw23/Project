@@ -47,13 +47,11 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --chexfound_checkpoint
-  - ....
-  - --chexfound_weights
-  - src/chexfound/data/teacher_checkpoint.pth
+  - results/chexfound_pretrain_sweep/us8ygt55/checkpoint_last.pth
   - --splits
-  - results/chexfound_pretrain/job_6306/biomedclip_pretrain/splits.json
+  - results/chexfound_pretrain_sweep/us8ygt55/biomedclip_pretrain/splits.json
   - --excel
-  - data/metadata.xlsx
+  - data/internal_dataset/metadata.xlsx
   - --out_dir
   - results
   - --use_mask

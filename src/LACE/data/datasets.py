@@ -114,18 +114,16 @@ class InternalTripleDataset(Dataset):
         image = Image.open(image_path).convert("RGB")
         full_image = self.preprocess(image)
 
-        has_mask = mask_path.exists()
-        mask_arr = None
-        if has_mask:
-            mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
-            has_mask = bool(np.any(mask_arr > 0))
+        has_mask     = False
+        crop_pil     = image
+        patch_labels = torch.zeros(196, dtype=torch.float32)
 
-        if has_mask:
-            crop_pil     = extract_centered_crop(image, mask_arr, crop_size=224)
-            patch_labels = mask_to_patch_labels(mask_arr)
-        else:
-            crop_pil     = image
-            patch_labels = torch.zeros(196, dtype=torch.float32)
+        if mask_path.exists():
+            mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
+            if np.any(mask_arr > 0):
+                crop_pil, mask_crop = extract_centered_crop(image, mask_arr, crop_size=224)
+                patch_labels        = mask_to_patch_labels(mask_crop)
+                has_mask            = True
 
         crop_image = self.preprocess(crop_pil)
 
@@ -170,7 +168,9 @@ class BTXRDOrthoDataset(Dataset):
         self.samples: list[tuple[Path, Path]] = []
 
         for annot_path in sorted(btxrd_annot_dir.glob("*.json")):
-            img_path = btxrd_images_dir / f"{annot_path.stem}.jpeg"
+            img_path = btxrd_images_dir / f"{annot_path.stem}.png"
+            if not img_path.exists():
+                img_path = btxrd_images_dir / f"{annot_path.stem}.jpeg"
             if not img_path.exists():
                 img_path = btxrd_images_dir / f"{annot_path.stem}.jpg"
             if img_path.exists():
@@ -191,6 +191,15 @@ class BTXRDOrthoDataset(Dataset):
         img_h    = annot["imageHeight"]
         img_w    = annot["imageWidth"]
         mask_arr = rasterize_shapes(annot["shapes"], img_h, img_w)
+
+        # pad mask to match the square-padded preprocessed image
+        side     = max(img_h, img_w)
+        pad_top  = (side - img_h) // 2
+        pad_left = (side - img_w) // 2
+        padded   = np.zeros((side, side), dtype=mask_arr.dtype)
+        padded[pad_top:pad_top + img_h, pad_left:pad_left + img_w] = mask_arr
+        mask_arr = padded
+
         patch_labels = mask_to_patch_labels(mask_arr)
 
         return {

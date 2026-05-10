@@ -10,7 +10,7 @@ Usage:
     python src/biomedclip_downstream.py \\
         --checkpoint results/biomedclip_pretrain/best_r1_checkpoint.pt \\
         --splits     results/biomedclip_pretrain/splits.json \\
-        --excel      data/metadata.xlsx \\
+        --excel      data/internal_dataset/metadata.xlsx \\
         --use_mask   --epochs 50
 """
 

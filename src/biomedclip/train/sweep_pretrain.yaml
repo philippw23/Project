@@ -33,13 +33,13 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --excel
-  - data/metadata.xlsx
+  - data/internal_dataset/metadata.xlsx
   - --reports
-  - data/text/translated_reports.json
+  - data/internal_dataset/text/translated_reports.json
   - --images
-  - data/images
+  - data/internal_dataset/images
   - --masks
-  - data/segmentations
+  - data/internal_dataset/segmentations
   - --out_dir
   - results
   - --use_mask

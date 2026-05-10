@@ -12,13 +12,13 @@ from PIL import Image, ImageDraw
 from scipy.ndimage import gaussian_filter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from biomedclip_pretrain import crop_around_mask
+from biomedclip.data.transforms import crop_around_mask
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 RESULTS_DIR = ROOT_DIR / "results"
-DEFAULT_IMAGES_DIR = ROOT_DIR / "data" / "images"
-DEFAULT_MASKS_DIR = ROOT_DIR / "data" / "segmentations"
-BTXRD_IMAGES_DIR = ROOT_DIR / "data" / "BTXRD" / "images"
+DEFAULT_IMAGES_DIR = ROOT_DIR / "data" / "internal_dataset" / "images"
+DEFAULT_MASKS_DIR  = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
+BTXRD_IMAGES_DIR   = ROOT_DIR / "data" / "BTXRD" / "preprocessed_images"
 BTXRD_ANNOTATIONS_DIR = ROOT_DIR / "data" / "BTXRD" / "Annotations"
 
 
@@ -63,7 +63,7 @@ def find_paired_images(dataset: str) -> list[Path]:
 
     return sorted(
         img
-        for img in BTXRD_IMAGES_DIR.glob("*.jpeg")
+        for img in BTXRD_IMAGES_DIR.glob("*.png")
         if (BTXRD_ANNOTATIONS_DIR / img.with_suffix(".json").name).exists()
     )
 
@@ -95,7 +95,17 @@ def load_sample(image_path: Path, dataset: str) -> tuple[np.ndarray, np.ndarray]
         mask = np.array(Image.open(mask_path).convert("L"), dtype=float)
     else:
         annotation_path = BTXRD_ANNOTATIONS_DIR / image_path.with_suffix(".json").name
-        mask = build_btxrd_mask(annotation_path, *image.size)
+        with annotation_path.open() as fh:
+            annot = json.load(fh)
+        orig_h, orig_w = annot["imageHeight"], annot["imageWidth"]
+        mask = build_btxrd_mask(annotation_path, orig_w, orig_h)
+        # pad mask to match the square-padded preprocessed image
+        side     = max(orig_h, orig_w)
+        pad_top  = (side - orig_h) // 2
+        pad_left = (side - orig_w) // 2
+        padded   = np.zeros((side, side), dtype=mask.dtype)
+        padded[pad_top:pad_top + orig_h, pad_left:pad_left + orig_w] = mask
+        mask = padded
 
     return image_arr, mask
 

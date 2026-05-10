@@ -51,7 +51,7 @@ command:
   - --splits
   - results/biomedclip_pretrain/run_20260428_051525/splits.json
   - --excel
-  - data/metadata.xlsx
+  - data/internal_dataset/metadata.xlsx
   - --out_dir
   - results
   - --use_mask

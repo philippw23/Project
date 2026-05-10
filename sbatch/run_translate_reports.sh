@@ -25,8 +25,8 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/translate_reports.py \
-    --input  $home_dir/Project/data/text/sanitized_reports.json \
-    --output $home_dir/Project/data/text/translated_reports.json \
+    --input  $home_dir/Project/data/internal_dataset/text/sanitized_reports.json \
+    --output $home_dir/Project/data/internal_dataset/text/translated_reports.json \
     --model  Qwen/Qwen2.5-7B-Instruct \
     # --max 5
     # --quantize   # uncomment if VRAM is tight

@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=visualize_samples
+#SBATCH --job-name=preprocess_images
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=2
-#SBATCH --time=00:20:00
+#SBATCH --cpus-per-task=8
+#SBATCH --time=04:00:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -16,10 +16,6 @@ squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 MY_CONDA_ENV="master"
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin:$PATH
 export PYTHONPATH=$home_dir/Project/src
-export MPLCONFIGDIR=$home_dir/.config/matplotlib
 echo Environment activated
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/visualize_samples.py \
-    --samples 10 \
-    --btxrd \
-    #--seed 42
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/preprocess_images.py --dataset both

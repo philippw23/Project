@@ -3,7 +3,7 @@
 Each entry contains all fields from sanitized_reports.json (matched via patid)
 plus image, mask, and label. Missing values are empty strings.
 
-Output: data/dataset.json  (1267 entries, one per image in data/images/)
+Output: data/internal_dataset/dataset.json  (one entry per image in data/internal_dataset/images/)
 """
 
 from __future__ import annotations
@@ -14,11 +14,11 @@ from pathlib import Path
 import pandas as pd
 
 ROOT_DIR      = Path(__file__).resolve().parent.parent
-DEFAULT_EXCEL   = ROOT_DIR / "data" / "metadata.xlsx"
-DEFAULT_REPORTS = ROOT_DIR / "data" / "text" / "sanitized_reports.json"
-DEFAULT_IMAGES  = ROOT_DIR / "data" / "images"
-DEFAULT_MASKS   = ROOT_DIR / "data" / "segmentations"
-DEFAULT_OUT     = ROOT_DIR / "data" / "dataset.json"
+DEFAULT_EXCEL   = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
+DEFAULT_REPORTS = ROOT_DIR / "data" / "internal_dataset" / "text" / "sanitized_reports.json"
+DEFAULT_IMAGES  = ROOT_DIR / "data" / "internal_dataset" / "images"
+DEFAULT_MASKS   = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
+DEFAULT_OUT     = ROOT_DIR / "data" / "internal_dataset" / "dataset.json"
 
 
 def _normalise_id(val: str) -> str:

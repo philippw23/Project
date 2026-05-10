@@ -27,5 +27,5 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 # Run the extractor
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 $python_path $home_dir/Project/src/medbert_extractor.py \
-    --reports $home_dir/Project/data/text/sanitized_reports.json \
+    --reports $home_dir/Project/data/internal_dataset/text/sanitized_reports.json \
     --out_dir $home_dir/Project/results

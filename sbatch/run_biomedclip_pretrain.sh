@@ -26,11 +26,11 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/biomedclip_pretrain.py \
-    --excel    $home_dir/Project/data/metadata.xlsx \
-    --reports  $home_dir/Project/data/text/translated_reports.json \
+    --excel    $home_dir/Project/data/internal_dataset/metadata.xlsx \
+    --reports  $home_dir/Project/data/internal_dataset/text/translated_reports.json \
     --english \
-    --images   $home_dir/Project/data/images \
-    --masks    $home_dir/Project/data/segmentations \
+    --images   $home_dir/Project/data/internal_dataset/images \
+    --masks    $home_dir/Project/data/internal_dataset/segmentations \
     --out_dir  $home_dir/Project/results \
     --use_mask \
     --lora_layers 4 \

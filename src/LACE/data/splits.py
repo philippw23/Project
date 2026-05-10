@@ -94,7 +94,7 @@ def build_lace_splits(
                 "image":       str(image_path),
                 "mask":        str(mask_path),
                 "befund":      rep.get("befund", ""),
-                "beurteilung": rep["beurteilung"],
+                "beurteilung": rep.get("beurteilung", ""),
             })
 
         if label:
@@ -103,7 +103,7 @@ def build_lace_splits(
             except (ValueError, TypeError):
                 skipped_no_age_sex += 1
                 continue
-            if str(row["sex"]).strip().lower() not in ("m", "male", "1", "f", "female", "0"):
+            if str(row["sex"]).strip().lower() not in ("m", "f"):
                 skipped_no_age_sex += 1
                 continue
             sex_raw = str(row["sex"]).strip().lower()
@@ -114,7 +114,7 @@ def build_lace_splits(
                 "beurteilung": rep.get("beurteilung", "") if rep else "",
                 "label":       label,
                 "age":         float(row["age"]),
-                "sex":         1.0 if sex_raw in ("m", "male", "1") else 0.0,
+                "sex":         1.0 if sex_raw in ("m") else 0.0,
             })
 
     print(

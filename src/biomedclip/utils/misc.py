@@ -9,10 +9,10 @@ import torch.nn as nn
 ROOT_DIR = Path(__file__).resolve().parents[3]
 
 MODEL_TAG          = "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
-DEFAULT_IMAGES_DIR = ROOT_DIR / "data" / "images"
-DEFAULT_MASKS_DIR  = ROOT_DIR / "data" / "segmentations"
-DEFAULT_EXCEL      = ROOT_DIR / "data" / "metadata.xlsx"
-DEFAULT_REPORTS    = ROOT_DIR / "data" / "text" / "translated_reports.json"
+DEFAULT_IMAGES_DIR = ROOT_DIR / "data" / "internal_dataset" / "images"
+DEFAULT_MASKS_DIR  = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
+DEFAULT_EXCEL      = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
+DEFAULT_REPORTS    = ROOT_DIR / "data" / "internal_dataset" / "text" / "translated_reports.json"
 DEFAULT_OUT_DIR    = ROOT_DIR / "results"
 
 

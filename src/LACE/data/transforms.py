@@ -20,15 +20,18 @@ def extract_centered_crop(
     image: Image.Image,
     mask_arr: np.ndarray,
     crop_size: int = 224,
-) -> Image.Image:
-    """Return a square PIL crop of crop_size centered on the mask centroid.
+) -> tuple[Image.Image, np.ndarray]:
+    """Return a (image_crop, mask_crop) pair of crop_size centered on the mask centroid.
 
-    Falls back to the full image resized to crop_size when the mask is empty.
-    Reuses _compute_crop_1d from biomedclip for boundary clamping logic.
+    Both the image and mask are cropped with identical coordinates so that
+    patch labels derived from mask_crop stay aligned with the ViT input grid.
+    Falls back to resizing the full image/mask when the mask is empty.
     """
     binary = mask_arr > 0
     if not np.any(binary):
-        return image.resize((crop_size, crop_size), RESAMPLE_BICUBIC)
+        img_crop  = image.resize((crop_size, crop_size), RESAMPLE_BICUBIC)
+        mask_crop = np.zeros((crop_size, crop_size), dtype=mask_arr.dtype)
+        return img_crop, mask_crop
 
     rows, cols = np.where(binary)
     cy = float(rows.mean())
@@ -40,15 +43,13 @@ def extract_centered_crop(
     r_start, r_end, pad_top,  pad_bottom = _compute_crop_1d(cy, crop_size, H)
     c_start, c_end, pad_left, pad_right  = _compute_crop_1d(cx, crop_size, W)
 
-    crop = img_arr[r_start:r_end, c_start:c_end]
+    img_crop = img_arr[r_start:r_end, c_start:c_end]
+    mask_crop = mask_arr[r_start:r_end, c_start:c_end]
     if pad_top or pad_bottom or pad_left or pad_right:
-        crop = np.pad(
-            crop,
-            ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
-            mode="constant",
-            constant_values=0,
-        )
-    return Image.fromarray(crop.astype(np.uint8))
+        pad2d = ((pad_top, pad_bottom), (pad_left, pad_right))
+        img_crop  = np.pad(img_crop,  (*pad2d, (0, 0)), mode="constant", constant_values=0)
+        mask_crop = np.pad(mask_crop, pad2d,             mode="constant", constant_values=0)
+    return Image.fromarray(img_crop.astype(np.uint8)), mask_crop
 
 
 def rasterize_shapes(

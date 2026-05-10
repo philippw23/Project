@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from PIL import Image
 from torchvision import transforms
 
 
@@ -87,6 +88,17 @@ def crop_around_mask(
         crop = np.pad(crop, pad_width, mode=pad_mode, **kwargs)
 
     return crop
+
+
+class SquarePad:
+    """Pad the shorter side so the image becomes square (black border, centered)."""
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        w, h = image.size
+        side = max(w, h)
+        result = Image.new(image.mode, (side, side), 0)
+        result.paste(image, ((side - w) // 2, (side - h) // 2))
+        return result
 
 
 def build_train_transform(preprocess_val) -> transforms.Compose:

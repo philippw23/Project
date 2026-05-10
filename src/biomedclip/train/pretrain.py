@@ -7,8 +7,8 @@ encoder (PubMedBERT) is kept fully frozen throughout.
 
 Usage example:
     python src/biomedclip_pretrain.py \\
-        --excel data/metadata.xlsx \\
-        --reports data/text/sanitized_reports.json \\
+        --excel data/internal_dataset/metadata.xlsx \\
+        --reports data/internal_dataset/text/sanitized_reports.json \\
         --use_mask --lora_layers 4 --epochs 50
 """
 

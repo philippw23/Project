@@ -28,5 +28,5 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 $python_path $home_dir/Project/src/llm_extractor_seperated.py \
     --model Qwen/Qwen2.5-7B-Instruct \
-    --reports $home_dir/Project/data/text/translated_reports.json \
+    --reports $home_dir/Project/data/internal_dataset/text/translated_reports.json \
     --out_dir $home_dir/Project/results

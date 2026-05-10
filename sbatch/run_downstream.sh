@@ -39,7 +39,7 @@ if [ "$BASELINE" = "biomedclip" ]; then
         --baseline biomedclip \
         --biomedclip_checkpoint $home_dir/Project/results/biomedclip_pretrain/run_20260424_154249/best_r1_checkpoint.pt \
         --splits     $home_dir/Project/results/biomedclip_pretrain/run_20260424_154249/splits.json \
-        --excel      $home_dir/Project/data/metadata.xlsx \
+        --excel      $home_dir/Project/data/internal_dataset/metadata.xlsx \
         --out_dir    $home_dir/Project/results \
         --use_mask \
         --epochs 50 \
@@ -58,7 +58,7 @@ elif [ "$BASELINE" = "chexfound" ]; then
         --baseline chexfound \
         --chexfound_checkpoint $home_dir/Project/results/chexfound_pretrain/job_6306/checkpoint_last.pth \
         --splits    $home_dir/Project/results/chexfound_pretrain/job_6306/biomedclip_pretrain/splits.json \
-        --excel     $home_dir/Project/data/metadata.xlsx \
+        --excel     $home_dir/Project/data/internal_dataset/metadata.xlsx \
         --out_dir   $home_dir/Project/results \
         --use_mask \
         --epochs    50 \

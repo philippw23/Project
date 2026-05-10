@@ -13,10 +13,10 @@ import pandas as pd
 from PIL import Image, UnidentifiedImageError
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_EXCEL   = ROOT_DIR / "data" / "metadata.xlsx"
-DEFAULT_REPORTS = ROOT_DIR / "data" / "text" / "sanitized_reports.json"
-DEFAULT_IMAGES  = ROOT_DIR / "data" / "images"
-DEFAULT_MASKS   = ROOT_DIR / "data" / "segmentations"
+DEFAULT_EXCEL   = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
+DEFAULT_REPORTS = ROOT_DIR / "data" / "internal_dataset" / "text" / "sanitized_reports.json"
+DEFAULT_IMAGES  = ROOT_DIR / "data" / "internal_dataset" / "images"
+DEFAULT_MASKS   = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
 
 
 def _normalise_id(val: str) -> str:
