@@ -39,7 +39,7 @@ from LACE.data.datasets import BTXRDOrthoDataset
 from LACE.data.splits import build_lace_splits, build_pretrain_datasets_lace_v2
 from LACE.data.transforms import build_train_transform_lace
 from LACE.loss.objectives import ita_loss, seg_loss, sim_loss_v2
-from LACE.models.encoders import EMBED_DIM, BiomedCLIPTextEncoder, SharedViT
+from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
 from LACE.models.mask_tokens import MaskTokenModule
 
 DEFAULT_BTXRD_IMAGES = ROOT_DIR / "data" / "BTXRD" / "images"
@@ -140,7 +140,7 @@ def train_one_epoch(
                     B = img.shape[0]
                     P_proj = vit.patch_proj(
                         patch_feat.reshape(-1, 768)
-                    ).reshape(B, 196, EMBED_DIM)                   # [B, 196, 256]
+                    ).reshape(B, 196, vit.proj_dim)
 
                     _, proj_words = text_enc.encode_befund(bef_ids, bef_mask)
                     sim_valid = has_befund
@@ -227,7 +227,7 @@ def evaluate(
                     B = img.shape[0]
                     P_proj = vit.patch_proj(
                         patch_feat.reshape(-1, 768)
-                    ).reshape(B, 196, EMBED_DIM)
+                    ).reshape(B, 196, vit.proj_dim)
                     _, proj_words = text_enc.encode_befund(bef_ids, bef_mask)
                     sim_valid = has_befund
                     if sim_valid.sum() >= 2:
@@ -267,6 +267,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--lora_layers", type=int,   default=4)
     parser.add_argument("--lora_r",      type=int,   default=8)
     parser.add_argument("--lora_alpha",  type=float, default=16.0)
+    parser.add_argument("--embed_dim",   type=int,   default=256,
+                        help="Projection head output dimension (default: 256)")
 
     parser.add_argument("--n_mask_tokens", type=int,   default=16)
     parser.add_argument("--tau_spatial",   type=float, default=0.1,
@@ -311,8 +313,8 @@ def main(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
 
     # ── Models ────────────────────────────────────────────────────────────────
-    vit         = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha).to(device)
-    text_enc    = BiomedCLIPTextEncoder().to(device)
+    vit         = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim).to(device)
+    text_enc    = BiomedCLIPTextEncoder(embed_dim=args.embed_dim).to(device)
     mask_module = MaskTokenModule(
         n_tokens=args.n_mask_tokens,
         tau_spatial_init=args.tau_spatial,
@@ -423,6 +425,7 @@ def main(args: argparse.Namespace) -> None:
         "lora_layers": args.lora_layers,
         "lora_r":      args.lora_r,
         "lora_alpha":  args.lora_alpha,
+        "embed_dim":   args.embed_dim,
     }
     best_val_loss     = float("inf")
     epochs_no_improve = 0

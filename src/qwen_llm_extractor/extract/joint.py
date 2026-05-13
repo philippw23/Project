@@ -17,10 +17,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from qwen_llm_extractor.data.reports import load_reports_joint
-from qwen_llm_extractor.eval.analysis import (
-    flatten_to_dataframe, print_summary, compare_with_medbert,
-)
+from qwen_llm_extractor.eval.analysis import flatten_to_dataframe, print_summary
 from qwen_llm_extractor.models.loader import DEFAULT_MODEL, load_model
 from qwen_llm_extractor.prompts.joint import (
     SYSTEM_PROMPT,
@@ -96,63 +93,95 @@ def query_llm(
 
 
 def main(args: argparse.Namespace) -> None:
-    """Load reports, run LLM inference, save results, and optionally compare with medbert."""
-    reports, patids = load_reports_joint(args.reports, english=args.english)
+    """Load source reports, run LLM phrase extraction, and merge results back."""
+    with open(args.input, encoding="utf-8") as fh:
+        source_reports: list[dict] = json.load(fh)
+
+    # Resume: load already-processed entries keyed by patid
+    out_path = Path(args.output)
+    completed: dict[str, dict] = {}
+    if out_path.exists():
+        with open(out_path, encoding="utf-8") as fh:
+            completed = {str(e["patid"]): e for e in json.load(fh)}
+        print(f"Resuming: {len(completed)} entries already processed.")
+
+    befund_key = "befund_en" if args.english else "befund"
+    beur_key   = "beurteilung_en" if args.english else "beurteilung"
+
+    to_process = [
+        e for e in source_reports
+        if str(e.get("patid", "")) not in completed
+        and (e.get(befund_key, "").strip() or e.get(beur_key, "").strip())
+    ]
     if args.max:
-        reports = reports[: args.max]
-        patids  = patids[: args.max]
-        print(f"Limited to {len(reports)} reports.")
+        to_process = to_process[: args.max]
+    print(f"Reports to process: {len(to_process)} / {len(source_reports)}\n")
 
     model, tokenizer = load_model(args.model, quantize=args.quantize)
 
     system_prompt        = SYSTEM_PROMPT_ENGLISH        if args.english else SYSTEM_PROMPT
     user_prompt_template = USER_PROMPT_TEMPLATE_ENGLISH if args.english else USER_PROMPT_TEMPLATE
 
-    results: list[dict] = []
-    raw_responses: list[dict] = []
-    for report, patid in tqdm(zip(reports, patids), desc="LLM inference", total=len(reports)):
-        result, raw = query_llm(
-            report, model, tokenizer,
+    all_results: list[dict] = []
+    all_patids:  list[str]  = []
+
+    for entry in tqdm(to_process, desc="LLM inference"):
+        patid = str(entry.get("patid", ""))
+
+        parts = []
+        if entry.get(befund_key, "").strip():
+            parts.append(entry[befund_key].strip())
+        if entry.get(beur_key, "").strip():
+            parts.append(entry[beur_key].strip())
+        report_text = "\n\n".join(parts)
+
+        result, _ = query_llm(
+            report_text, model, tokenizer,
             max_new_tokens=args.max_new_tokens,
             system_prompt=system_prompt,
             user_prompt_template=user_prompt_template,
         )
         result["patid"] = patid
-        results.append(result)
-        raw_responses.append({"patid": patid, "raw": raw})
+
         if "error" in result:
             tqdm.write(f"  [error] patid={patid} — {result['error'][:80]}")
 
-    df = flatten_to_dataframe(results, patids)
-    print_summary(df)
+        # Merge phrase lists back into the source entry; keep source fields intact
+        merged = {
+            **entry,
+            "befund_phrases":      result.get("befund_phrases", []),
+            "beurteilung_phrases": result.get("beurteilung_phrases", []),
+        }
+        completed[patid] = merged
+        all_results.append(result)
+        all_patids.append(patid)
 
-    out = Path(args.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump(list(completed.values()), fh, ensure_ascii=False, indent=2)
 
-    df.to_csv(out / "llm_extracted_terms.csv", index=False, encoding="utf-8-sig")
-    with open(out / "llm_raw_results.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-    with open(out / "llm_raw_responses.json", "w", encoding="utf-8") as f:
-        json.dump(raw_responses, f, ensure_ascii=False, indent=2)
+    if all_results:
+        df = flatten_to_dataframe(all_results, all_patids)
+        print_summary(df)
 
-    print("\nSaved:")
-    print(f"  {out}/llm_extracted_terms.csv   ({len(df)} rows)")
-    print(f"  {out}/llm_raw_results.json")
-    print(f"  {out}/llm_raw_responses.json")
+    print(f"\nDone. {len(completed)} reports saved to {out_path}")
 
-    if args.compare:
-        compare_with_medbert(df, args.compare)
 
 
 def parse_args() -> argparse.Namespace:
     """Define and parse CLI arguments for the joint extraction pipeline."""
     parser = argparse.ArgumentParser(
-        description="Extract bone tumor imaging features from German radiology reports "
-                    "using a local HuggingFace LLM (joint extraction)."
+        description="Extract bone tumor imaging features from radiology reports "
+                    "using a local HuggingFace LLM (joint extraction). "
+                    "Merges befund_phrases and beurteilung_phrases back into the source file."
     )
     parser.add_argument(
-        "--reports", default=None,
-        help="Path to a .json reports file.",
+        "--input", required=True,
+        help="Path to source reports JSON (e.g. translated_reports.json).",
+    )
+    parser.add_argument(
+        "--output", default=None,
+        help="Path to enriched output JSON (default: full_reports.json next to --input).",
     )
     parser.add_argument(
         "--english", action="store_true",
@@ -170,9 +199,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max", type=int, default=None, help="Max number of reports to process.")
     parser.add_argument("--max_new_tokens", type=int, default=512, help="Max tokens per report.")
-    parser.add_argument("--out_dir", default="results", help="Output directory (default: results/).")
-    parser.add_argument(
-        "--compare", default=None, metavar="CSV",
-        help="Path to medbert extracted_terms.csv to compare both approaches.",
-    )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output is None:
+        args.output = str(Path(args.input).parent / "full_reports.json")
+    return args

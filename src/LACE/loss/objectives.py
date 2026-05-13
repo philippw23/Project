@@ -45,36 +45,45 @@ def sim_loss(
     proj_words: torch.Tensor,
     z_befund_cls: torch.Tensor,
     logit_scale: torch.Tensor,
+    phrase_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Local lesion-phrase alignment using GLoRIA-style attention pooling.
 
     Steps:
     1. A = softmax(proj_patches @ proj_words^T / sqrt(D), dim=1)   [B, N, L]
-       Normalises over patches: each word gets a prob distribution over patches.
+       Normalises over patches: each word/phrase gets a prob distribution over patches.
     2. context = A^T @ proj_patches   [B, L, D]
-       Word-conditioned lesion representations.
+       Word/phrase-conditioned lesion representations.
     3. v_lesion = normalize(context.mean(dim=1))   [B, D]
+       If phrase_mask is given, only real (non-padding) slots contribute to the mean.
     4. Symmetric InfoNCE between v_lesion and z_befund_cls.
 
     All inputs must be L2-normalised (output of ProjectionHead).
 
     Args:
         proj_patches:   [B, N, D] projected patch embeddings (lesion crop)
-        proj_words:     [B, L, D] projected word token embeddings (befund)
+        proj_words:     [B, L, D] projected word token or phrase embeddings (befund)
         z_befund_cls:   [B, D]    projected CLS embedding of befund
         logit_scale:    scalar contrastive temperature parameter
+        phrase_mask:    [B, L] bool — True = real slot, False = padding (phrase modes only)
     """
     B, N, D = proj_patches.shape
 
     attn = torch.bmm(proj_patches, proj_words.transpose(1, 2)) / math.sqrt(D)
     attn = F.softmax(attn, dim=1)
 
-    context  = torch.bmm(attn.transpose(1, 2), proj_patches)
-    v_lesion = F.normalize(context.mean(dim=1), dim=-1)
+    context = torch.bmm(attn.transpose(1, 2), proj_patches)  # [B, L, D]
+
+    if phrase_mask is not None:
+        context  = context * phrase_mask.unsqueeze(-1).float()
+        n_real   = phrase_mask.float().sum(dim=1, keepdim=True).clamp(min=1)
+        v_lesion = F.normalize(context.sum(dim=1) / n_real, dim=-1)
+    else:
+        v_lesion = F.normalize(context.mean(dim=1), dim=-1)
 
     scale      = logit_scale.exp().clamp(max=100.0)
-    logits_il  = v_lesion   @ z_befund_cls.t() * scale
-    logits_li  = z_befund_cls @ v_lesion.t()   * scale
+    logits_il  = v_lesion    @ z_befund_cls.t() * scale
+    logits_li  = z_befund_cls @ v_lesion.t()    * scale
     labels     = torch.arange(B, device=v_lesion.device)
 
     return (F.cross_entropy(logits_il, labels) + F.cross_entropy(logits_li, labels)) / 2.0

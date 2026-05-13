@@ -16,9 +16,7 @@ import torch
 from tqdm import tqdm
 
 from qwen_llm_extractor.data.reports import load_reports_separated
-from qwen_llm_extractor.eval.analysis import (
-    flatten_to_dataframe, print_summary, compare_with_medbert,
-)
+from qwen_llm_extractor.eval.analysis import flatten_to_dataframe, print_summary
 from qwen_llm_extractor.models.loader import DEFAULT_MODEL, load_model
 from qwen_llm_extractor.prompts.separated import (
     SYSTEM_PROMPT,
@@ -93,7 +91,7 @@ def query_llm(
 
 
 def main(args: argparse.Namespace) -> None:
-    """Load reports, run the three-pass LLM inference loop, save results, and optionally compare with medbert."""
+    """Load reports, run the three-pass LLM inference loop, and save results."""
     befunds, beurteilungs, patids = load_reports_separated(args.reports)
     if args.max:
         befunds      = befunds[: args.max]
@@ -152,8 +150,6 @@ def main(args: argparse.Namespace) -> None:
     print(f"  {out}/llm_raw_results.json")
     print(f"  {out}/llm_raw_responses.json")
 
-    if args.compare:
-        compare_with_medbert(df, args.compare)
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,8 +174,4 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max", type=int, default=None, help="Max number of reports to process.")
     parser.add_argument("--max_new_tokens", type=int, default=512, help="Max tokens per report.")
     parser.add_argument("--out_dir", default="results", help="Output directory (default: results/).")
-    parser.add_argument(
-        "--compare", default=None, metavar="CSV",
-        help="Path to medbert extracted_terms.csv to compare both approaches.",
-    )
     return parser.parse_args()

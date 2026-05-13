@@ -60,7 +60,7 @@ def build_lace_splits(
     with open(reports_path, encoding="utf-8") as fh:
         raw_reports = json.load(fh)
 
-    # Store befund and beurteilung as separate fields
+    # Store befund, beurteilung and extracted phrase lists as separate fields
     report_lookup: dict[str, dict] = {}
     for entry in raw_reports:
         pid = _normalise_id(str(entry.get("patid", "")).strip())
@@ -69,7 +69,12 @@ def build_lace_splits(
         befund      = (entry.get("befund") or "").strip()
         beurteilung = (entry.get("beurteilung") or "").strip()
         if befund or beurteilung:
-            report_lookup[pid] = {"befund": befund, "beurteilung": beurteilung}
+            report_lookup[pid] = {
+                "befund":              befund,
+                "beurteilung":         beurteilung,
+                "befund_phrases":      entry.get("befund_phrases") or [],
+                "beurteilung_phrases": entry.get("beurteilung_phrases") or [],
+            }
 
     pretrain_cands:    list[dict] = []
     downstream_cands:  list[dict] = []
@@ -91,10 +96,12 @@ def build_lace_splits(
 
         if rep and rep.get("beurteilung"):
             pretrain_cands.append({
-                "image":       str(image_path),
-                "mask":        str(mask_path),
-                "befund":      rep.get("befund", ""),
-                "beurteilung": rep.get("beurteilung", ""),
+                "image":               str(image_path),
+                "mask":                str(mask_path),
+                "befund":              rep.get("befund", ""),
+                "beurteilung":         rep.get("beurteilung", ""),
+                "befund_phrases":      rep.get("befund_phrases", []),
+                "beurteilung_phrases": rep.get("beurteilung_phrases", []),
             })
 
         if label:
@@ -108,13 +115,15 @@ def build_lace_splits(
                 continue
             sex_raw = str(row["sex"]).strip().lower()
             downstream_cands.append({
-                "image":       str(image_path),
-                "mask":        str(mask_path),
-                "befund":      rep.get("befund", "") if rep else "",
-                "beurteilung": rep.get("beurteilung", "") if rep else "",
-                "label":       label,
-                "age":         float(row["age"]),
-                "sex":         1.0 if sex_raw in ("m") else 0.0,
+                "image":               str(image_path),
+                "mask":                str(mask_path),
+                "befund":              rep.get("befund", "") if rep else "",
+                "beurteilung":         rep.get("beurteilung", "") if rep else "",
+                "befund_phrases":      rep.get("befund_phrases", []) if rep else [],
+                "beurteilung_phrases": rep.get("beurteilung_phrases", []) if rep else [],
+                "label":               label,
+                "age":                 float(row["age"]),
+                "sex":                 1.0 if sex_raw in ("m") else 0.0,
             })
 
     print(
@@ -184,6 +193,9 @@ def build_pretrain_datasets_lace(
     seed: int,
     monitor_val_frac: float = 0.1,
     max_text_len: int = 128,
+    text_mode: str = "full",
+    max_bef_phrases: int = 16,
+    max_beur_phrases: int = 16,
 ) -> tuple[InternalTripleDataset, InternalTripleDataset]:
     """90/10 random split of pretrain_samples into train and monitor-val datasets."""
     rng     = random.Random(seed)
@@ -195,8 +207,14 @@ def build_pretrain_datasets_lace(
 
     print(f"Pretrain loop split: {len(train_samp)} train / {len(val_samp)} monitor-val")
 
-    train_ds = InternalTripleDataset(train_samp, preprocess_train, tokenizer, max_text_len)
-    val_ds   = InternalTripleDataset(val_samp,   preprocess_val,   tokenizer, max_text_len)
+    train_ds = InternalTripleDataset(
+        train_samp, preprocess_train, tokenizer, max_text_len,
+        text_mode, max_bef_phrases, max_beur_phrases,
+    )
+    val_ds = InternalTripleDataset(
+        val_samp, preprocess_val, tokenizer, max_text_len,
+        text_mode, max_bef_phrases, max_beur_phrases,
+    )
     return train_ds, val_ds
 
 

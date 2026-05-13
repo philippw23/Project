@@ -34,7 +34,7 @@ from LACE.data.datasets import BTXRDOrthoDataset
 from LACE.data.splits import build_lace_splits, build_pretrain_datasets_lace
 from LACE.data.transforms import build_train_transform_lace
 from LACE.loss.objectives import ita_loss, ortho_loss, sim_loss
-from LACE.models.encoders import EMBED_DIM, GermanMedBERT, SharedViT
+from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
 
 DEFAULT_BTXRD_IMAGES = ROOT_DIR / "data" / "BTXRD" / "images"
 DEFAULT_BTXRD_ANNOTS = ROOT_DIR / "data" / "BTXRD" / "Annotations"
@@ -53,9 +53,50 @@ def make_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def _encode_text(batch, text_enc, device, text_mode, stage):
+    """Encode beurteilung and befund according to text_mode.
+
+    Returns (z_text, z_bef_cls, proj_words, bef_pmask) where:
+        z_text      [B, D]    — beurteilung embedding for L_ITA
+        z_bef_cls   [B, D]    — befund CLS for InfoNCE anchor in L_sim
+        proj_words  [B, L, D] — word/phrase embeddings for L_sim attention
+        bef_pmask   [B, L] bool | None — phrase padding mask (phrase modes only)
+    z_bef_cls and proj_words are None when stage < 2.
+    """
+    if text_mode in ("phrase_mean", "phrase_attn"):
+        beur_pids  = batch["beur_phrase_ids"].to(device)
+        beur_pattn = batch["beur_phrase_attn"].to(device)
+        beur_pmask = batch["beur_phrase_mask"].to(device)
+        z_text = text_enc.encode_beurteilung_phrases(
+            beur_pids, beur_pattn, beur_pmask, text_mode
+        )
+        if stage >= 2:
+            bef_pids  = batch["bef_phrase_ids"].to(device)
+            bef_pattn = batch["bef_phrase_attn"].to(device)
+            bef_pmask = batch["bef_phrase_mask"].to(device)
+            z_bef_cls, proj_words = text_enc.encode_befund_phrases(
+                bef_pids, bef_pattn, bef_pmask
+            )
+        else:
+            z_bef_cls, proj_words, bef_pmask = None, None, None
+    else:
+        beur_ids  = batch["beurteilung_ids"].to(device)
+        beur_mask = batch["beurteilung_mask"].to(device)
+        z_text = text_enc.encode_beurteilung(beur_ids, beur_mask)
+        if stage >= 2:
+            bef_ids   = batch["befund_ids"].to(device)
+            bef_mask  = batch["befund_mask"].to(device)
+            z_bef_cls, proj_words = text_enc.encode_befund(bef_ids, bef_mask)
+            bef_pmask = None
+        else:
+            z_bef_cls, proj_words, bef_pmask = None, None, None
+
+    return z_text, z_bef_cls, proj_words, bef_pmask
+
+
 def train_one_epoch(
     vit: SharedViT,
-    text_enc: GermanMedBERT,
+    text_enc: BiomedCLIPTextEncoder,
     internal_loader: DataLoader,
     btxrd_loader: DataLoader | None,
     optimizer: torch.optim.Optimizer,
@@ -67,6 +108,7 @@ def train_one_epoch(
     stage: int,
     lambda_sim: float,
     lambda_reg: float,
+    text_mode: str = "full",
     max_grad_norm: float = 1.0,
 ) -> dict[str, float]:
     vit.train()
@@ -81,15 +123,11 @@ def train_one_epoch(
                 disable=not sys.stdout.isatty())
 
     for batch in pbar:
-        full_img  = batch["full_image"].to(device)
-        crop_img  = batch["crop_image"].to(device)
-        beur_ids  = batch["beurteilung_ids"].to(device)
-        beur_mask = batch["beurteilung_mask"].to(device)
-        bef_ids   = batch["befund_ids"].to(device)
-        bef_mask  = batch["befund_mask"].to(device)
-        plabels   = batch["patch_labels"].to(device)
-        has_mask  = batch["has_mask"].to(device)
-        has_befund= batch["has_befund"].to(device)
+        full_img   = batch["full_image"].to(device)
+        crop_img   = batch["crop_image"].to(device)
+        plabels    = batch["patch_labels"].to(device)
+        has_mask   = batch["has_mask"].to(device)
+        has_befund = batch["has_befund"].to(device)
 
         optimizer.zero_grad()
 
@@ -99,9 +137,12 @@ def train_one_epoch(
             cls_feat, patch_feat = vit.forward_all(full_img)
             z_img = vit.img_proj(cls_feat)
 
+            z_text, z_bef_cls, proj_words, bef_pmask = _encode_text(
+                batch, text_enc, device, text_mode, stage
+            )
+
             # L_ITA (all stages)
-            z_text = text_enc.encode_beurteilung(beur_ids, beur_mask)
-            l_ita  = ita_loss(z_img, z_text, logit_scale)
+            l_ita = ita_loss(z_img, z_text, logit_scale)
 
             # L_sim (stages 2+)
             l_sim = torch.zeros(1, device=device)[0]
@@ -110,16 +151,17 @@ def train_one_epoch(
                 B, N, _ = crop_patches.shape
                 proj_patches = vit.patch_proj(
                     crop_patches.reshape(-1, 768)
-                ).reshape(B, N, EMBED_DIM)
+                ).reshape(B, N, vit.proj_dim)
 
-                z_bef_cls, proj_words = text_enc.encode_befund(bef_ids, bef_mask)
                 sim_valid = has_mask & has_befund
                 if sim_valid.sum() >= 2:
+                    pmask_valid = bef_pmask[sim_valid] if bef_pmask is not None else None
                     l_sim = sim_loss(
                         proj_patches[sim_valid],
                         proj_words[sim_valid],
                         z_bef_cls[sim_valid],
                         logit_scale,
+                        phrase_mask=pmask_valid,
                     )
 
             # L_ortho (stage 3+)
@@ -166,7 +208,7 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate_lace(
     vit: SharedViT,
-    text_enc: GermanMedBERT,
+    text_enc: BiomedCLIPTextEncoder,
     val_loader: DataLoader,
     logit_scale: nn.Parameter,
     log_lambda_ita: nn.Parameter,
@@ -174,6 +216,7 @@ def evaluate_lace(
     stage: int,
     lambda_sim: float,
     lambda_reg: float,
+    text_mode: str = "full",
 ) -> dict[str, float]:
     vit.eval()
     text_enc.eval()
@@ -182,21 +225,20 @@ def evaluate_lace(
     n_batches = 0
 
     for batch in val_loader:
-        full_img  = batch["full_image"].to(device)
-        crop_img  = batch["crop_image"].to(device)
-        beur_ids  = batch["beurteilung_ids"].to(device)
-        beur_mask = batch["beurteilung_mask"].to(device)
-        bef_ids   = batch["befund_ids"].to(device)
-        bef_mask  = batch["befund_mask"].to(device)
-        plabels   = batch["patch_labels"].to(device)
-        has_mask  = batch["has_mask"].to(device)
-        has_befund= batch["has_befund"].to(device)
+        full_img   = batch["full_image"].to(device)
+        crop_img   = batch["crop_image"].to(device)
+        plabels    = batch["patch_labels"].to(device)
+        has_mask   = batch["has_mask"].to(device)
+        has_befund = batch["has_befund"].to(device)
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             cls_feat, patch_feat = vit.forward_all(full_img)
             z_img  = vit.img_proj(cls_feat)
-            z_text = text_enc.encode_beurteilung(beur_ids, beur_mask)
-            l_ita  = ita_loss(z_img, z_text, logit_scale)
+
+            z_text, z_bef_cls, proj_words, bef_pmask = _encode_text(
+                batch, text_enc, device, text_mode, stage
+            )
+            l_ita = ita_loss(z_img, z_text, logit_scale)
 
             l_sim = torch.zeros(1, device=device)[0]
             if stage >= 2:
@@ -204,12 +246,15 @@ def evaluate_lace(
                 B, N, _ = crop_patches.shape
                 proj_patches = vit.patch_proj(
                     crop_patches.reshape(-1, 768)
-                ).reshape(B, N, EMBED_DIM)
-                z_bef_cls, proj_words = text_enc.encode_befund(bef_ids, bef_mask)
+                ).reshape(B, N, vit.proj_dim)
                 sim_valid = has_mask & has_befund
                 if sim_valid.sum() >= 2:
-                    l_sim = sim_loss(proj_patches[sim_valid], proj_words[sim_valid],
-                                     z_bef_cls[sim_valid], logit_scale)
+                    pmask_valid = bef_pmask[sim_valid] if bef_pmask is not None else None
+                    l_sim = sim_loss(
+                        proj_patches[sim_valid], proj_words[sim_valid],
+                        z_bef_cls[sim_valid], logit_scale,
+                        phrase_mask=pmask_valid,
+                    )
 
             l_ortho = torch.zeros(1, device=device)[0]
             if stage >= 3:
@@ -246,10 +291,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--lora_layers", type=int,   default=4)
     parser.add_argument("--lora_r",      type=int,   default=8)
     parser.add_argument("--lora_alpha",  type=float, default=16.0)
+    parser.add_argument("--embed_dim",   type=int,   default=256,
+                        help="Projection head output dimension (default: 256)")
 
     parser.add_argument("--batch_size",       type=int,   default=32)
     parser.add_argument("--btxrd_batch_size", type=int,   default=16)
     parser.add_argument("--max_text_len",     type=int,   default=128)
+
+    parser.add_argument(
+        "--text_mode", default="full",
+        choices=["full", "concat", "phrase_mean", "phrase_attn"],
+        help="Text encoding strategy for pretraining (default: full).",
+    )
+    parser.add_argument("--max_bef_phrases",  type=int, default=16,
+                        help="Max befund phrases per sample (phrase modes only).")
+    parser.add_argument("--max_beur_phrases", type=int, default=16,
+                        help="Max beurteilung phrases per sample (phrase modes only).")
 
     parser.add_argument("--stage1_epochs", type=int,   default=10)
     parser.add_argument("--stage2_epochs", type=int,   default=15)
@@ -286,8 +343,8 @@ def main(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
 
     # ── Models ────────────────────────────────────────────────────────────────
-    vit      = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha).to(device)
-    text_enc = GermanMedBERT().to(device)
+    vit      = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim).to(device)
+    text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim).to(device)
     logit_scale = nn.Parameter(
         torch.ones([], device=device) * math.log(1.0 / 0.07)
     )
@@ -311,6 +368,9 @@ def main(args: argparse.Namespace) -> None:
     train_ds, val_ds = build_pretrain_datasets_lace(
         pretrain_samples, preprocess_train, preprocess_val,
         tokenizer, args.seed, max_text_len=args.max_text_len,
+        text_mode=args.text_mode,
+        max_bef_phrases=args.max_bef_phrases,
+        max_beur_phrases=args.max_beur_phrases,
     )
 
     use_pin = device.type == "cuda"
@@ -328,7 +388,7 @@ def main(args: argparse.Namespace) -> None:
     btxrd_loader = DataLoader(
         btxrd_ds, batch_size=args.btxrd_batch_size, shuffle=True,
         num_workers=4, pin_memory=use_pin, drop_last=True,
-    )
+    ) if len(btxrd_ds) > 0 else None
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
     no_decay_keys = ("bias", "norm.weight", "norm.bias", "ln_1.weight", "ln_1.bias",
@@ -392,6 +452,7 @@ def main(args: argparse.Namespace) -> None:
         "lora_layers": args.lora_layers,
         "lora_r":      args.lora_r,
         "lora_alpha":  args.lora_alpha,
+        "embed_dim":   args.embed_dim,
     }
     best_val_loss     = float("inf")
     epochs_no_improve = 0
@@ -410,11 +471,13 @@ def main(args: argparse.Namespace) -> None:
             optimizer, scaler, logit_scale, log_lambda_ita, trainable_params,
             device=device, stage=stage,
             lambda_sim=args.lambda_sim, lambda_reg=args.lambda_reg,
+            text_mode=args.text_mode,
         )
         val_metrics = evaluate_lace(
             vit, text_enc, val_loader, logit_scale, log_lambda_ita,
             device=device, stage=stage,
             lambda_sim=args.lambda_sim, lambda_reg=args.lambda_reg,
+            text_mode=args.text_mode,
         )
         scheduler.step()
 

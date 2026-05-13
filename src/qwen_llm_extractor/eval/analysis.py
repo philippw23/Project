@@ -1,9 +1,8 @@
 """Evaluation and analysis utilities for LLM extraction results.
 
-Provides three main functions:
+Provides two main functions:
 - ``flatten_to_dataframe`` — converts the raw list-of-dicts output into a tidy DataFrame
 - ``print_summary``        — prints per-category phrase statistics to stdout
-- ``compare_with_medbert`` — computes overlap between LLM and medbert/KeyBERT phrase sets
 """
 
 import pandas as pd
@@ -100,43 +99,3 @@ def print_summary(df: pd.DataFrame) -> None:
         top = grp["phrase"].value_counts().head(10)
         for phrase, count in top.items():
             print(f"  [{count:>3}×]  {phrase}")
-
-
-def compare_with_medbert(llm_df: pd.DataFrame, medbert_csv: str) -> None:
-    """Print a phrase-level overlap comparison between LLM and medbert/KeyBERT results.
-
-    Parameters
-    ----------
-    llm_df      : DataFrame produced by ``flatten_to_dataframe``
-    medbert_csv : path to a CSV with at least ``phrase`` and ``report_idx`` columns,
-                  as produced by the medbert/KeyBERT extraction pipeline
-    """
-    mb = pd.read_csv(medbert_csv)
-
-    llm_terms = set(llm_df[llm_df["category"] != "error"]["phrase"].str.lower())
-    mb_terms  = set(mb["phrase"].str.lower())
-
-    overlap  = llm_terms & mb_terms
-    llm_only = llm_terms - mb_terms
-    mb_only  = mb_terms  - llm_terms
-
-    print("\n" + "=" * 65)
-    print("COMPARISON: LLM  vs  medbert/KeyBERT")
-    print("=" * 65)
-    print(f"  LLM unique phrases    : {len(llm_terms)}")
-    print(f"  medbert unique phrases: {len(mb_terms)}")
-    print(f"  Overlap               : {len(overlap)}"
-          f"  ({100*len(overlap)/max(len(llm_terms),1):.0f}% of LLM terms)")
-    print(f"  Only in LLM           : {len(llm_only)}")
-    print(f"  Only in medbert       : {len(mb_only)}")
-
-    print("\nTop 15 LLM-only phrases (not found by medbert):")
-    freq_llm = llm_df[llm_df["category"] != "error"].groupby("phrase")["report_idx"].nunique()
-    # reindex aligns the series to the subset before taking top-N
-    for t in freq_llm.reindex(sorted(llm_only)).nlargest(15).index:
-        print(f"  [{freq_llm[t]:>3}×]  {t}")
-
-    print("\nTop 15 medbert-only phrases (not found by LLM):")
-    freq_mb = mb.groupby("phrase")["report_idx"].nunique()
-    for t in freq_mb.reindex(sorted(mb_only)).nlargest(15).index:
-        print(f"  [{freq_mb[t]:>3}×]  {t}")

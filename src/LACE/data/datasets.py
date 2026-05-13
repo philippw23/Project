@@ -87,6 +87,14 @@ class InternalTripleDataset(Dataset):
     Samples without a valid mask fall back to using the full image as the crop
     and return zeros for patch_labels (has_mask=False signals callers to skip
     L_sim and the internal L_ortho contribution for that sample).
+
+    text_mode controls how text is encoded:
+      "full"        — tokenize full befund/beurteilung strings (existing behaviour)
+      "concat"      — join phrase lists with ", " and tokenize as one string
+      "phrase_mean" — tokenize each phrase separately; encoder mean-pools CLS
+      "phrase_attn" — tokenize each phrase separately; encoder attention-pools CLS
+
+    For phrase_mean/phrase_attn, samples with empty phrase lists are dropped.
     """
 
     def __init__(
@@ -95,21 +103,78 @@ class InternalTripleDataset(Dataset):
         preprocess,
         tokenizer,
         max_text_len: int = 128,
+        text_mode: str = "full",
+        max_bef_phrases: int = 16,
+        max_beur_phrases: int = 16,
+        phrase_tok_len: int = 32,
     ) -> None:
-        self.samples      = samples
-        self.preprocess   = preprocess
-        self.tokenizer    = tokenizer
-        self.max_text_len = max_text_len
+        self.preprocess       = preprocess
+        self.tokenizer        = tokenizer
+        self.max_text_len     = max_text_len
+        self.text_mode        = text_mode
+        self.max_bef_phrases  = max_bef_phrases
+        self.max_beur_phrases = max_beur_phrases
+        self.phrase_tok_len   = phrase_tok_len
+
+        if text_mode in ("phrase_mean", "phrase_attn"):
+            self.samples = [
+                s for s in samples
+                if s.get("befund_phrases") and s.get("beurteilung_phrases")
+            ]
+            dropped = len(samples) - len(self.samples)
+            if dropped:
+                print(f"InternalTripleDataset: dropped {dropped} samples missing phrase lists.")
+        else:
+            self.samples = samples
 
     def __len__(self) -> int:
         return len(self.samples)
+
+    def _tok(self, text: str, max_length: int) -> dict:
+        return self.tokenizer(
+            text if text else "[PAD]",
+            max_length=max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+
+    def _encode_phrase_list(
+        self, phrases: list[str], max_phrases: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Tokenize up to max_phrases phrases, pad the rest with zeros.
+
+        Returns:
+            ids  [max_phrases, phrase_tok_len]
+            attn [max_phrases, phrase_tok_len]
+            mask [max_phrases]  True = real phrase, False = padding
+        """
+        T = self.phrase_tok_len
+        ids_list, attn_list, mask_list = [], [], []
+        for i in range(max_phrases):
+            if i < len(phrases):
+                enc = self._tok(phrases[i], T)
+                ids_list.append(enc["input_ids"].squeeze(0))
+                attn_list.append(enc["attention_mask"].squeeze(0))
+                mask_list.append(True)
+            else:
+                ids_list.append(torch.zeros(T, dtype=torch.long))
+                attn_list.append(torch.zeros(T, dtype=torch.long))
+                mask_list.append(False)
+        return (
+            torch.stack(ids_list),
+            torch.stack(attn_list),
+            torch.tensor(mask_list, dtype=torch.bool),
+        )
 
     def __getitem__(self, idx: int) -> dict:
         s           = self.samples[idx]
         image_path  = Path(s["image"])
         mask_path   = Path(s["mask"])
-        beurteilung = str(s.get("beurteilung") or "").strip()
-        befund      = str(s.get("befund") or "").strip()
+        beurteilung  = str(s.get("beurteilung") or "").strip()
+        befund       = str(s.get("befund") or "").strip()
+        beur_phrases = s.get("beurteilung_phrases") or []
+        bef_phrases  = s.get("befund_phrases") or []
 
         image = Image.open(image_path).convert("RGB")
         full_image = self.preprocess(image)
@@ -127,28 +192,51 @@ class InternalTripleDataset(Dataset):
 
         crop_image = self.preprocess(crop_pil)
 
-        def _tokenize(text: str) -> dict:
-            return self.tokenizer(
-                text if text else "[PAD]",
-                max_length=self.max_text_len,
-                padding="max_length",
-                truncation=True,
-                return_tensors="pt",
+        if self.text_mode == "full":
+            b_enc = self._tok(beurteilung, self.max_text_len)
+            f_enc = self._tok(befund, self.max_text_len)
+            text_fields = {
+                "beurteilung_ids":  b_enc["input_ids"].squeeze(0),
+                "beurteilung_mask": b_enc["attention_mask"].squeeze(0),
+                "befund_ids":       f_enc["input_ids"].squeeze(0),
+                "befund_mask":      f_enc["attention_mask"].squeeze(0),
+                "has_befund":       torch.tensor(bool(befund), dtype=torch.bool),
+            }
+        elif self.text_mode == "concat":
+            beur_text = ", ".join(beur_phrases) if beur_phrases else ""
+            bef_text  = ", ".join(bef_phrases)  if bef_phrases  else ""
+            b_enc = self._tok(beur_text, self.max_text_len)
+            f_enc = self._tok(bef_text,  self.max_text_len)
+            text_fields = {
+                "beurteilung_ids":  b_enc["input_ids"].squeeze(0),
+                "beurteilung_mask": b_enc["attention_mask"].squeeze(0),
+                "befund_ids":       f_enc["input_ids"].squeeze(0),
+                "befund_mask":      f_enc["attention_mask"].squeeze(0),
+                "has_befund":       torch.tensor(bool(bef_phrases), dtype=torch.bool),
+            }
+        else:  # phrase_mean or phrase_attn
+            beur_ids, beur_pattn, beur_pmask = self._encode_phrase_list(
+                beur_phrases, self.max_beur_phrases,
             )
-
-        b_enc = _tokenize(beurteilung)
-        f_enc = _tokenize(befund)
+            bef_ids, bef_pattn, bef_pmask = self._encode_phrase_list(
+                bef_phrases, self.max_bef_phrases,
+            )
+            text_fields = {
+                "beur_phrase_ids":  beur_ids,
+                "beur_phrase_attn": beur_pattn,
+                "beur_phrase_mask": beur_pmask,
+                "bef_phrase_ids":   bef_ids,
+                "bef_phrase_attn":  bef_pattn,
+                "bef_phrase_mask":  bef_pmask,
+                "has_befund":       torch.tensor(bool(bef_phrases), dtype=torch.bool),
+            }
 
         return {
-            "full_image":       full_image,
-            "crop_image":       crop_image,
-            "beurteilung_ids":  b_enc["input_ids"].squeeze(0),
-            "beurteilung_mask": b_enc["attention_mask"].squeeze(0),
-            "befund_ids":       f_enc["input_ids"].squeeze(0),
-            "befund_mask":      f_enc["attention_mask"].squeeze(0),
-            "patch_labels":     patch_labels,
-            "has_mask":         torch.tensor(has_mask, dtype=torch.bool),
-            "has_befund":       torch.tensor(bool(befund), dtype=torch.bool),
+            "full_image":   full_image,
+            "crop_image":   crop_image,
+            "patch_labels": patch_labels,
+            "has_mask":     torch.tensor(has_mask, dtype=torch.bool),
+            **text_fields,
         }
 
 
