@@ -37,13 +37,13 @@ parameters:
   batch_size:
     values: [16, 32, 64]
   loss:
-    values: [ce, wce, focal, cb_focal, balanced_softmax]
+    values: [wce, focal, cb_focal, balanced_softmax]
   class_weighting:
     values: [none, sqrt, inverse, effective]
   focal_gamma:
     values: [1.0, 2.0, 3.0]
   cb_beta:
-    values: [0.9, 0.99]
+    values: [0.9, 0.99, 0.999]
   text_n_layers:
     values: [2, 4, 6]
   text_hidden_dim:
@@ -57,12 +57,8 @@ command:
   - ${env}
   - ${interpreter}
   - ${program}
-  - --splits
-  - results/biomedclip_pretrain/run_YYYYMMDD_HHMMSS/splits.json
-  - --excel
-  - data/internal_dataset/metadata.xlsx
   - --out_dir
-  - results
+  - results/scratch_img_text
   - --proj_dim
   - "256"
   - --epochs

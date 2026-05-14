@@ -57,17 +57,20 @@ def load_age_sex_lookup(excel_path: Path) -> dict[str, tuple[float, float]]:
 
 def _load_all_samples(
     excel_path: Path,
-    reports_path: Path,
+    full_reports_path: Path,
     images_dir: Path,
     masks_dir: Path,
-    english: bool = False,
+    english: bool = True,
 ) -> tuple[list, list]:
     """Build two independent sample pools with different requirements.
 
     Returns
     -------
-    pretrain_cands : list of (image_path, mask_path, report)
-    downstream_cands : list of (image_path, mask_path, report_or_None, label)
+    pretrain_cands : list of (image_path, mask_path, report_text)
+    downstream_cands : list of
+        (image_path, mask_path,
+         befund_en, beurteilung_en, befund_phrases, beurteilung_phrases,
+         label, age, sex, patid)
     """
     try:
         df = pd.read_excel(
@@ -98,24 +101,25 @@ def _load_all_samples(
 
     df["patid"] = df["patid"].apply(_normalise_id)
 
-    with open(reports_path, encoding="utf-8") as fh:
+    with open(full_reports_path, encoding="utf-8") as fh:
         raw_reports = json.load(fh)
 
-    report_lookup: dict[str, str] = {}
+    report_lookup: dict[str, dict] = {}
     for entry in raw_reports:
         pid = _normalise_id(str(entry.get("patid", "")).strip())
         if not pid:
             continue
-        befund_key      = "befund_en"      if english else "befund"
-        beurteilung_key = "beurteilung_en" if english else "beurteilung"
-        befund      = (entry.get(befund_key) or "").strip()
-        beurteilung = (entry.get(beurteilung_key) or "").strip()
-        text = " ".join(filter(None, [befund, beurteilung]))
-        if text:
-            report_lookup[pid] = text
+        report_lookup[pid] = {
+            "befund":              (entry.get("befund")              or "").strip() or None,
+            "beurteilung":         (entry.get("beurteilung")         or "").strip() or None,
+            "befund_en":           (entry.get("befund_en")           or "").strip() or None,
+            "beurteilung_en":      (entry.get("beurteilung_en")      or "").strip() or None,
+            "befund_phrases":      entry.get("befund_phrases")       or None,
+            "beurteilung_phrases": entry.get("beurteilung_phrases")  or None,
+        }
 
-    pretrain_cands:   list[tuple[Path, Path, str]]              = []
-    downstream_cands: list[tuple[Path, Path, str | None, str]]  = []
+    pretrain_cands:   list = []
+    downstream_cands: list = []
     skipped_no_image   = 0
     skipped_no_age_sex = 0
 
@@ -130,21 +134,37 @@ def _load_all_samples(
             skipped_no_image += 1
             continue
 
-        report = report_lookup.get(patid) or None
+        rep            = report_lookup.get(patid, {})
+        befund_en      = rep.get("befund_en")
+        beurteilung_en = rep.get("beurteilung_en")
+        befund_phrases      = rep.get("befund_phrases")
+        beurteilung_phrases = rep.get("beurteilung_phrases")
 
-        if report:
-            pretrain_cands.append((image_path, mask_path, report))
+        b1 = (rep.get("befund_en") if english else rep.get("befund")) or ""
+        b2 = (rep.get("beurteilung_en") if english else rep.get("beurteilung")) or ""
+        report_text = " ".join(filter(None, [b1, b2]))
+        if report_text:
+            pretrain_cands.append((image_path, mask_path, report_text))
 
         if label:
             try:
-                float(row["age"])
+                age_float = float(row["age"])
             except (ValueError, TypeError):
                 skipped_no_age_sex += 1
                 continue
-            if str(row["sex"]).strip().lower() not in ("m", "male", "1", "f", "female", "0"):
+            sex_raw = str(row["sex"]).strip().lower()
+            if sex_raw in ("m", "male", "1"):
+                sex_float = 1.0
+            elif sex_raw in ("f", "female", "0"):
+                sex_float = 0.0
+            else:
                 skipped_no_age_sex += 1
                 continue
-            downstream_cands.append((image_path, mask_path, report, label))
+            downstream_cands.append((
+                image_path, mask_path,
+                befund_en, beurteilung_en, befund_phrases, beurteilung_phrases,
+                label, age_float, sex_float, patid,
+            ))
 
     print(
         f"Dataset: {len(pretrain_cands)} pretrain candidates (image+report), "
@@ -184,7 +204,7 @@ def build_stratified_splits(
 
     pretrain_cands, downstream_cands = _load_all_samples(
         excel_path=Path(args.excel),
-        reports_path=Path(args.reports),
+        full_reports_path=Path(args.reports),
         images_dir=Path(args.images),
         masks_dir=Path(args.masks),
         english=args.english,
@@ -209,8 +229,8 @@ def build_stratified_splits(
             f"got {total:.4f}."
         )
 
-    no_report  = [s for s in downstream_cands if not (s[2] and str(s[2]).strip())]
-    has_report = [s for s in downstream_cands if s[2] and str(s[2]).strip()]
+    no_report  = [s for s in downstream_cands if not (s[2] or s[3])]
+    has_report = [s for s in downstream_cands if s[2] or s[3]]
 
     n_total       = len(downstream_cands)
     n_test        = max(1, round(n_total * args.test_frac))
@@ -222,18 +242,18 @@ def build_stratified_splits(
         no_rep_pool, no_rep_train = no_report, []
     else:
         frac = n_from_no_rep / len(no_report)
-        labels_nr = [s[3] for s in no_report]
+        labels_nr = [s[6] for s in no_report]
         no_rep_train, no_rep_pool = _stratified_split_two(no_report, labels_nr, frac, args.seed)
 
     if n_supplement > 0 and has_report:
         frac = n_supplement / len(has_report)
-        labels_hr = [s[3] for s in has_report]
+        labels_hr = [s[6] for s in has_report]
         has_rep_train, has_rep_pool = _stratified_split_two(has_report, labels_hr, frac, args.seed)
     else:
         has_rep_pool, has_rep_train = [], has_report
 
     val_test_pool     = no_rep_pool + has_rep_pool
-    labels_vt         = [s[3] for s in val_test_pool]
+    labels_vt         = [s[6] for s in val_test_pool]
     test_frac_of_pool = n_test / len(val_test_pool)
     downstream_val, test = _stratified_split_two(val_test_pool, labels_vt, test_frac_of_pool, args.seed)
 
@@ -258,7 +278,7 @@ def build_stratified_splits(
     }
     print("\nDownstream split statistics (mutually exclusive):")
     for name, split in downstream_splits.items():
-        dist = _dist(split, label_idx=3)
+        dist = _dist(split, label_idx=6)
         dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(dist.items()))
         n_reports = _count_reports(split, report_idx=2)
         print(
@@ -288,7 +308,18 @@ def build_stratified_splits(
     ]
     for name, split in downstream_splits.items():
         manifest[name] = [
-            {"image": str(s[0]), "mask": str(s[1]), "report": s[2], "label": s[3]}
+            {
+                "image":               str(s[0]),
+                "mask":                str(s[1]),
+                "befund_en":           s[2],
+                "beurteilung_en":      s[3],
+                "befund_phrases":      s[4],
+                "beurteilung_phrases": s[5],
+                "label":               s[6],
+                "age":                 s[7],
+                "sex":                 s[8],
+                "patid":               s[9],
+            }
             for s in split
         ]
 

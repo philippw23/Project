@@ -39,12 +39,11 @@ unset PYTORCH_NVML_BASED_CUDA_CHECK
 
 python $home_dir/Project/src/scratch_img_downstream.py \
     --encoder        $ENCODER \
-    --splits         $home_dir/Project/results/biomedclip_pretrain/run_YYYYMMDD_HHMMSS/splits.json \
-    --excel          $home_dir/Project/data/internal_dataset/metadata.xlsx \
-    --out_dir        $home_dir/Project/results \
+    --english \
+    --out_dir        $home_dir/Project/results/scratch_img \
     --epochs         100 \
     --patience       15 \
-    --batch_size     32 \
+    --batch_size     64 \
     --lr_encoder     1e-3 \
     --lr_mlp         1e-3 \
     --warmup_epochs  10 \
@@ -52,7 +51,7 @@ python $home_dir/Project/src/scratch_img_downstream.py \
     --dropout        0.3 \
     --hidden_dims    128 \
     --meta_embed_dim 16 \
-    --loss           ce \
+    --loss           focal \
     --class_weighting sqrt \
     --use_mask \
     --seed           42 \

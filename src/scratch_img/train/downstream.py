@@ -45,10 +45,11 @@ except ImportError:
 
 from biomedclip.data.datasets import (DownstreamDataset, IDX_TO_LABEL,
                                        LABEL_TO_IDX, NUM_CLASSES)
-from biomedclip.data.splits import load_age_sex_lookup
+from biomedclip.data.splits import build_stratified_splits, load_age_sex_lookup
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import MalignancyMLP
-from biomedclip.utils.misc import DEFAULT_EXCEL, DEFAULT_OUT_DIR
+from biomedclip.utils.misc import (DEFAULT_EXCEL, DEFAULT_IMAGES_DIR, DEFAULT_MASKS_DIR,
+                                    DEFAULT_OUT_DIR, DEFAULT_REPORTS)
 from scratch_img.data.transforms import build_train_transform, build_val_transform
 from scratch_img.models.encoders import build_encoder
 
@@ -132,8 +133,16 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     parser.add_argument("--encoder", required=True, choices=["resnet18", "vit_tiny"])
 
-    parser.add_argument("--splits",   required=True)
+    parser.add_argument("--splits",   default=None,
+                        help="Path to a pre-existing splits.json. If omitted, splits are generated.")
     parser.add_argument("--excel",    default=str(DEFAULT_EXCEL))
+    parser.add_argument("--reports",  default=str(DEFAULT_REPORTS),
+                        help="Path to full_reports.json (used when generating splits).")
+    parser.add_argument("--english",  action="store_true",
+                        help="Use English report text for the pretrain set (only when generating splits).")
+    parser.add_argument("--downstream_train_frac", type=float, default=0.8)
+    parser.add_argument("--downstream_val_frac",   type=float, default=0.1)
+    parser.add_argument("--test_frac",             type=float, default=0.1)
     parser.add_argument("--out_dir",  default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--use_mask", action="store_true",
                         help="Crop images around the lesion mask before feeding to the encoder.")
@@ -219,8 +228,33 @@ def main(args: argparse.Namespace) -> None:
           f"Params: {sum(p.numel() for p in encoder.parameters()):,}")
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    with open(args.splits, encoding="utf-8") as fh:
-        splits = json.load(fh)
+    if args.splits is not None:
+        with open(args.splits, encoding="utf-8") as fh:
+            splits = json.load(fh)
+    else:
+        args.images = str(DEFAULT_IMAGES_DIR)
+        args.masks  = str(DEFAULT_MASKS_DIR)
+        _, downstream_train, downstream_val, test = build_stratified_splits(args, run_dir=Path(args.out_dir))
+        splits = {
+            "downstream_train": [
+                {"image": str(s[0]), "mask": str(s[1]), "befund_en": s[2], "beurteilung_en": s[3],
+                 "befund_phrases": s[4], "beurteilung_phrases": s[5],
+                 "label": s[6], "age": s[7], "sex": s[8], "patid": s[9]}
+                for s in downstream_train
+            ],
+            "downstream_val": [
+                {"image": str(s[0]), "mask": str(s[1]), "befund_en": s[2], "beurteilung_en": s[3],
+                 "befund_phrases": s[4], "beurteilung_phrases": s[5],
+                 "label": s[6], "age": s[7], "sex": s[8], "patid": s[9]}
+                for s in downstream_val
+            ],
+            "test": [
+                {"image": str(s[0]), "mask": str(s[1]), "befund_en": s[2], "beurteilung_en": s[3],
+                 "befund_phrases": s[4], "beurteilung_phrases": s[5],
+                 "label": s[6], "age": s[7], "sex": s[8], "patid": s[9]}
+                for s in test
+            ],
+        }
 
     if args.overfit_n > 0:
         subset = splits["downstream_train"][:args.overfit_n]
@@ -276,9 +310,11 @@ def main(args: argparse.Namespace) -> None:
     ])
 
     # ── Output dir ────────────────────────────────────────────────────────────
-    run_id  = (wandb.run.id if use_wandb and wandb.run else None) or \
-              datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.out_dir) / f"scratch_img_{args.encoder}" / f"run_{run_id}"
+    ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_tag = f"{ts}_{args.encoder}_{args.loss}"
+    if use_wandb and wandb.run:
+        run_tag = f"{run_tag}_{wandb.run.id}"
+    out_dir = Path(args.out_dir) / run_tag
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / "best_checkpoint.pt"
 

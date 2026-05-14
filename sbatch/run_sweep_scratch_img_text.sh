@@ -14,7 +14,7 @@
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_scratch_img_text.sh
 
-SWEEP_ID=""   # e.g. "philipp-wiese/scratch-img-text-downstream/abc12345"
+SWEEP_ID="philipp-wiese/scratch-img-text-downstream/14easvaj"   # e.g. "philipp-wiese/scratch-img-text-downstream/abc12345"
 
 if [ -z "$SWEEP_ID" ]; then
     echo "ERROR: Set SWEEP_ID in this script before submitting."

@@ -71,7 +71,7 @@ class DownstreamDatasetWithText(Dataset):
         age_norm     = (age_raw - self.age_mean) / (self.age_std + 1e-6)
         label        = LABEL_TO_IDX[s["label"]]
 
-        report = s.get("report") or ""
+        report = " ".join(filter(None, [s.get("befund_en"), s.get("beurteilung_en")])) or s.get("report") or ""
         enc = self.tokenizer(
             report if report else "[PAD]",
             max_length=self.max_text_len,

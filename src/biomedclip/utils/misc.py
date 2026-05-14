@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import open_clip
 import torch
 import torch.nn as nn
 
@@ -12,7 +11,7 @@ MODEL_TAG          = "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch1
 DEFAULT_IMAGES_DIR = ROOT_DIR / "data" / "internal_dataset" / "images"
 DEFAULT_MASKS_DIR  = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
 DEFAULT_EXCEL      = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
-DEFAULT_REPORTS    = ROOT_DIR / "data" / "internal_dataset" / "text" / "translated_reports.json"
+DEFAULT_REPORTS    = ROOT_DIR / "data" / "internal_dataset" / "text" / "full_reports.json"
 DEFAULT_OUT_DIR    = ROOT_DIR / "results"
 
 
@@ -32,6 +31,7 @@ def print_biomedclip_architecture(
     else:
         device = torch.device(device)
 
+    import open_clip
     print(f"Loading model: {model_tag}")
     model, _, _ = open_clip.create_model_and_transforms(model_tag)
     model = model.to(device)
