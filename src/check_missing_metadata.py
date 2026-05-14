@@ -68,8 +68,11 @@ def main(excel_path: Path = DEFAULT_EXCEL) -> None:
 
     pd.set_option("display.max_colwidth", 60)
     pd.set_option("display.width", 200)
+    patid_list = sorted(missing["patid"].tolist())
+    print("Patient IDs with missing info:", patid_list)
+    print()
     print(missing[["patid", "filename", "age", "sex", "malignancy", "missing_fields"]].to_string(index=False))
-
+    
 
 if __name__ == "__main__":
     main()

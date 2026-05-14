@@ -13,6 +13,7 @@ DEFAULT_MASKS_DIR  = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
 DEFAULT_EXCEL      = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
 DEFAULT_REPORTS    = ROOT_DIR / "data" / "internal_dataset" / "text" / "full_reports.json"
 DEFAULT_OUT_DIR    = ROOT_DIR / "results"
+DEFAULT_SPLIT_DIR  = ROOT_DIR / "data" / "internal_dataset"
 
 
 def _count_parameters(module: nn.Module) -> tuple[int, int]:

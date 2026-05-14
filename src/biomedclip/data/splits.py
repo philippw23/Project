@@ -55,7 +55,7 @@ def load_age_sex_lookup(excel_path: Path) -> dict[str, tuple[float, float]]:
     return lookup
 
 
-def _load_all_samples(
+def _old_load_all_samples(
     excel_path: Path,
     full_reports_path: Path,
     images_dir: Path,
@@ -120,6 +120,7 @@ def _load_all_samples(
 
     pretrain_cands:   list = []
     downstream_cands: list = []
+    image_to_meta:    dict = {}
     skipped_no_image   = 0
     skipped_no_age_sex = 0
 
@@ -133,6 +134,15 @@ def _load_all_samples(
         if not image_path.exists():
             skipped_no_image += 1
             continue
+
+        try:
+            age_raw = float(row["age"])
+        except (ValueError, TypeError):
+            age_raw = None
+        sex_str = str(row["sex"]).strip().lower()
+        sex_raw = 1.0 if sex_str == "m" else (0.0 if sex_str == "f" else None)
+
+        image_to_meta[image_path] = {"patid": patid, "age": age_raw, "sex": sex_raw}
 
         rep            = report_lookup.get(patid, {})
         befund_en      = rep.get("befund_en")
@@ -172,7 +182,7 @@ def _load_all_samples(
         f"(skipped: {skipped_no_image} missing images, "
         f"{skipped_no_age_sex} missing/invalid age or sex)"
     )
-    return pretrain_cands, downstream_cands
+    return pretrain_cands, downstream_cands, image_to_meta, report_lookup
 
 
 def _stratified_split_two(
@@ -196,13 +206,13 @@ def _stratified_split_two(
     return a, b
 
 
-def build_stratified_splits(
+def old_build_stratified_splits(
     args,
     run_dir: Path | None = None,
 ) -> tuple[list, list, list, list]:
     """Load all samples and create independent pretrain and downstream splits."""
 
-    pretrain_cands, downstream_cands = _load_all_samples(
+    pretrain_cands, downstream_cands, image_to_meta, report_lookup = _old_load_all_samples(
         excel_path=Path(args.excel),
         full_reports_path=Path(args.reports),
         images_dir=Path(args.images),
@@ -290,22 +300,67 @@ def build_stratified_splits(
     n_pretrain_with_label = sum(
         1 for s in pretrain if s[0] in {ds[0] for ds in downstream_train}
     )
+    n_excluded  = len(pretrain_cands) - len(pretrain)
+    n_unlabeled = len(pretrain) - n_pretrain_with_label
     print(
-        f"\nPretrain set ({len(pretrain)} samples, val/test excluded):"
-        f"\n  {len(pretrain_cands) - len(pretrain)} val/test images removed"
-        f"\n  {n_pretrain_with_label} samples overlap with downstream_train"
-        f"\n  {len(pretrain) - n_pretrain_with_label} are unlabeled (report only)"
+        f"\nPretrain set: {len(pretrain_cands)} candidates"
+        f" − {n_excluded} val/test exclusions"
+        f" = {len(pretrain)} samples"
+        f"\n  {n_pretrain_with_label} labeled (overlaps downstream_train, full metadata available)"
+        f"\n  {n_unlabeled} unlabeled (report only, no label/age/sex)"
     )
+    if n_unlabeled > 0:
+        downstream_image_set = (
+            {s[0] for s in downstream_train}
+            | {s[0] for s in downstream_val}
+            | {s[0] for s in test}
+        )
+        print("\n  Pretrain-only cases (not in any downstream split):")
+        for s in pretrain:
+            if s[0] not in downstream_image_set:
+                patid = image_to_meta.get(s[0], {}).get("patid", "unknown")
+                print(f"    patid={patid}  file={s[0].name}")
     print()
 
     out_dir = run_dir if run_dir is not None else Path(args.out_dir) / "biomedclip_pretrain"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Build lookup for enriching pretrain entries with downstream metadata.
+    # "report" = befund_en + " " + beurteilung_en (concatenated in _load_all_samples).
+    downstream_lookup = {s[0]: s for s in downstream_cands}
+
     manifest: dict[str, list] = {}
-    manifest["pretrain"] = [
-        {"image": str(s[0]), "mask": str(s[1]), "report": s[2]}
-        for s in pretrain
-    ]
+    pretrain_entries = []
+    for s in pretrain:
+        entry: dict = {"image": str(s[0]), "mask": str(s[1]), "report": s[2]}
+        ds = downstream_lookup.get(s[0])
+        if ds is not None:
+            entry.update({
+                "patid":               ds[9],
+                "age":                 ds[7],
+                "sex":                 ds[8],
+                "label":               ds[6],
+                "befund_en":           ds[2],
+                "beurteilung_en":      ds[3],
+                "befund_phrases":      ds[4],
+                "beurteilung_phrases": ds[5],
+            })
+        else:
+            meta  = image_to_meta.get(s[0], {})
+            patid = meta.get("patid")
+            rep   = report_lookup.get(patid, {}) if patid else {}
+            entry.update({
+                "patid":               patid,
+                "age":                 meta.get("age"),
+                "sex":                 meta.get("sex"),
+                "label":               None,
+                "befund_en":           rep.get("befund_en"),
+                "beurteilung_en":      rep.get("beurteilung_en"),
+                "befund_phrases":      rep.get("befund_phrases"),
+                "beurteilung_phrases": rep.get("beurteilung_phrases"),
+            })
+        pretrain_entries.append(entry)
+    manifest["pretrain"] = pretrain_entries
     for name, split in downstream_splits.items():
         manifest[name] = [
             {
@@ -331,7 +386,7 @@ def build_stratified_splits(
     return pretrain, downstream_train, downstream_val, test
 
 
-def build_pretrain_datasets(
+def old_build_pretrain_datasets(
     pretrain_samples: list,
     preprocess_train,
     preprocess_val,
@@ -355,3 +410,208 @@ def build_pretrain_datasets(
     train_ds = BoneTumorPairDataset(train_samp, preprocess_train, tokenizer, use_mask)
     val_ds   = BoneTumorPairDataset(val_samp,   preprocess_val,   tokenizer, use_mask)
     return train_ds, val_ds
+
+
+# ---------------------------------------------------------------------------
+# New split logic: single pool of complete cases (image + report + label + age + sex)
+# ---------------------------------------------------------------------------
+
+def _load_complete_samples(
+    excel_path: Path,
+    full_reports_path: Path,
+    images_dir: Path,
+    masks_dir: Path,
+    english: bool = True,
+) -> list[dict]:
+    """Return only cases that have every required field.
+
+    A case is included iff it has: image file, non-empty report, malignancy
+    label, parseable age, and m/f sex.  Each element is a dict with keys:
+        image, mask, report, label, age, sex, patid,
+        befund_en, beurteilung_en, befund_phrases, beurteilung_phrases
+    """
+    try:
+        df = pd.read_excel(
+            excel_path,
+            sheet_name="internal_data_matched",
+            usecols=[0, 2, 4, 5, 7],
+            skiprows=1,
+            header=0,
+            dtype=str,
+            engine="openpyxl",
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Cannot read Excel file '{excel_path}': {exc}") from exc
+
+    df.columns = ["filename", "malignancy", "age", "sex", "patid"]
+    df = df.dropna(subset=["filename", "patid"])
+    df["filename"]   = df["filename"].str.strip()
+    df["patid"]      = df["patid"].str.strip()
+    df["malignancy"] = df["malignancy"].fillna("").str.strip().str.lower()
+    df["age"]        = df["age"].fillna("")
+    df["sex"]        = df["sex"].fillna("")
+
+    def _normalise_id(val: str) -> str:
+        try:
+            return str(int(float(val)))
+        except ValueError:
+            return val
+
+    df["patid"] = df["patid"].apply(_normalise_id)
+
+    with open(full_reports_path, encoding="utf-8") as fh:
+        raw_reports = json.load(fh)
+
+    report_lookup: dict[str, dict] = {}
+    for entry in raw_reports:
+        pid = _normalise_id(str(entry.get("patid", "")).strip())
+        if not pid:
+            continue
+        report_lookup[pid] = {
+            "befund":              (entry.get("befund")              or "").strip() or None,
+            "beurteilung":         (entry.get("beurteilung")         or "").strip() or None,
+            "befund_en":           (entry.get("befund_en")           or "").strip() or None,
+            "beurteilung_en":      (entry.get("beurteilung_en")      or "").strip() or None,
+            "befund_phrases":      entry.get("befund_phrases")       or None,
+            "beurteilung_phrases": entry.get("beurteilung_phrases")  or None,
+        }
+
+    samples: list[dict] = []
+    skipped = {"no_image": 0, "no_report": 0, "no_label": 0, "no_age": 0, "no_sex": 0}
+
+    for _, row in df.iterrows():
+        stem       = Path(row["filename"]).stem
+        patid      = row["patid"]
+        label      = row["malignancy"]
+        image_path = images_dir / f"{stem}.png"
+        mask_path  = masks_dir  / f"{stem}.png"
+
+        if not image_path.exists():
+            skipped["no_image"] += 1
+            continue
+
+        rep = report_lookup.get(patid, {})
+        b1  = (rep.get("befund_en") if english else rep.get("befund")) or ""
+        b2  = (rep.get("beurteilung_en") if english else rep.get("beurteilung")) or ""
+        report_text = " ".join(filter(None, [b1, b2]))
+        if not report_text:
+            skipped["no_report"] += 1
+            continue
+
+        if not label:
+            skipped["no_label"] += 1
+            continue
+
+        try:
+            age_float = float(row["age"])
+        except (ValueError, TypeError):
+            skipped["no_age"] += 1
+            continue
+
+        sex_str = str(row["sex"]).strip().lower()
+        if sex_str == "m":
+            sex_float = 1.0
+        elif sex_str == "f":
+            sex_float = 0.0
+        else:
+            skipped["no_sex"] += 1
+            continue
+
+        samples.append({
+            "image":               image_path,
+            "mask":                mask_path,
+            "report":              report_text,
+            "label":               label,
+            "age":                 age_float,
+            "sex":                 sex_float,
+            "patid":               patid,
+            "befund_en":           rep.get("befund_en"),
+            "beurteilung_en":      rep.get("beurteilung_en"),
+            "befund_phrases":      rep.get("befund_phrases"),
+            "beurteilung_phrases": rep.get("beurteilung_phrases"),
+        })
+
+    print(
+        f"Complete samples (image+report+label+age+sex): {len(samples)}"
+        f"  (skipped: {skipped['no_image']} no image, {skipped['no_report']} no report,"
+        f" {skipped['no_label']} no label, {skipped['no_age']} no age, {skipped['no_sex']} no sex)"
+    )
+    return samples
+
+
+def build_stratified_splits(
+    args,
+    run_dir: Path | None = None,
+) -> tuple[list, list, list]:
+    """Create train / val / test splits from cases that have all required fields.
+
+    Every case in every split has: image, mask, report, label, age, sex.
+    The same splits are therefore usable for both pretraining and downstream
+    classification without any subset mismatch.
+
+    Returns (train, val, test) where each element is a list of dicts.
+    """
+    samples = _load_complete_samples(
+        excel_path=Path(args.excel),
+        full_reports_path=Path(args.reports),
+        images_dir=Path(args.images),
+        masks_dir=Path(args.masks),
+        english=args.english,
+    )
+
+    if not samples:
+        raise RuntimeError(
+            "No complete samples found. Check --excel, --images, --reports paths."
+        )
+
+    total = args.downstream_train_frac + args.downstream_val_frac + args.test_frac
+    if abs(total - 1.0) > 1e-4:
+        raise ValueError(
+            f"Split fractions must sum to 1.0, got {total:.4f}."
+        )
+
+    labels = [s["label"] for s in samples]
+
+    # Split off test first, then val from the remainder.
+    train_val, test = _stratified_split_two(samples, labels, args.test_frac, args.seed)
+    val_frac = args.downstream_val_frac / (args.downstream_train_frac + args.downstream_val_frac)
+    train, val = _stratified_split_two(
+        train_val, [s["label"] for s in train_val], val_frac, args.seed
+    )
+
+    splits = {"train": train, "val": val, "test": test}
+    print("\nSplit statistics (all cases have image + report + label + age + sex):")
+    for name, split in splits.items():
+        dist     = dict(Counter(s["label"] for s in split))
+        dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(dist.items()))
+        print(f"  {name:<6} {len(split):>4} samples  | {dist_str}")
+    print()
+
+    out_dir = run_dir if run_dir is not None else Path(args.out_dir) / "biomedclip_pretrain"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest: dict[str, list] = {}
+    for name, split in splits.items():
+        manifest[name] = [
+            {
+                "image":               str(s["image"]),
+                "mask":                str(s["mask"]),
+                "report":              s["report"],
+                "label":               s["label"],
+                "age":                 s["age"],
+                "sex":                 s["sex"],
+                "patid":               s["patid"],
+                "befund_en":           s["befund_en"],
+                "beurteilung_en":      s["beurteilung_en"],
+                "befund_phrases":      s["befund_phrases"],
+                "beurteilung_phrases": s["beurteilung_phrases"],
+            }
+            for s in split
+        ]
+
+    manifest_path = out_dir / "split.json"
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    print(f"  Split manifest saved -> {manifest_path}\n")
+    return train, val, test

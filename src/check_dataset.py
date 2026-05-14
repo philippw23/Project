@@ -40,17 +40,19 @@ def check_dataset(
     df = pd.read_excel(
         excel_path,
         sheet_name="internal_data_matched",
-        usecols=[0, 2, 7],
+        usecols=[0, 2, 4, 5, 7],
         skiprows=1,
         header=0,
         dtype=str,
         engine="openpyxl",
     )
-    df.columns = ["file_name", "malignancy", "anonym_patid"]
+    df.columns = ["file_name", "malignancy", "age", "sex", "anonym_patid"]
     df = df.dropna(subset=["file_name"])
     df["file_name"]    = df["file_name"].str.strip().apply(lambda x: Path(x).stem)
     df["anonym_patid"] = df["anonym_patid"].fillna("").str.strip().apply(_normalise_id)
     df["malignancy"]   = df["malignancy"].fillna("").str.strip().str.lower()
+    df["age"]          = df["age"].fillna("")
+    df["sex"]          = df["sex"].fillna("")
     excel_stems = set(df["file_name"])
 
     # Union of all three sources = total population
@@ -58,7 +60,7 @@ def check_dataset(
     total = len(all_stems)
 
     print(f"{'='*60}")
-    print(f"Source counts")
+    print("Source counts")
     print(f"{'='*60}")
     print(f"  Images (images/):        {len(image_stems)}")
     print(f"  Masks  (segmentations/): {len(mask_stems)}")
@@ -96,17 +98,27 @@ def check_dataset(
         print(f"  patid={pid}  ({count}x)  ->  {filenames}")
     print()
 
+    def _valid_age(v: str) -> bool:
+        try:
+            float(v)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def _valid_sex(v: str) -> bool:
+        return str(v).strip().lower() in ("m", "male", "1", "f", "female", "0")
+
     # --- Per-stem checks across the full population ---
     missing_image    : list[str] = []
     missing_mask     : list[str] = []
     missing_excel    : list[str] = []
     missing_report   : list[str] = []
     missing_label    : list[str] = []
+    missing_age_sex  : list[str] = []
     truncated_images : list[str] = []
 
     for stem in sorted(all_stems):
         image_path = images_dir / f"{stem}.png"
-        mask_path  = masks_dir  / f"{stem}.png"
 
         if stem not in image_stems:
             missing_image.append(stem)
@@ -114,7 +126,7 @@ def check_dataset(
             try:
                 with Image.open(image_path) as img:
                     img.verify()
-            except (UnidentifiedImageError, Exception):
+            except (UnidentifiedImageError, OSError):
                 truncated_images.append(stem)
 
         if stem not in mask_stems:
@@ -133,6 +145,14 @@ def check_dataset(
                     missing_report.append(f"{stem}  (patid={patid or 'n/a'})")
             if not row["malignancy"]:
                 missing_label.append(stem)
+            bad_age = not _valid_age(row["age"])
+            bad_sex = not _valid_sex(row["sex"])
+            if bad_age or bad_sex:
+                fields = ", ".join(f for f, bad in [("age", bad_age), ("sex", bad_sex)] if bad)
+                missing_age_sex.append(
+                    f"{stem}  (patid={patid or 'n/a'})  missing: {fields}"
+                    f"  age={row['age']!r}  sex={row['sex']!r}"
+                )
 
     # --- Summary ---
     n_images = len(image_stems)
@@ -153,6 +173,7 @@ def check_dataset(
     _section("Excel entries without image",    missing_image,     n_excel)
     _section("Missing reports",                missing_report,    n_images)
     _section("Missing malignancy label",       missing_label,     n_excel)
+    _section("Missing or invalid age / sex",   missing_age_sex,   n_excel)
     _section("Truncated / corrupt images",     truncated_images,  n_images)
 
     # --- Pre-compute per-stem boolean flags ---
