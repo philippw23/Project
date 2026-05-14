@@ -41,9 +41,9 @@ def load_age_sex_lookup(excel_path: Path) -> dict[str, tuple[float, float]]:
             skipped += 1
             continue
         sex_raw = str(row["sex"]).strip().lower()
-        if sex_raw in ("m", "male", "1"):
+        if sex_raw == "m":
             sex = 1.0
-        elif sex_raw in ("f", "female", "0"):
+        elif sex_raw == "f":
             sex = 0.0
         else:
             skipped += 1
@@ -153,9 +153,9 @@ def _load_all_samples(
                 skipped_no_age_sex += 1
                 continue
             sex_raw = str(row["sex"]).strip().lower()
-            if sex_raw in ("m", "male", "1"):
+            if sex_raw == "m":
                 sex_float = 1.0
-            elif sex_raw in ("f", "female", "0"):
+            elif sex_raw == "f":
                 sex_float = 0.0
             else:
                 skipped_no_age_sex += 1
