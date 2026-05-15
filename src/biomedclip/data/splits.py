@@ -539,16 +539,25 @@ def _load_complete_samples(
     return samples
 
 
+def _group_by_patient(samples: list[dict]) -> list[list[dict]]:
+    """Return samples grouped by patid, preserving insertion order."""
+    groups: dict[str, list[dict]] = {}
+    for s in samples:
+        groups.setdefault(s["patid"], []).append(s)
+    return list(groups.values())
+
+
 def build_stratified_splits(
     args,
     run_dir: Path | None = None,
 ) -> tuple[list, list, list]:
     """Create train / val / test splits from cases that have all required fields.
 
-    Every case in every split has: image, mask, report, label, age, sex.
-    The same splits are therefore usable for both pretraining and downstream
-    classification without any subset mismatch.
+    Splitting is done at the *patient* level so that all images from the same
+    patient land in the same fold (preventing leakage).  Stratification uses
+    the majority label among a patient's images.
 
+    Every case in every split has: image, mask, report, label, age, sex.
     Returns (train, val, test) where each element is a list of dicts.
     """
     samples = _load_complete_samples(
@@ -570,21 +579,42 @@ def build_stratified_splits(
             f"Split fractions must sum to 1.0, got {total:.4f}."
         )
 
-    labels = [s["label"] for s in samples]
+    # Group by patient; use majority label per patient for stratification.
+    patient_groups = _group_by_patient(samples)
+    def _majority_label(group: list[dict]) -> str:
+        return Counter(s["label"] for s in group).most_common(1)[0][0]
+    patient_labels = [_majority_label(g) for g in patient_groups]
 
-    # Split off test first, then val from the remainder.
-    train_val, test = _stratified_split_two(samples, labels, args.test_frac, args.seed)
-    val_frac = args.downstream_val_frac / (args.downstream_train_frac + args.downstream_val_frac)
-    train, val = _stratified_split_two(
-        train_val, [s["label"] for s in train_val], val_frac, args.seed
+    n_multi = sum(1 for g in patient_groups if len(g) > 1)
+    print(
+        f"Patients: {len(patient_groups)} total"
+        f"  ({n_multi} with multiple images, {len(samples)} images total)"
     )
 
-    splits = {"train": train, "val": val, "test": test}
-    print("\nSplit statistics (all cases have image + report + label + age + sex):")
+    # Split at patient level first, then flatten to images.
+    train_val_groups, test_groups = _stratified_split_two(
+        patient_groups, patient_labels, args.test_frac, args.seed
+    )
+    val_frac = args.downstream_val_frac / (args.downstream_train_frac + args.downstream_val_frac)
+    train_groups, val_groups = _stratified_split_two(
+        train_val_groups,
+        [_majority_label(g) for g in train_val_groups],
+        val_frac,
+        args.seed,
+    )
+
+    train = [s for g in train_groups for s in g]
+    val   = [s for g in val_groups   for s in g]
+    test  = [s for g in test_groups  for s in g]
+
+    splits        = {"train": train,        "val": val,        "test": test}
+    split_groups  = {"train": train_groups, "val": val_groups, "test": test_groups}
+    print("\nSplit statistics (patient-stratified; all cases have image + report + label + age + sex):")
     for name, split in splits.items():
         dist     = dict(Counter(s["label"] for s in split))
         dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(dist.items()))
-        print(f"  {name:<6} {len(split):>4} samples  | {dist_str}")
+        n_pats   = len(split_groups[name])
+        print(f"  {name:<6} {len(split):>4} images  {n_pats:>4} patients  | {dist_str}")
     print()
 
     out_dir = run_dir if run_dir is not None else Path(args.out_dir) / "biomedclip_pretrain"

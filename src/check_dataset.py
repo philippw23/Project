@@ -126,7 +126,7 @@ def check_dataset(
             try:
                 with Image.open(image_path) as img:
                     img.verify()
-            except (UnidentifiedImageError, OSError):
+            except (UnidentifiedImageError, OSError, SyntaxError):
                 truncated_images.append(stem)
 
         if stem not in mask_stems:
