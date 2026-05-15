@@ -14,7 +14,7 @@ def main() -> None:
     df = pd.read_excel(
         EXCEL_PATH,
         sheet_name="internal_data_matched",
-        usecols=[6],
+        usecols=[6, 7],
         skiprows=1,
         header=None,
         nrows=1268,
@@ -22,6 +22,7 @@ def main() -> None:
         engine="openpyxl",
     )
     df[6] = df[6].fillna("").str.strip()
+    df[7] = df[7].fillna("").str.strip()
 
     total     = len(df)
     non_empty = (df[6] != "").sum()
@@ -32,6 +33,19 @@ def main() -> None:
     print(f"  report_accnr non-empty : {non_empty}")
     print(f"  report_accnr empty     : {empty}")
     print(f"  Unique values (non-empty): {unique}")
+    # Rows with no report_accnr — check if their patids are all unique
+    no_accnr = df[df[6] == ""]
+    no_accnr_patids = no_accnr[7].tolist()
+    unique_patids = len(set(no_accnr_patids))
+    duplicate_patids = [p for p in set(no_accnr_patids) if no_accnr_patids.count(p) > 1]
+    print(f"  Rows with empty report_accnr : {len(no_accnr)}")
+    print(f"    Unique patids              : {unique_patids}")
+    if duplicate_patids:
+        print(f"    Duplicate patids           : {duplicate_patids}")
+    else:
+        print(f"    All patids are unique      : True")
+    print()
+
     accnr_list = df[6][df[6] != ""].tolist()
 
     def _check(path: Path, label: str) -> None:
