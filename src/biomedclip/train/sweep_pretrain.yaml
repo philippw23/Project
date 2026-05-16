@@ -12,6 +12,8 @@ parameters:
     values: [1, 2, 4]
   lora_r:
     values: [4, 8, 16]
+  unfreeze_blocks:
+    values: [4, 6]
   lr:
     distribution: log_uniform_values
     min: 1e-5

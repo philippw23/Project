@@ -1,38 +1,25 @@
-"""Unified downstream malignancy classification script for all baselines.
+"""CheXFound supervised downstream malignancy classifier.
 
-Supports three baselines via --baseline:
-  biomedclip — BiomedCLIP ViT-B/16 (512 or 768-dim)
-  chexfound  — CheXFound ViT-L/16 (1024-dim)
+Loads the CheXFound ViT-L/16 encoder (continued-pretrain or frozen original
+weights) and trains a classification head on top.
 
-MLP input : [image_embedding | age (1, z-scored) | sex (1, binary)]
-MLP output: 3-class logits  (benign=0 / intermediate=1 / malignant=2)
+Head variants (--head):
+    linear       — single nn.Linear(1024, 3), no metadata
+    mlp          — MLP with age/sex late fusion  (default)
+    mlp_no_meta  — same MLP capacity, no clinical metadata
 
-Usage (BiomedCLIP, pretrained checkpoint):
-    python src/downstream.py \\
-        --baseline biomedclip \\
-        --biomedclip_checkpoint results/biomedclip_pretrain/.../best_val_checkpoint.pt \\
-        --splits results/biomedclip_pretrain/.../splits.json \\
-        --excel  data/metadata.xlsx
+Usage (continued-pretrain checkpoint):
+    python src/chexfound_downstream.py \\
+        --checkpoint results/chexfound_pretrain/.../checkpoint_last.pth \\
+        --splits     results/biomedclip_pretrain/.../splits.json \\
+        --excel      data/internal_dataset/metadata.xlsx
 
-Usage (BiomedCLIP, frozen vanilla):
-    python src/downstream.py \\
-        --baseline biomedclip --freezed_biomedclip \\
-        --splits ... --excel ...
-
-Usage (CheXFound, continued-pretrain checkpoint):
-    python src/downstream.py \\
-        --baseline chexfound \\
-        --chexfound_checkpoint results/chexfound_pretrain/.../checkpoint_last.pth \\
-        --splits ... --excel ...
-
-Usage (CheXFound, frozen original weights):
-    python src/downstream.py \\
-        --baseline chexfound \\
-        --chexfound_checkpoint none \\
+Usage (frozen original weights):
+    python src/chexfound_downstream.py \\
+        --checkpoint none \\
         --chexfound_weights /path/to/chexfound_vitl16.pth \\
         --splits ... --excel ...
 """
-
 from __future__ import annotations
 
 import argparse
@@ -55,89 +42,21 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.utils.misc import ROOT_DIR, DEFAULT_OUT_DIR
+from biomedclip.utils.misc import ROOT_DIR, DEFAULT_OUT_DIR, DEFAULT_SPLITS
 from biomedclip.data.datasets import (
     DownstreamDataset, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
 )
-
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
-from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
-
-DEFAULT_SPLITS = ROOT_DIR / "results" / "biomedclip_pretrain" / "splits.json"
+from biomedclip.models.classifier import LinearHead, MalignancyMLP, extract_embeddings
 
 _CHEXFOUND_DATA = ROOT_DIR / "src" / "chexfound" / "data"
 DEFAULT_CHEXFOUND_CONFIG     = _CHEXFOUND_DATA / "config.yaml"
 DEFAULT_CHEXFOUND_CHECKPOINT = _CHEXFOUND_DATA / "teacher_checkpoint.pth"
 
-
-# ── Encoder building ─────────────────────────────────────────────────────────
-
-def build_encoder(
-    args: argparse.Namespace,
-    device: torch.device,
-) -> tuple[nn.Module, object, object, int]:
-    """Return (encoder, train_transform, val_transform, embed_dim) for the selected baseline.
-
-    The returned encoder is frozen (all requires_grad=False) and placed on device.
-    """
-    if args.baseline == "biomedclip":
-        return _build_biomedclip_encoder(args, device)
-    elif args.baseline == "chexfound":
-        return _build_chexfound_encoder(args, device)
-    else:
-        raise ValueError(f"Unknown baseline: {args.baseline!r}")
+EMBED_DIM = 1024  # CheXFound ViT-L/16
 
 
-def _build_biomedclip_encoder(
-    args: argparse.Namespace,
-    device: torch.device,
-) -> tuple[nn.Module, object, object, int]:
-    import open_clip
-    from biomedclip.utils.misc import MODEL_TAG
-    from biomedclip.data.transforms import build_train_transform
-    from biomedclip.models.lora import inject_lora
-
-    print(f"Loading BiomedCLIP model: {MODEL_TAG}")
-    model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
-
-    if args.freezed_biomedclip:
-        print("Using vanilla BiomedCLIP encoder (no checkpoint, no LoRA).")
-    else:
-        ckpt = torch.load(args.biomedclip_checkpoint, map_location="cpu", weights_only=False)
-        lora_cfg = ckpt.get("lora_config") or {}
-        if not lora_cfg:
-            raise RuntimeError(
-                f"Checkpoint '{args.biomedclip_checkpoint}' has no 'lora_config'. "
-                "Re-run pretraining with the current biomedclip_pretrain.py."
-            )
-        inject_lora(model, lora_cfg["lora_layers"], lora_cfg["lora_r"], lora_cfg["lora_alpha"])
-        model.load_state_dict(ckpt["model_state_dict"])
-        print(
-            f"Loaded BiomedCLIP checkpoint: {args.biomedclip_checkpoint} "
-            f"(epoch {ckpt['epoch']}, val_loss={ckpt['val_loss']:.4f})"
-        )
-
-    if args.use_projected_features:
-        encoder = model.visual.to(device)
-        embed_dim = 512
-        print("BiomedCLIP encoder: projected features (512-dim)")
-    else:
-        encoder = model.visual.trunk.to(device)
-        embed_dim = 768
-        print("BiomedCLIP encoder: pre-projection ViT features (768-dim)")
-
-    for p in encoder.parameters():
-        p.requires_grad_(False)
-    encoder.eval()
-
-    preprocess_train = build_train_transform(preprocess_val)
-    return encoder, preprocess_train, preprocess_val, embed_dim
-
-
-def _build_chexfound_encoder(
-    args: argparse.Namespace,
-    device: torch.device,
-) -> tuple[nn.Module, object, object, int]:
+def build_encoder(args: argparse.Namespace, device: torch.device) -> tuple[nn.Module, object, object]:
     from chexfound.data.transforms import (
         build_preprocess_val_chexfound,
         build_train_transform_chexfound,
@@ -147,16 +66,13 @@ def _build_chexfound_encoder(
     preprocess_val   = build_preprocess_val_chexfound()
     preprocess_train = build_train_transform_chexfound(preprocess_val)
 
-    checkpoint = (
-        None if args.chexfound_checkpoint.lower() == "none" else args.chexfound_checkpoint
-    )
+    checkpoint = None if args.checkpoint.lower() == "none" else args.checkpoint
 
     if checkpoint is None:
         if not args.chexfound_weights:
             raise ValueError(
-                "--chexfound_weights is required for frozen baseline mode. "
-                "Provide the path to the original CheXFound .pth file, "
-                "or omit --chexfound_checkpoint to use the bundled checkpoint."
+                "--chexfound_weights is required when --checkpoint none. "
+                "Provide the path to the original CheXFound .pth file."
             )
         print("Loading frozen CheXFound baseline (original pretrained weights).")
         encoder = CheXFoundViT(
@@ -164,7 +80,7 @@ def _build_chexfound_encoder(
             lora_layers=0, r=8, alpha=16.0, load_pretrained=True,
         )
     else:
-        print(f"Loading CheXFound encoder from continued-pretrain checkpoint: {checkpoint}")
+        print(f"Loading CheXFound from continued-pretrain checkpoint: {checkpoint}")
         encoder = CheXFoundViT(
             args.chexfound_config, weights_path=None,
             lora_layers=0, r=8, alpha=16.0, load_pretrained=False,
@@ -175,21 +91,29 @@ def _build_chexfound_encoder(
         p.requires_grad_(False)
     encoder = encoder.to(device)
     encoder.eval()
+    return encoder, preprocess_train, preprocess_val
 
-    return encoder, preprocess_train, preprocess_val, 1024
 
+def build_head(args: argparse.Namespace, embed_dim: int, device: torch.device) -> nn.Module:
+    if args.head == "linear":
+        return LinearHead(embed_dim).to(device)
+    elif args.head == "mlp_no_meta":
+        return MalignancyMLP(embed_dim, args.hidden_dims, args.dropout,
+                             args.meta_embed_dim, use_meta=False).to(device)
+    else:  # mlp
+        return MalignancyMLP(embed_dim, args.hidden_dims, args.dropout,
+                             args.meta_embed_dim, use_meta=True).to(device)
 
-# ── Training / evaluation ─────────────────────────────────────────────────────
 
 def train_one_epoch(
-    mlp: nn.Module,
+    head: nn.Module,
     encoder: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
 ) -> float:
-    mlp.train()
+    head.train()
     encoder.eval()
     total_loss = 0.0
     for batch in loader:
@@ -202,7 +126,7 @@ def train_one_epoch(
             emb = F.normalize(encoder(images), dim=-1)
 
         optimizer.zero_grad()
-        logits = mlp(emb, age, sex)
+        logits = head(emb, age, sex)
         loss   = criterion(logits, lbl)
         loss.backward()
         optimizer.step()
@@ -213,75 +137,57 @@ def train_one_epoch(
 
 @torch.no_grad()
 def evaluate(
-    mlp: nn.Module,
+    head: nn.Module,
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
 ) -> tuple[float, float, np.ndarray, np.ndarray]:
-    mlp.eval()
+    head.eval()
     total_loss = 0.0
     all_preds, all_labels = [], []
     for emb, age, sex, lbl in loader:
         emb, age, sex, lbl = emb.to(device), age.to(device), sex.to(device), lbl.to(device)
-        logits = mlp(emb, age, sex)
+        logits = head(emb, age, sex)
         total_loss += criterion(logits, lbl).item()
         all_preds.append(logits.argmax(dim=1).cpu())
         all_labels.append(lbl.cpu())
 
     preds  = torch.cat(all_preds).numpy()
     labels = torch.cat(all_labels).numpy()
-    acc    = (preds == labels).mean()
-    return total_loss / len(loader), float(acc), preds, labels
-
-
-# ── Argparse ─────────────────────────────────────────────────────────────────
-
-def _str_to_bool(v: str) -> bool:
-    return str(v).lower() not in ("false", "0", "no", "none")
+    return total_loss / len(loader), float((preds == labels).mean()), preds, labels
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Unified downstream malignancy classifier for BiomedCLIP / CheXFound."
+        description="CheXFound downstream malignancy classifier."
     )
-
-    # ── Baseline selector ────────────────────────────────────────────────────
-    parser.add_argument("--baseline", required=True,
-                        choices=["biomedclip", "chexfound"],
-                        help="Which pretrained encoder to use.")
-
-    # ── BiomedCLIP-specific args ─────────────────────────────────────────────
-    parser.add_argument("--biomedclip_checkpoint",
-                        default=str(ROOT_DIR / "results" / "biomedclip_pretrain" / "best_r1_checkpoint.pt"),
-                        help="Path to BiomedCLIP pretrain checkpoint. Ignored when --baseline chexfound.")
-    parser.add_argument("--freezed_biomedclip", action="store_true",
-                        help="Use vanilla BiomedCLIP weights without a fine-tuned checkpoint.")
-    parser.add_argument("--use_projected_features", nargs="?", const=True,
-                        type=_str_to_bool, default=False,
-                        help="512-dim projected CLIP embedding instead of 768-dim ViT features.")
-
-    # ── CheXFound-specific args ───────────────────────────────────────────────
-    parser.add_argument("--chexfound_config",  default=str(DEFAULT_CHEXFOUND_CONFIG),
-                        help="CheXFound model config YAML.")
+    # ── CheXFound encoder ────────────────────────────────────────────────────
+    parser.add_argument("--checkpoint", default=str(DEFAULT_CHEXFOUND_CHECKPOINT),
+                        help="Continued-pretrain checkpoint. Pass 'none' for frozen baseline mode.")
+    parser.add_argument("--chexfound_config",  default=str(DEFAULT_CHEXFOUND_CONFIG))
     parser.add_argument("--chexfound_weights", default=None,
                         help="Original CheXFound .pth checkpoint (frozen baseline mode only).")
-    parser.add_argument("--chexfound_checkpoint", default=str(DEFAULT_CHEXFOUND_CHECKPOINT),
-                        help="Continued-pretrain checkpoint. Pass 'none' for frozen baseline mode.")
 
-    # ── Data / splits ─────────────────────────────────────────────────────────
+    # ── Data ──────────────────────────────────────────────────────────────────
     parser.add_argument("--splits",   default=str(DEFAULT_SPLITS))
     parser.add_argument("--out_dir",  default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--use_mask", action="store_true")
 
-    # ── Training hyperparameters ──────────────────────────────────────────────
-    parser.add_argument("--epochs",        type=int,   default=50)
-    parser.add_argument("--patience",      type=int,   default=10)
-    parser.add_argument("--batch_size",    type=int,   default=64)
-    parser.add_argument("--lr",            type=float, default=1e-3)
-    parser.add_argument("--dropout",       type=float, default=0.3)
-    parser.add_argument("--meta_embed_dim", type=int,  default=16)
-    parser.add_argument("--hidden_dims",   type=str,   nargs="+", default=[256, 128])
-    parser.add_argument("--weight_decay",  type=float, default=0.01)
+    # ── Head variant ─────────────────────────────────────────────────────────
+    parser.add_argument("--head", default="mlp",
+                        choices=["linear", "mlp", "mlp_no_meta"])
+
+    # ── Training hyperparameters ─────────────────────────────────────────────
+    parser.add_argument("--epochs",         type=int,   default=50)
+    parser.add_argument("--patience",       type=int,   default=10)
+    parser.add_argument("--early_stopping_metric", default="val_loss",
+                        choices=["val_loss", "val_bal_acc"])
+    parser.add_argument("--batch_size",     type=int,   default=64)
+    parser.add_argument("--lr",             type=float, default=1e-3)
+    parser.add_argument("--dropout",        type=float, default=0.3)
+    parser.add_argument("--meta_embed_dim", type=int,   default=16)
+    parser.add_argument("--hidden_dims",    type=str,   nargs="+", default=[256, 128])
+    parser.add_argument("--weight_decay",   type=float, default=0.01)
 
     # ── Loss function ─────────────────────────────────────────────────────────
     parser.add_argument("--loss", default="ce",
@@ -297,46 +203,37 @@ def parse_args(argv=None) -> argparse.Namespace:
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)
     parser.add_argument("--wandb",         action="store_true")
-    parser.add_argument("--wandb_project", default=None,
-                        help="W&B project name. Defaults to '{baseline}-downstream'.")
+    parser.add_argument("--wandb_project", default="chexfound-downstream")
     parser.add_argument("--wandb_run",     default=None)
     parser.add_argument("--wandb_entity",  default=None)
     parser.add_argument("--sweep",         action="store_true")
 
     args = parser.parse_args(argv)
-
     raw = " ".join(str(x) for x in args.hidden_dims)
     args.hidden_dims = [int(x) for x in raw.strip("[]").replace(",", " ").split()]
-
-    if args.wandb_project is None:
-        args.wandb_project = f"{args.baseline}-downstream"
-
     return args
 
 
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     cfg = wandb.config
-    sweep_keys = (
+    for key in (
         "lr", "dropout", "meta_embed_dim", "weight_decay", "loss",
         "class_weighting", "label_smoothing", "focal_gamma", "cb_beta",
-        "ldam_max_margin", "ldam_scale", "batch_size", "use_projected_features",
-    )
-    for key in sweep_keys:
+        "ldam_max_margin", "ldam_scale", "batch_size", "head",
+        "early_stopping_metric",
+    ):
         if key in cfg:
             setattr(args, key, cfg[key])
     if "hidden_dims" in cfg:
         args.hidden_dims = list(cfg["hidden_dims"])
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-
 def main(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}  |  Baseline: {args.baseline}")
+    print(f"Device: {device}  |  Head: {args.head}  |  Early-stopping: {args.early_stopping_metric}")
 
-    # ── W&B ──────────────────────────────────────────────────────────────────
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
     if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
         warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
@@ -351,11 +248,17 @@ def main(args: argparse.Namespace) -> None:
             _apply_sweep_config(args)
 
     # ── Encoder ───────────────────────────────────────────────────────────────
-    encoder, preprocess_train, preprocess_val, embed_dim = build_encoder(args, device)
+    encoder, preprocess_train, preprocess_val = build_encoder(args, device)
+    print(f"CheXFound encoder loaded ({EMBED_DIM}-dim), frozen")
 
     # ── Data ──────────────────────────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
-        splits = json.load(fh)
+        raw = json.load(fh)
+    splits = {
+        "train": raw["train"],
+        "val":   raw["val"],
+        "test":  raw["test"],
+    }
 
     all_samples    = splits["train"] + splits["val"] + splits["test"]
     age_sex_lookup = {Path(s["image"]).stem: (float(s["age"]), float(s["sex"])) for s in all_samples}
@@ -379,7 +282,6 @@ def main(args: argparse.Namespace) -> None:
     val_loader_raw  = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
     test_loader_raw = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
-    # ── Pre-compute val/test embeddings ───────────────────────────────────────
     print("Pre-computing val/test embeddings...")
     val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader_raw,  device)
     test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
@@ -393,51 +295,44 @@ def main(args: argparse.Namespace) -> None:
     )
     label_counts  = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
     class_weights = compute_class_weights(
-        label_counts,
-        num_classes=NUM_CLASSES,
-        mode=args.class_weighting,
-        beta=args.cb_beta,
-        device=device,
+        label_counts, num_classes=NUM_CLASSES, mode=args.class_weighting,
+        beta=args.cb_beta, device=device,
     )
     print(f"Class counts (train): { {IDX_TO_LABEL[i]: int(label_counts[i]) for i in range(NUM_CLASSES)} }")
-    if class_weights is None:
-        print("Class weights (train): none")
-    else:
-        print(f"Class weights (train): { {IDX_TO_LABEL[i]: float(class_weights[i]) for i in range(NUM_CLASSES)} }")
     print(f"Loss: {args.loss} | class_weighting={args.class_weighting}")
 
     val_emb_ds  = EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl)
     test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
-
     val_loader  = DataLoader(val_emb_ds,  batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
 
-    # ── MLP, loss, optimiser ──────────────────────────────────────────────────
-    mlp       = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim).to(device)
+    # ── Head, loss, optimiser ─────────────────────────────────────────────────
+    head      = build_head(args, embed_dim, device)
     criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
-    optimizer = torch.optim.AdamW(mlp.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    out_dir = Path(args.out_dir) / f"{args.baseline}_downstream"
+    out_dir = Path(args.out_dir) / "chexfound_downstream"
     out_dir.mkdir(parents=True, exist_ok=True)
-
     run_id    = (wandb.run.id if use_wandb and wandb.run else None) or "local"
-    ckpt_path = out_dir / f"best_mlp_{run_id}.pt"
+    ckpt_path = out_dir / f"best_head_{run_id}.pt"
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    best_val_loss = float("inf")
+    maximize_metric  = args.early_stopping_metric == "val_bal_acc"
+    best_metric      = -float("inf") if maximize_metric else float("inf")
     patience_counter = 0
-    print(f"\nTraining MLP for {args.epochs} epochs (patience={args.patience})\n")
+    print(f"\nTraining {args.head} head for {args.epochs} epochs "
+          f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss                               = train_one_epoch(mlp, encoder, train_loader, optimizer, criterion, device)
-        val_loss, val_acc, val_preds, val_labels = evaluate(mlp, val_loader, criterion, device)
+        train_loss                               = train_one_epoch(head, encoder, train_loader, optimizer, criterion, device)
+        val_loss, val_acc, val_preds, val_labels = evaluate(head, val_loader, criterion, device)
         val_bal_acc      = balanced_accuracy_score(val_labels, val_preds)
         val_combined_acc = 0.5 * val_acc + 0.5 * val_bal_acc
 
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
-            f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.3f} | "
-            f"val_bal_acc={val_bal_acc:.3f} | val_combined_acc={val_combined_acc:.3f}"
+            f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
+            f"val_acc={val_acc:.3f} | val_bal_acc={val_bal_acc:.3f} | val_combined_acc={val_combined_acc:.3f}"
         )
         if use_wandb:
             wandb.log({
@@ -448,11 +343,18 @@ def main(args: argparse.Namespace) -> None:
                 "val/combined_acc": val_combined_acc,
             }, step=epoch)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        current_metric = val_bal_acc if maximize_metric else val_loss
+        improved = current_metric > best_metric if maximize_metric else current_metric < best_metric
+        if improved:
+            best_metric      = current_metric
             patience_counter = 0
-            torch.save({"epoch": epoch, "mlp_state_dict": mlp.state_dict(), "val_loss": val_loss},
-                       ckpt_path)
+            torch.save({
+                "epoch": epoch,
+                "head_state_dict": head.state_dict(),
+                "val_loss": val_loss,
+                "val_bal_acc": val_bal_acc,
+                "head": args.head,
+            }, ckpt_path)
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
@@ -460,10 +362,10 @@ def main(args: argparse.Namespace) -> None:
                 break
 
     # ── Test evaluation ───────────────────────────────────────────────────────
-    mlp.load_state_dict(
-        torch.load(ckpt_path, map_location=device, weights_only=False)["mlp_state_dict"]
+    head.load_state_dict(
+        torch.load(ckpt_path, map_location=device, weights_only=False)["head_state_dict"]
     )
-    test_loss, test_acc, test_preds, test_labels = evaluate(mlp, test_loader, criterion, device)
+    test_loss, test_acc, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
 
     label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
     print("\n" + "=" * 60)
@@ -475,8 +377,7 @@ def main(args: argparse.Namespace) -> None:
     print()
     print(classification_report(
         test_labels, test_preds,
-        labels=list(range(NUM_CLASSES)),
-        target_names=label_names,
+        labels=list(range(NUM_CLASSES)), target_names=label_names,
         digits=3, zero_division=0,
     ))
     print("Confusion matrix (rows=true, cols=pred):")
@@ -496,8 +397,7 @@ def main(args: argparse.Namespace) -> None:
         log_dict = {
             "test/loss": test_loss, "test/acc": test_acc,
             "test/balanced_acc": test_bal_acc,
-            "test/precision_macro": test_prec,
-            "test/recall_macro": test_rec,
+            "test/precision_macro": test_prec, "test/recall_macro": test_rec,
             "test/f1_macro": test_f1,
         }
         for i, name in enumerate(label_names):
@@ -507,7 +407,7 @@ def main(args: argparse.Namespace) -> None:
         wandb.log(log_dict)
         wandb.finish()
 
-    print(f"\nBest val loss: {best_val_loss:.4f}")
+    print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
     print(f"Checkpoints saved to: {out_dir}")
 
 

@@ -15,8 +15,10 @@ Usage example:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import random
+import shutil
 import sys
 import warnings
 from datetime import datetime
@@ -37,20 +39,41 @@ except ImportError:
 
 from biomedclip.utils.misc import (
     MODEL_TAG,
-    DEFAULT_IMAGES_DIR,
-    DEFAULT_MASKS_DIR,
-    DEFAULT_EXCEL,
-    DEFAULT_REPORTS,
+    DEFAULT_DATASET_JSON,
     DEFAULT_OUT_DIR,
     save_checkpoint,
     print_biomedclip_architecture,
 )
 from biomedclip.data.transforms import build_train_transform
-from biomedclip.data.splits import build_stratified_splits, build_pretrain_datasets
+from biomedclip.data.splits import build_stratified_splits
+from biomedclip.data.datasets import BoneTumorPairDataset
 from biomedclip.models.lora import inject_lora, count_trainable_params
 from biomedclip.loss.contrastive import clip_loss
 from biomedclip.eval.retrieval import evaluate, evaluate_retrieval
 
+def _unfreeze_last_blocks(model: nn.Module, unfreeze_blocks: int) -> None:
+    """Freeze the whole model then unfreeze the last N ViT blocks plus projection layers.
+
+    Used for partial fine-tuning without LoRA.  The text encoder body stays frozen.
+    Unfrozen also: model.logit_scale, model.visual.head, and model.text.proj.
+    """
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    blocks   = model.visual.trunk.blocks
+    n_blocks = len(blocks)
+    effective = min(unfreeze_blocks, n_blocks)
+    for block in blocks[n_blocks - effective:]:
+        for p in block.parameters():
+            p.requires_grad_(True)
+
+    model.logit_scale.requires_grad_(True)
+    if hasattr(model.visual, "head") and model.visual.head is not None:
+        for p in model.visual.head.parameters():
+            p.requires_grad_(True)
+    if hasattr(model.text, "proj") and model.text.proj is not None:
+        for p in model.text.proj.parameters():
+            p.requires_grad_(True)
 
 def make_scheduler(
     optimizer: torch.optim.Optimizer,
@@ -124,17 +147,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="BiomedCLIP contrastive pretraining with LoRA on the ViT encoder."
     )
-    parser.add_argument("--excel",   default=str(DEFAULT_EXCEL),
-                        help="Path to metadata.xlsx (default: %(default)s)")
-    parser.add_argument("--reports", default=str(DEFAULT_REPORTS),
-                        help="Path to reports JSON (default: %(default)s)")
-    parser.add_argument("--english", action="store_true",
-                        help="Read befund_en/beurteilung_en instead of befund/beurteilung "
-                             "(use with translated_reports.json).")
-    parser.add_argument("--images",  default=str(DEFAULT_IMAGES_DIR),
-                        help="Directory containing image PNGs (default: %(default)s)")
-    parser.add_argument("--masks",   default=str(DEFAULT_MASKS_DIR),
-                        help="Directory containing segmentation mask PNGs (default: %(default)s)")
+    parser.add_argument("--splits", default=None,
+                        help="Path to a pre-existing split.json (from create_split.py). "
+                             "If omitted, a new split is generated from --dataset.")
+    parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON),
+                        help="Path to dataset_full.json — used only when --splits is omitted "
+                             "(default: %(default)s)")
     parser.add_argument("--out_dir", default=str(DEFAULT_OUT_DIR),
                         help="Output directory for checkpoints (default: %(default)s)")
     parser.add_argument("--print_architecture", action="store_true",
@@ -147,6 +165,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="LoRA rank r (default: %(default)s)")
     parser.add_argument("--lora_alpha", type=float, default=16.0,
                         help="LoRA alpha scaling factor (default: %(default)s)")
+    parser.add_argument("--no_lora", action="store_true",
+                        help="Skip LoRA; instead fully unfreeze the last --unfreeze_blocks ViT blocks.")
+    parser.add_argument("--unfreeze_blocks", type=int, default=4,
+                        help="For --no_lora: number of last ViT blocks to unfreeze (default: %(default)s)")
+    parser.add_argument("--lr_blocks", type=float, default=1e-5,
+                        help="LR for unfrozen ViT blocks in partial fine-tune mode (default: %(default)s)")
     parser.add_argument("--use_mask",  action="store_true",
                         help="Crop images around the lesion using segmentation masks")
     parser.add_argument("--batch_size", type=int,   default=32,
@@ -183,11 +207,12 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     """Overwrite args with values from wandb.config when running as sweep agent."""
     cfg = wandb.config
-    for key in ("lora_layers", "lora_r", "lr", "weight_decay", "batch_size"):
+    for key in ("lora_layers", "lora_r", "lr", "weight_decay", "batch_size", "unfreeze_blocks", "lr_blocks"):
         if key in cfg:
             setattr(args, key, cfg[key])
-    # Keep alpha proportional to rank (a common LoRA convention).
-    args.lora_alpha = 2.0 * args.lora_r
+    if not args.no_lora:
+        # Keep alpha proportional to rank (a common LoRA convention).
+        args.lora_alpha = 2.0 * args.lora_r
 
 
 def main(args: argparse.Namespace) -> None:
@@ -218,32 +243,48 @@ def main(args: argparse.Namespace) -> None:
     tokenizer = open_clip.get_tokenizer(MODEL_TAG)
     model = model.to(device)
     # Adds random horizontal flip, colour jitter, and random resized crop on top of val_preprocess.
-    preprocess_train = build_train_transform(preprocess_val)
+    augment_transform = build_train_transform(preprocess_val)
 
-    # Freeze all parameters, then inject trainable LoRA branches into the last
-    # lora_layers ViT blocks and unfreeze logit_scale and visual.proj.
-    inject_lora(model, args.lora_layers, args.lora_r, args.lora_alpha)
+    if args.no_lora:
+        _unfreeze_last_blocks(model, args.unfreeze_blocks)
+        print(f"Partial fine-tune: last {args.unfreeze_blocks} ViT blocks unfrozen (no LoRA)")
+    else:
+        inject_lora(model, args.lora_layers, args.lora_r, args.lora_alpha)
+        print(
+            f"LoRA injected into last {args.lora_layers} ViT blocks "
+            f"(r={args.lora_r}, alpha={args.lora_alpha})"
+        )
     n_trainable = count_trainable_params(model)
     n_total     = sum(p.numel() for p in model.parameters())
-    print(
-        f"LoRA injected into last {args.lora_layers} ViT blocks "
-        f"(r={args.lora_r}, alpha={args.lora_alpha})"
-    )
     print(f"Trainable params: {n_trainable:,} / {n_total:,} ({100 * n_trainable / n_total:.2f} %)")
 
     # ── Output directory ──────────────────────────────────────────────────────
-    run_dir = Path(args.out_dir) / "biomedclip_pretrain" / datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    if args.no_lora:
+        tune_tag = f"unfreeze{args.unfreeze_blocks}"
+    else:
+        tune_tag = f"lora{args.lora_layers}"
+    run_name = f"run_bs{args.batch_size}_{tune_tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(args.out_dir) / "biomedclip_pretrain" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run directory: {run_dir}")
 
     # ── Data splits and datasets ───────────────────────────────────────────────
-    # Stratified split by malignancy label; splits.json is written to run_dir.
-    pretrain_samples, _, _, _ = build_stratified_splits(args, run_dir=run_dir)
+    if args.splits is not None:
+        with open(args.splits, encoding="utf-8") as fh:
+            split_data = json.load(fh)
+        shutil.copy(args.splits, run_dir / "split.json")
+        train_samples = split_data["train"]
+        val_samples   = split_data["val"]
+        print(f"Loaded split from {args.splits} ({len(train_samples)} train, {len(val_samples)} val samples)")
+    else:
+        train_samples, val_samples, _ = build_stratified_splits(args, run_dir=run_dir)
 
-    # train_ds applies preprocess_train (with augmentations); val_ds uses preprocess_val.
-    train_ds, val_ds = build_pretrain_datasets(
-        pretrain_samples, preprocess_train, preprocess_val, tokenizer, args.use_mask, args.seed
-    )
+    def _to_tuples(samples: list[dict]) -> list[tuple]:
+        return [(Path(s["image"]), Path(s["mask"]), s["report"]) for s in samples]
+
+    train_ds = BoneTumorPairDataset(_to_tuples(train_samples), augment_transform, tokenizer, args.use_mask)
+    val_ds   = BoneTumorPairDataset(_to_tuples(val_samples),   preprocess_val,   tokenizer, args.use_mask)
+    print(f"Pretrain datasets: {len(train_ds)} train / {len(val_ds)} monitor-val")
 
     use_pin_memory = device.type == "cuda"
     train_loader = DataLoader(
@@ -251,11 +292,14 @@ def main(args: argparse.Namespace) -> None:
         shuffle=True,
         num_workers=4,
         pin_memory=use_pin_memory,
-        drop_last=len(train_ds) > args.batch_size,  # discard a tiny last batch
+        drop_last=False,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4,
+        val_ds, batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=4,
         pin_memory=use_pin_memory,
+        drop_last=False,
     )
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
@@ -264,24 +308,51 @@ def main(args: argparse.Namespace) -> None:
     no_decay_suffixes = ("bias", "norm.weight", "norm.bias", "ln_1.weight", "ln_1.bias",
                          "ln_2.weight", "ln_2.bias", "ln_pre.weight", "ln_pre.bias",
                          "ln_post.weight", "ln_post.bias")
-    decay_params, no_decay_params = [], []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if name.endswith(no_decay_suffixes):
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
-    trainable_params = decay_params + no_decay_params
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": decay_params,    "weight_decay": args.weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ],
-        lr=args.lr,
-        betas=(0.9, 0.98),  # standard CLIP betas
-        eps=1e-6,
-    )
+
+    if args.no_lora:
+        # Differential LR: unfrozen ViT block params use a low LR to avoid
+        # destabilising pretrained representations; projection and logit_scale
+        # use the full (higher) LR to adapt the contrastive head quickly.
+        proj_param_names = {"visual.head", "text.proj", "logit_scale"}
+        block_decay, block_no_decay, proj_params = [], [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if any(name == pn or name.startswith(pn + ".") for pn in proj_param_names):
+                proj_params.append(param)
+            elif name.endswith(no_decay_suffixes):
+                block_no_decay.append(param)
+            else:
+                block_decay.append(param)
+        trainable_params = block_decay + block_no_decay + proj_params
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": block_decay,    "lr": args.lr_blocks, "weight_decay": args.weight_decay},
+                {"params": block_no_decay, "lr": args.lr_blocks, "weight_decay": 0.0},
+                {"params": proj_params,    "lr": args.lr,        "weight_decay": 0.0},
+            ],
+            betas=(0.9, 0.98),
+            eps=1e-6,
+        )
+    else:
+        decay_params, no_decay_params = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.endswith(no_decay_suffixes):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+        trainable_params = decay_params + no_decay_params
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": decay_params,    "weight_decay": args.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
+            lr=args.lr,
+            betas=(0.9, 0.98),  # standard CLIP betas
+            eps=1e-6,
+        )
 
     # Warm-up for the first 20 % of epochs, then cosine decay to 0.
     warmup_epochs = max(1, args.epochs // 5)
@@ -318,7 +389,11 @@ def main(args: argparse.Namespace) -> None:
     best_val_loss     = float("inf")
     best_mean_r1      = 0.0          # average of I2T R@1 and T2I R@1
     epochs_no_improve = 0            # consecutive epochs without R@1 improvement
-    lora_config = {"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha}
+    lora_config = (
+        {"no_lora": True, "unfreeze_blocks": args.unfreeze_blocks}
+        if args.no_lora
+        else {"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha}
+    )
 
     print(f"\nStarting training for {args.epochs} epochs (warmup: {warmup_epochs})\n")
 

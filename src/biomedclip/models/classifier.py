@@ -9,55 +9,69 @@ from tqdm import tqdm
 from biomedclip.data.datasets import NUM_CLASSES
 
 
+class LinearHead(nn.Module):
+    """Single linear layer — no metadata, no non-linearities (true linear probe)."""
+
+    def __init__(self, embed_dim: int) -> None:
+        super().__init__()
+        self.fc = nn.Linear(embed_dim, NUM_CLASSES)
+
+    def forward(
+        self,
+        image_emb: torch.Tensor,
+        age: torch.Tensor | None = None,
+        sex: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.fc(image_emb)
+
+
 class MalignancyMLP(nn.Module):
-    """Late-fusion MLP classifier for 3-class bone-tumour malignancy prediction.
+    """Non-linear MLP classifier for 3-class bone-tumour malignancy prediction.
 
-    Architecture (late fusion):
-        age, sex  →  Linear(2, meta_embed_dim) + ReLU  →  meta_emb
-                                                                ↘
-        image_emb  ──────────────────────────────────→  cat  →  [Linear+ReLU+Dropout] × N  →  3 logits
-
-    The image embedding (either 512-dim projected or 768-dim pre-projection) is
-    concatenated with a small learned projection of the two clinical metadata
-    features (age, sex) before being passed through the classifier MLP.
+    When use_meta=True (default), age and sex are projected and fused with the
+    image embedding before the MLP stack (late fusion).  When use_meta=False,
+    only the image embedding is used — same non-linear capacity, no clinical info.
 
     Output classes:  0 = benign  |  1 = intermediate  |  2 = malignant
     """
 
     def __init__(
         self,
-        embed_dim: int,         # dimensionality of the image embedding (512 or 768)
-        hidden_dims: list[int], # widths of the hidden layers, e.g. [256, 128]
-        dropout: float,         # dropout probability applied after each hidden ReLU
-        meta_embed_dim: int = 32,  # size of the age/sex projection before fusion
+        embed_dim: int,
+        hidden_dims: list[int],
+        dropout: float,
+        meta_embed_dim: int = 32,
+        use_meta: bool = True,
     ) -> None:
         super().__init__()
+        self.use_meta = use_meta
 
-        # Project the two scalar clinical features (age, sex) to a small vector
-        # so the MLP can learn a non-linear encoding of them.
-        self.meta_proj = nn.Sequential(
-            nn.Linear(2, meta_embed_dim),
-            nn.ReLU(),
-        )
+        if use_meta:
+            self.meta_proj = nn.Sequential(nn.Linear(2, meta_embed_dim), nn.ReLU())
+            in_dim = embed_dim + meta_embed_dim
+        else:
+            self.meta_proj = None
+            in_dim = embed_dim
 
-        # Build the classifier stack: Linear → ReLU → Dropout, repeated per hidden layer.
-        in_dim = embed_dim + meta_embed_dim  # fused input dimension after concatenation
         layers: list[nn.Module] = []
         for h in hidden_dims:
             layers += [nn.Linear(in_dim, h), nn.ReLU(), nn.Dropout(dropout)]
             in_dim = h
-        layers.append(nn.Linear(in_dim, NUM_CLASSES))  # final projection to 3 logits
+        layers.append(nn.Linear(in_dim, NUM_CLASSES))
         self.net = nn.Sequential(*layers)
 
     def forward(
         self,
-        image_emb: torch.Tensor,  # (B, embed_dim) — L2-normalised image embedding
-        age: torch.Tensor,         # (B,) — z-scored age
-        sex: torch.Tensor,         # (B,) — binary sex indicator (0/1)
-    ) -> torch.Tensor:             # (B, 3) — raw class logits
-        meta     = torch.stack([age, sex], dim=1)  # (B, 2) — combine clinical scalars
-        meta_emb = self.meta_proj(meta)             # (B, meta_embed_dim)
-        x        = torch.cat([image_emb, meta_emb], dim=1)  # (B, embed_dim + meta_embed_dim)
+        image_emb: torch.Tensor,
+        age: torch.Tensor | None = None,
+        sex: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.use_meta:
+            meta     = torch.stack([age, sex], dim=1)
+            meta_emb = self.meta_proj(meta)
+            x        = torch.cat([image_emb, meta_emb], dim=1)
+        else:
+            x = image_emb
         return self.net(x)
 
 

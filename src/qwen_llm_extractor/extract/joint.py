@@ -97,12 +97,17 @@ def main(args: argparse.Namespace) -> None:
     with open(args.input, encoding="utf-8") as fh:
         source_reports: list[dict] = json.load(fh)
 
-    # Resume: load already-processed entries keyed by patid
+    def _entry_key(e: dict) -> str:
+        """Unique key per report: accnr if present, else patid."""
+        accnr = str(e.get("accnr", "")).strip()
+        return accnr if accnr else str(e.get("patid", ""))
+
+    # Resume: load already-processed entries keyed by accnr (or patid as fallback)
     out_path = Path(args.output)
     completed: dict[str, dict] = {}
     if out_path.exists():
         with open(out_path, encoding="utf-8") as fh:
-            completed = {str(e["patid"]): e for e in json.load(fh)}
+            completed = {_entry_key(e): e for e in json.load(fh)}
         print(f"Resuming: {len(completed)} entries already processed.")
 
     befund_key = "befund_en" if args.english else "befund"
@@ -110,7 +115,7 @@ def main(args: argparse.Namespace) -> None:
 
     to_process = [
         e for e in source_reports
-        if str(e.get("patid", "")) not in completed
+        if _entry_key(e) not in completed
         and (e.get(befund_key, "").strip() or e.get(beur_key, "").strip())
     ]
     if args.max:
@@ -126,6 +131,7 @@ def main(args: argparse.Namespace) -> None:
     all_patids:  list[str]  = []
 
     for entry in tqdm(to_process, desc="LLM inference"):
+        key   = _entry_key(entry)
         patid = str(entry.get("patid", ""))
 
         parts = []
@@ -144,7 +150,7 @@ def main(args: argparse.Namespace) -> None:
         result["patid"] = patid
 
         if "error" in result:
-            tqdm.write(f"  [error] patid={patid} — {result['error'][:80]}")
+            tqdm.write(f"  [error] key={key} — {result['error'][:80]}")
 
         # Merge phrase lists back into the source entry; keep source fields intact
         merged = {
@@ -152,7 +158,7 @@ def main(args: argparse.Namespace) -> None:
             "befund_phrases":      result.get("befund_phrases", []),
             "beurteilung_phrases": result.get("beurteilung_phrases", []),
         }
-        completed[patid] = merged
+        completed[key] = merged
         all_results.append(result)
         all_patids.append(patid)
 

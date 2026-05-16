@@ -58,12 +58,11 @@ except ImportError:
 
 from biomedclip.data.datasets import (DownstreamDataset, IDX_TO_LABEL,
                                        LABEL_TO_IDX, NUM_CLASSES)
-from biomedclip.data.splits import build_stratified_splits, load_age_sex_lookup
+from biomedclip.data.splits import build_stratified_splits
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.loss.contrastive import clip_loss
 from biomedclip.models.classifier import MalignancyMLP
-from biomedclip.utils.misc import (DEFAULT_EXCEL, DEFAULT_IMAGES_DIR, DEFAULT_MASKS_DIR,
-                                    DEFAULT_OUT_DIR, DEFAULT_REPORTS)
+from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_OUT_DIR
 from scratch_img.data.transforms import build_train_transform, build_val_transform
 from scratch_img.models.encoders import build_encoder
 from scratch_img_text.data.datasets import DownstreamDatasetWithText
@@ -180,13 +179,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     parser.add_argument("--encoder", required=True, choices=["resnet18", "vit_tiny"])
 
-    parser.add_argument("--splits",   default=None,
-                        help="Path to a pre-existing splits.json. If omitted, splits are generated.")
-    parser.add_argument("--excel",    default=str(DEFAULT_EXCEL))
-    parser.add_argument("--reports",  default=str(DEFAULT_REPORTS),
-                        help="Path to full_reports.json (used when generating splits).")
-    parser.add_argument("--english",  action="store_true",
-                        help="Use English report text for the pretrain set (only when generating splits).")
+    parser.add_argument("--splits",  default=None,
+                        help="Path to a pre-existing split.json. If omitted, splits are generated.")
+    parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON),
+                        help="Path to dataset_full.json (default: %(default)s)")
     parser.add_argument("--downstream_train_frac", type=float, default=0.8)
     parser.add_argument("--downstream_val_frac",   type=float, default=0.1)
     parser.add_argument("--test_frac",             type=float, default=0.1)
@@ -308,45 +304,29 @@ def main(args: argparse.Namespace) -> None:
     # ── Data ──────────────────────────────────────────────────────────────────
     if args.splits is not None:
         with open(args.splits, encoding="utf-8") as fh:
-            splits = json.load(fh)
-    else:
-        args.images = str(DEFAULT_IMAGES_DIR)
-        args.masks  = str(DEFAULT_MASKS_DIR)
-        _, downstream_train, downstream_val, test = build_stratified_splits(args, run_dir=Path(args.out_dir))
+            raw = json.load(fh)
         splits = {
-            "downstream_train": [
-                {"image": str(s[0]), "mask": str(s[1]), "befund_en": s[2], "beurteilung_en": s[3],
-                 "befund_phrases": s[4], "beurteilung_phrases": s[5],
-                 "label": s[6], "age": s[7], "sex": s[8], "patid": s[9]}
-                for s in downstream_train
-            ],
-            "downstream_val": [
-                {"image": str(s[0]), "mask": str(s[1]), "befund_en": s[2], "beurteilung_en": s[3],
-                 "befund_phrases": s[4], "beurteilung_phrases": s[5],
-                 "label": s[6], "age": s[7], "sex": s[8], "patid": s[9]}
-                for s in downstream_val
-            ],
-            "test": [
-                {"image": str(s[0]), "mask": str(s[1]), "befund_en": s[2], "beurteilung_en": s[3],
-                 "befund_phrases": s[4], "beurteilung_phrases": s[5],
-                 "label": s[6], "age": s[7], "sex": s[8], "patid": s[9]}
-                for s in test
-            ],
+            "train": raw["train"],
+            "val":   raw["val"],
+            "test":  raw["test"],
         }
+    else:
+        train, val, test = build_stratified_splits(args, run_dir=Path(args.out_dir))
+        splits = {"train": train, "val": val, "test": test}
 
     if args.overfit_n > 0:
-        subset = splits["downstream_train"][:args.overfit_n]
-        splits["downstream_train"] = subset
-        splits["downstream_val"]   = subset
-        splits["test"]             = subset
+        subset = splits["train"][:args.overfit_n]
+        splits["train"] = subset
+        splits["val"]   = subset
+        splits["test"]  = subset
 
-    age_sex_lookup = load_age_sex_lookup(Path(args.excel))
+    all_samples = splits["train"] + splits["val"] + splits["test"]
+    age_sex_lookup = {
+        Path(s["image"]).stem: (float(s["age"]), float(s["sex"]))
+        for s in all_samples
+    }
 
-    train_ages = [
-        age_sex_lookup[Path(s["image"]).stem][0]
-        for s in splits["downstream_train"]
-        if Path(s["image"]).stem in age_sex_lookup
-    ]
+    train_ages = [s["age"] for s in splits["train"]]
     age_mean = float(np.mean(train_ages))
     age_std  = float(np.std(train_ages))
 
@@ -354,14 +334,14 @@ def main(args: argparse.Namespace) -> None:
     preprocess_val   = build_val_transform()
 
     train_ds = DownstreamDatasetWithText(
-        splits["downstream_train"], age_sex_lookup, age_mean, age_std,
+        splits["train"], age_sex_lookup, age_mean, age_std,
         preprocess_train, tokenizer, max_text_len=args.max_text_len, use_mask=args.use_mask,
     )
     # Val and test are image-only (reports not available for most samples)
-    val_ds  = DownstreamDataset(splits["downstream_val"], age_sex_lookup, age_mean, age_std,
-                                 preprocess_val,  use_mask=args.use_mask)
-    test_ds = DownstreamDataset(splits["test"],           age_sex_lookup, age_mean, age_std,
-                                 preprocess_val,  use_mask=args.use_mask)
+    val_ds  = DownstreamDataset(splits["val"],  age_sex_lookup, age_mean, age_std,
+                                 preprocess_val, use_mask=args.use_mask)
+    test_ds = DownstreamDataset(splits["test"], age_sex_lookup, age_mean, age_std,
+                                 preprocess_val, use_mask=args.use_mask)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
     use_pin       = device.type == "cuda"
@@ -453,6 +433,9 @@ def main(args: argparse.Namespace) -> None:
                 "epoch": epoch,
                 "encoder_state_dict": encoder.state_dict(),
                 "mlp_state_dict": mlp.state_dict(),
+                "text_enc_state_dict": text_enc.state_dict(),
+                "img_proj_state_dict": img_proj.state_dict(),
+                "txt_proj_state_dict": txt_proj.state_dict(),
                 "val_loss": val_loss,
                 "args": vars(args),
             }, ckpt_path)

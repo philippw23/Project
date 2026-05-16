@@ -7,13 +7,15 @@ import torch.nn as nn
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 
-MODEL_TAG          = "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
-DEFAULT_IMAGES_DIR = ROOT_DIR / "data" / "internal_dataset" / "images"
-DEFAULT_MASKS_DIR  = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
-DEFAULT_EXCEL      = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
-DEFAULT_REPORTS    = ROOT_DIR / "data" / "internal_dataset" / "text" / "full_reports.json"
-DEFAULT_OUT_DIR    = ROOT_DIR / "results"
-DEFAULT_SPLIT_DIR  = ROOT_DIR / "data" / "internal_dataset"
+MODEL_TAG            = "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+DEFAULT_IMAGES_DIR   = ROOT_DIR / "data" / "internal_dataset" / "images"
+DEFAULT_MASKS_DIR    = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
+DEFAULT_EXCEL        = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
+DEFAULT_REPORTS      = ROOT_DIR / "data" / "internal_dataset" / "text" / "full_reports.json"
+DEFAULT_DATASET_JSON = ROOT_DIR / "data" / "internal_dataset" / "dataset_full.json"
+DEFAULT_OUT_DIR      = ROOT_DIR / "results"
+DEFAULT_SPLIT_DIR    = ROOT_DIR / "data" / "internal_dataset"
+DEFAULT_SPLITS       = DEFAULT_SPLIT_DIR / "split.json"
 
 
 def _count_parameters(module: nn.Module) -> tuple[int, int]:

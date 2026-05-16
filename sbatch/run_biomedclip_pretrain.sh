@@ -5,11 +5,29 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
+#SBATCH --partition=all_nodes
+
+# ── Training parameters (edit here) ──────────────────────────────────────────
+BATCH_SIZE=256
+NO_LORA=true       # true → unfreeze blocks, false → LoRA
+LORA_LAYERS=4
+LORA_R=8
+UNFREEZE_BLOCKS=11
+# ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
+
+if [ "$NO_LORA" = true ]; then
+    tune_tag="unfreeze${UNFREEZE_BLOCKS}"
+else
+    tune_tag="lora${LORA_LAYERS}"
+fi
+
+LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}.out"
+exec > "$LOG_FILE" 2>&1
+
 echo Starting job ${SLURM_JOBID}
 echo SLURM assigned me these nodes:
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
@@ -25,32 +43,32 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
-python $home_dir/Project/src/biomedclip_pretrain.py \
-    --excel    $home_dir/Project/data/internal_dataset/metadata.xlsx \
-    --reports  $home_dir/Project/data/internal_dataset/text/translated_reports.json \
-    --english \
-    --images   $home_dir/Project/data/internal_dataset/images \
-    --masks    $home_dir/Project/data/internal_dataset/segmentations \
-    --out_dir  $home_dir/Project/results \
-    --use_mask \
-    --lora_layers 4 \
-    --lora_r 8 \
-    --lora_alpha 64 \
-    --batch_size 32 \
-    --epochs 100 \
-    --lr 5e-5 \
-    --downstream_train_frac 0.8 \
-    --downstream_val_frac 0.1 \
-    --test_frac 0.1 \
-    --seed 42 \
-    --wandb \
-    --wandb_project biomedclip-pretrain \
-    --wandb_entity philipp-wiese
-
-
-# --lora_layers 2 \
-# --lora_r 4 \
-# --lora_alpha 16 \
-# --batch_size 32 \
-# --epochs 50 \
-# --lr 1e-5 \
+if [ "$NO_LORA" = true ]; then
+    python $home_dir/Project/src/biomedclip_pretrain.py \
+        --splits   $home_dir/Project/data/internal_dataset/split.json \
+        --out_dir  $home_dir/Project/results \
+        --use_mask \
+        --no_lora \
+        --unfreeze_blocks $UNFREEZE_BLOCKS \
+        --batch_size $BATCH_SIZE \
+        --epochs 100 \
+        --lr 5e-5 \
+        --seed 42 \
+        --wandb \
+        --wandb_project biomedclip-pretrain \
+        --wandb_entity philipp-wiese
+else
+    python $home_dir/Project/src/biomedclip_pretrain.py \
+        --splits   $home_dir/Project/data/internal_dataset/split.json \
+        --out_dir  $home_dir/Project/results \
+        --use_mask \
+        --lora_layers $LORA_LAYERS \
+        --lora_r $LORA_R \
+        --batch_size $BATCH_SIZE \
+        --epochs 100 \
+        --lr 5e-5 \
+        --seed 42 \
+        --wandb \
+        --wandb_project biomedclip-pretrain \
+        --wandb_entity philipp-wiese
+fi

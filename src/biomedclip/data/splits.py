@@ -413,131 +413,8 @@ def old_build_pretrain_datasets(
 
 
 # ---------------------------------------------------------------------------
-# New split logic: single pool of complete cases (image + report + label + age + sex)
+# New split logic: reads from dataset_full.json
 # ---------------------------------------------------------------------------
-
-def _load_complete_samples(
-    excel_path: Path,
-    full_reports_path: Path,
-    images_dir: Path,
-    masks_dir: Path,
-    english: bool = True,
-) -> list[dict]:
-    """Return only cases that have every required field.
-
-    A case is included iff it has: image file, non-empty report, malignancy
-    label, parseable age, and m/f sex.  Each element is a dict with keys:
-        image, mask, report, label, age, sex, patid,
-        befund_en, beurteilung_en, befund_phrases, beurteilung_phrases
-    """
-    try:
-        df = pd.read_excel(
-            excel_path,
-            sheet_name="internal_data_matched",
-            usecols=[0, 2, 4, 5, 7],
-            skiprows=1,
-            header=0,
-            dtype=str,
-            engine="openpyxl",
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Cannot read Excel file '{excel_path}': {exc}") from exc
-
-    df.columns = ["filename", "malignancy", "age", "sex", "patid"]
-    df = df.dropna(subset=["filename", "patid"])
-    df["filename"]   = df["filename"].str.strip()
-    df["patid"]      = df["patid"].str.strip()
-    df["malignancy"] = df["malignancy"].fillna("").str.strip().str.lower()
-    df["age"]        = df["age"].fillna("")
-    df["sex"]        = df["sex"].fillna("")
-
-    def _normalise_id(val: str) -> str:
-        try:
-            return str(int(float(val)))
-        except ValueError:
-            return val
-
-    df["patid"] = df["patid"].apply(_normalise_id)
-
-    with open(full_reports_path, encoding="utf-8") as fh:
-        raw_reports = json.load(fh)
-
-    report_lookup: dict[str, dict] = {}
-    for entry in raw_reports:
-        pid = _normalise_id(str(entry.get("patid", "")).strip())
-        if not pid:
-            continue
-        report_lookup[pid] = {
-            "befund":              (entry.get("befund")              or "").strip() or None,
-            "beurteilung":         (entry.get("beurteilung")         or "").strip() or None,
-            "befund_en":           (entry.get("befund_en")           or "").strip() or None,
-            "beurteilung_en":      (entry.get("beurteilung_en")      or "").strip() or None,
-            "befund_phrases":      entry.get("befund_phrases")       or None,
-            "beurteilung_phrases": entry.get("beurteilung_phrases")  or None,
-        }
-
-    samples: list[dict] = []
-    skipped = {"no_image": 0, "no_report": 0, "no_label": 0, "no_age": 0, "no_sex": 0}
-
-    for _, row in df.iterrows():
-        stem       = Path(row["filename"]).stem
-        patid      = row["patid"]
-        label      = row["malignancy"]
-        image_path = images_dir / f"{stem}.png"
-        mask_path  = masks_dir  / f"{stem}.png"
-
-        if not image_path.exists():
-            skipped["no_image"] += 1
-            continue
-
-        rep = report_lookup.get(patid, {})
-        b1  = (rep.get("befund_en") if english else rep.get("befund")) or ""
-        b2  = (rep.get("beurteilung_en") if english else rep.get("beurteilung")) or ""
-        report_text = " ".join(filter(None, [b1, b2]))
-        if not report_text:
-            skipped["no_report"] += 1
-            continue
-
-        if not label:
-            skipped["no_label"] += 1
-            continue
-
-        try:
-            age_float = float(row["age"])
-        except (ValueError, TypeError):
-            skipped["no_age"] += 1
-            continue
-
-        sex_str = str(row["sex"]).strip().lower()
-        if sex_str == "m":
-            sex_float = 1.0
-        elif sex_str == "f":
-            sex_float = 0.0
-        else:
-            skipped["no_sex"] += 1
-            continue
-
-        samples.append({
-            "image":               image_path,
-            "mask":                mask_path,
-            "report":              report_text,
-            "label":               label,
-            "age":                 age_float,
-            "sex":                 sex_float,
-            "patid":               patid,
-            "befund_en":           rep.get("befund_en"),
-            "beurteilung_en":      rep.get("beurteilung_en"),
-            "befund_phrases":      rep.get("befund_phrases"),
-            "beurteilung_phrases": rep.get("beurteilung_phrases"),
-        })
-
-    print(
-        f"Complete samples (image+report+label+age+sex): {len(samples)}"
-        f"  (skipped: {skipped['no_image']} no image, {skipped['no_report']} no report,"
-        f" {skipped['no_label']} no label, {skipped['no_age']} no age, {skipped['no_sex']} no sex)"
-    )
-    return samples
-
 
 def _group_by_patient(samples: list[dict]) -> list[list[dict]]:
     """Return samples grouped by patid, preserving insertion order."""
@@ -551,47 +428,59 @@ def build_stratified_splits(
     args,
     run_dir: Path | None = None,
 ) -> tuple[list, list, list]:
-    """Create train / val / test splits from cases that have all required fields.
+    """Create train / val / test splits from dataset_full.json.
 
-    Splitting is done at the *patient* level so that all images from the same
-    patient land in the same fold (preventing leakage).  Stratification uses
-    the majority label among a patient's images.
+    Reads from args.dataset (path to dataset_full.json produced by create_dataset.py).
+    Filters to entries with non-null report AND non-null label.
+    Encodes "unknown" age/sex as 0.5 float.
+    Splits at the patient level to prevent leakage; stratifies by majority label.
 
-    Every case in every split has: image, mask, report, label, age, sex.
     Returns (train, val, test) where each element is a list of dicts.
     """
-    samples = _load_complete_samples(
-        excel_path=Path(args.excel),
-        full_reports_path=Path(args.reports),
-        images_dir=Path(args.images),
-        masks_dir=Path(args.masks),
-        english=args.english,
+    dataset_path = Path(args.dataset)
+    with open(dataset_path, encoding="utf-8") as fh:
+        all_entries = json.load(fh)
+
+    samples: list[dict] = []
+    skipped = {"no_report": 0, "no_label": 0}
+    for e in all_entries:
+        if not e.get("report"):
+            skipped["no_report"] += 1
+            continue
+        if not e.get("label"):
+            skipped["no_label"] += 1
+            continue
+        sample = dict(e)
+        age = e["age"]
+        sample["age"] = float(age) if age != "unknown" else None
+        sex = e["sex"]
+        sample["sex"] = 1.0 if sex == "m" else (0.0 if sex == "f" else 0.5)
+        samples.append(sample)
+
+    print(
+        f"Complete samples (report+label): {len(samples)}"
+        f"  (skipped: {skipped['no_report']} no report, {skipped['no_label']} no label)"
     )
 
     if not samples:
-        raise RuntimeError(
-            "No complete samples found. Check --excel, --images, --reports paths."
-        )
+        raise RuntimeError(f"No complete samples found. Check --dataset path: {dataset_path}")
 
     total = args.downstream_train_frac + args.downstream_val_frac + args.test_frac
     if abs(total - 1.0) > 1e-4:
-        raise ValueError(
-            f"Split fractions must sum to 1.0, got {total:.4f}."
-        )
+        raise ValueError(f"Split fractions must sum to 1.0, got {total:.4f}.")
 
-    # Group by patient; use majority label per patient for stratification.
     patient_groups = _group_by_patient(samples)
+
     def _majority_label(group: list[dict]) -> str:
         return Counter(s["label"] for s in group).most_common(1)[0][0]
-    patient_labels = [_majority_label(g) for g in patient_groups]
 
+    patient_labels = [_majority_label(g) for g in patient_groups]
     n_multi = sum(1 for g in patient_groups if len(g) > 1)
     print(
         f"Patients: {len(patient_groups)} total"
         f"  ({n_multi} with multiple images, {len(samples)} images total)"
     )
 
-    # Split at patient level first, then flatten to images.
     train_val_groups, test_groups = _stratified_split_two(
         patient_groups, patient_labels, args.test_frac, args.seed
     )
@@ -607,9 +496,18 @@ def build_stratified_splits(
     val   = [s for g in val_groups   for s in g]
     test  = [s for g in test_groups  for s in g]
 
-    splits        = {"train": train,        "val": val,        "test": test}
-    split_groups  = {"train": train_groups, "val": val_groups, "test": test_groups}
-    print("\nSplit statistics (patient-stratified; all cases have image + report + label + age + sex):")
+    known_ages = [s["age"] for s in train if s["age"] is not None]
+    age_mean = float(sum(known_ages) / len(known_ages)) if known_ages else 0.0
+    n_imputed = sum(1 for s in train + val + test if s["age"] is None)
+    if n_imputed:
+        print(f"  Imputing {n_imputed} unknown ages with training mean {age_mean:.1f} years")
+    for s in train + val + test:
+        if s["age"] is None:
+            s["age"] = age_mean
+
+    splits       = {"train": train,        "val": val,        "test": test}
+    split_groups = {"train": train_groups, "val": val_groups, "test": test_groups}
+    print("\nSplit statistics (patient-stratified):")
     for name, split in splits.items():
         dist     = dict(Counter(s["label"] for s in split))
         dist_str = ", ".join(f"{k}: {v}" for k, v in sorted(dist.items()))
@@ -620,28 +518,36 @@ def build_stratified_splits(
     out_dir = run_dir if run_dir is not None else Path(args.out_dir) / "biomedclip_pretrain"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest: dict[str, list] = {}
-    for name, split in splits.items():
-        manifest[name] = [
-            {
-                "image":               str(s["image"]),
-                "mask":                str(s["mask"]),
-                "report":              s["report"],
-                "label":               s["label"],
-                "age":                 s["age"],
-                "sex":                 s["sex"],
-                "patid":               s["patid"],
-                "befund_en":           s["befund_en"],
-                "beurteilung_en":      s["beurteilung_en"],
-                "befund_phrases":      s["befund_phrases"],
-                "beurteilung_phrases": s["beurteilung_phrases"],
-            }
-            for s in split
-        ]
-
+    manifest: dict[str, list] = {name: list(split) for name, split in splits.items()}
     manifest_path = out_dir / "split.json"
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
-
     print(f"  Split manifest saved -> {manifest_path}\n")
+
     return train, val, test
+
+
+def build_pretrain_datasets(
+    pretrain_samples: list[dict],
+    preprocess_train,
+    preprocess_val,
+    tokenizer,
+    use_mask: bool,
+    seed: int,
+    monitor_val_frac: float = 0.1,
+) -> tuple[BoneTumorPairDataset, BoneTumorPairDataset]:
+    """90/10 random split of pretrain samples into train and monitor-val datasets."""
+    tuples = [(Path(s["image"]), Path(s["mask"]), s["report"]) for s in pretrain_samples]
+
+    rng     = random.Random(seed)
+    indices = list(range(len(tuples)))
+    rng.shuffle(indices)
+    split      = int(len(indices) * (1.0 - monitor_val_frac))
+    train_samp = [tuples[i] for i in indices[:split]]
+    val_samp   = [tuples[i] for i in indices[split:]]
+
+    print(f"Pretrain loop split: {len(train_samp)} train / {len(val_samp)} monitor-val")
+
+    train_ds = BoneTumorPairDataset(train_samp, preprocess_train, tokenizer, use_mask)
+    val_ds   = BoneTumorPairDataset(val_samp,   preprocess_val,   tokenizer, use_mask)
+    return train_ds, val_ds

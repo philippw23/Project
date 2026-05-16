@@ -37,12 +37,12 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_EXCEL, DEFAULT_OUT_DIR
+from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR
 from biomedclip.data.transforms import build_train_transform
 from biomedclip.data.datasets import (
     DownstreamDataset, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
 )
-from biomedclip.data.splits import load_age_sex_lookup
+
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.lora import inject_lora
 from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
@@ -135,7 +135,6 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Use the vanilla BiomedCLIP encoder without loading a "
                              "fine-tuned checkpoint (no LoRA injection).")
     parser.add_argument("--splits",      default=str(DEFAULT_SPLITS))
-    parser.add_argument("--excel",       default=str(DEFAULT_EXCEL))
     parser.add_argument("--out_dir",     default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--use_mask",    action="store_true")
 
@@ -281,42 +280,25 @@ def main(args: argparse.Namespace) -> None:
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
 
-    # age_sex_lookup maps image stem → (age_raw, sex_binary).
-    age_sex_lookup = load_age_sex_lookup(Path(args.excel))
+    raw = splits
+    splits = {
+        "train": raw["train"],
+        "val":   raw["val"],
+        "test":  raw.get("test", []),
+    }
 
-    # Verify that the Excel lookup keys match the image stems in splits.json.
-    lookup_keys  = list(age_sex_lookup.keys())
-    split_stems  = [Path(s["image"]).stem for s in splits["downstream_train"][:5]]
-    print(f"Lookup sample keys : {lookup_keys[:5]}")
-    print(f"Split sample stems : {split_stems}")
-    n_matches = sum(1 for s in splits["downstream_train"] if Path(s["image"]).stem in age_sex_lookup)
-    print(f"Matching train samples: {n_matches} / {len(splits['downstream_train'])}")
-
-    if n_matches == 0:
-        raise RuntimeError(
-            "No age/sex entries matched any split sample. "
-            "Check that Excel column A filenames match the image stems in splits.json.\n"
-            f"  Lookup example: {lookup_keys[:3]}\n"
-            f"  Split example:  {split_stems[:3]}"
-        )
-
-    # Compute z-score normalisation statistics from the training split only
-    # so that val/test ages are normalised with the same scale.
-    train_ages = [
-        age_sex_lookup[Path(s["image"]).stem][0]
-        for s in splits["downstream_train"]
-        if Path(s["image"]).stem in age_sex_lookup
-    ]
+    all_samples    = splits["train"] + splits["val"] + splits["test"]
+    age_sex_lookup = {Path(s["image"]).stem: (float(s["age"]), float(s["sex"])) for s in all_samples}
+    train_ages     = [s["age"] for s in splits["train"]]
     age_mean = float(np.mean(train_ages))
     age_std  = float(np.std(train_ages))
     print(f"Age stats (train): mean={age_mean:.1f}, std={age_std:.1f}")
 
-    # Train split uses augmented transforms; val/test use clean val transforms.
-    train_ds = DownstreamDataset(splits["downstream_train"], age_sex_lookup, age_mean, age_std,
+    train_ds = DownstreamDataset(splits["train"], age_sex_lookup, age_mean, age_std,
                                   preprocess_train, args.use_mask)
-    val_ds   = DownstreamDataset(splits["downstream_val"],   age_sex_lookup, age_mean, age_std,
+    val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
                                   preprocess_val,   args.use_mask)
-    test_ds  = DownstreamDataset(splits["test"],             age_sex_lookup, age_mean, age_std,
+    test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
                                   preprocess_val,   args.use_mask)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 

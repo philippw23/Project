@@ -51,7 +51,7 @@ from chexfound.models.lora import inject_lora_chexfound
 from chexfound.train.ssl_meta_arch import SSLMetaArch
 from chexfound.utils.utils import CosineScheduler, fix_random_seeds
 from biomedclip.data.splits import build_stratified_splits
-from biomedclip.utils.misc import DEFAULT_EXCEL, DEFAULT_REPORTS, DEFAULT_MASKS_DIR
+from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_SPLITS
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -108,22 +108,26 @@ def _parse_dataset_path(dataset_path: str) -> tuple[str, dict]:
 def build_dataset(dataset_path: str, transform, out_dir: Path) -> torch.utils.data.Dataset:
     name, kwargs = _parse_dataset_path(dataset_path)
     if name == "BoneTumor":
-        import types
-        args = types.SimpleNamespace(
-            excel=kwargs.get("excel", str(DEFAULT_EXCEL)),
-            reports=kwargs.get("reports", str(DEFAULT_REPORTS)),
-            images=kwargs.get("root", "."),
-            masks=kwargs.get("masks", str(DEFAULT_MASKS_DIR)),
-            english=False,
-            downstream_train_frac=float(kwargs.get("downstream_train_frac", 0.8)),
-            downstream_val_frac=float(kwargs.get("downstream_val_frac", 0.1)),
-            test_frac=float(kwargs.get("test_frac", 0.1)),
-            seed=int(kwargs.get("seed", 42)),
-            out_dir=str(out_dir),
-        )
-        pretrain_samples, _, _, _ = build_stratified_splits(args)
-        image_paths = [s[0] for s in pretrain_samples]
-        return BoneTumorDataset(image_paths=image_paths, root=args.images, transforms=transform)
+        splits_path = kwargs.get("splits", str(DEFAULT_SPLITS))
+        if Path(splits_path).is_file():
+            with open(splits_path, encoding="utf-8") as fh:
+                split_data = json.load(fh)
+            train = split_data["train"]
+            print(f"BoneTumor: loaded {len(train)} train samples from {splits_path}")
+        else:
+            import types
+            ns = types.SimpleNamespace(
+                dataset=kwargs.get("dataset", str(DEFAULT_DATASET_JSON)),
+                downstream_train_frac=float(kwargs.get("downstream_train_frac", 0.8)),
+                downstream_val_frac=float(kwargs.get("downstream_val_frac", 0.1)),
+                test_frac=float(kwargs.get("test_frac", 0.1)),
+                seed=int(kwargs.get("seed", 42)),
+                out_dir=str(out_dir),
+            )
+            train, _val, _test = build_stratified_splits(ns)
+        image_paths = [s["image"] for s in train]
+        images_dir = str(Path(image_paths[0]).parent) if image_paths else "."
+        return BoneTumorDataset(image_paths=image_paths, root=images_dir, transforms=transform)
     raise ValueError(f"Unknown dataset: {name!r}. Supported: 'BoneTumor'.")
 
 
@@ -160,7 +164,8 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
 
     # Always initialise — iBOTPatchLoss/DINOLoss call dist.all_reduce()
     # unconditionally, even for world_size=1.
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    # Use gloo for single-GPU runs to avoid NCCL/NVML driver issues.
+    backend = "nccl" if (torch.cuda.is_available() and world_size > 1) else "gloo"
     dist.init_process_group(backend)
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)

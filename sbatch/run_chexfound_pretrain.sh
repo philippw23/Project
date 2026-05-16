@@ -5,7 +5,6 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
-#SBATCH --exclude=aioserver3
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
 #SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.err"
 
@@ -35,9 +34,7 @@ echo "CUDA/NVML preflight:"
 nvidia-smi || echo "WARNING: nvidia-smi failed on $(hostname) (NVML mismatch) — CUDA may still work."
 
 # Run the Python script
-NGPUS=${SLURM_GPUS_ON_NODE:-1}
-MASTER_PORT=$(( 29500 + SLURM_JOBID % 10000 ))
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python -m torch.distributed.run --nproc_per_node=$NGPUS --master_port=$MASTER_PORT \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python \
     $home_dir/Project/src/chexfound/train/pretrain.py \
     --config     $home_dir/Project/src/chexfound/configs/chexfound_vitl16_bonetumor.yaml \
     --base_cfg   $home_dir/Project/src/chexfound/data/config.yaml \

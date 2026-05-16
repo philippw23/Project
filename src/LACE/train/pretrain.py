@@ -22,16 +22,18 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
+import json
+import shutil
+
+from biomedclip.data.splits import build_stratified_splits
 from biomedclip.utils.misc import (
-    DEFAULT_EXCEL,
-    DEFAULT_IMAGES_DIR,
-    DEFAULT_MASKS_DIR,
+    DEFAULT_DATASET_JSON,
     DEFAULT_OUT_DIR,
-    DEFAULT_REPORTS,
+    DEFAULT_SPLITS,
     ROOT_DIR,
 )
 from LACE.data.datasets import BTXRDOrthoDataset
-from LACE.data.splits import build_lace_splits, build_pretrain_datasets_lace
+from LACE.data.splits import build_pretrain_datasets_lace
 from LACE.data.transforms import build_train_transform_lace
 from LACE.loss.objectives import ita_loss, ortho_loss, sim_loss
 from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
@@ -280,10 +282,12 @@ def evaluate_lace(
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LACE pretraining (three-stage curriculum)")
 
-    parser.add_argument("--excel",   default=str(DEFAULT_EXCEL))
-    parser.add_argument("--reports", default=str(DEFAULT_REPORTS))
-    parser.add_argument("--images",  default=str(DEFAULT_IMAGES_DIR))
-    parser.add_argument("--masks",   default=str(DEFAULT_MASKS_DIR))
+    parser.add_argument("--splits", default=None,
+                        help="Path to a pre-existing split.json (from create_split.py). "
+                             "If omitted, a new split is generated from --dataset.")
+    parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON),
+                        help="Path to dataset_full.json — used only when --splits is omitted "
+                             "(default: %(default)s)")
     parser.add_argument("--btxrd_images", default=str(DEFAULT_BTXRD_IMAGES))
     parser.add_argument("--btxrd_annots", default=str(DEFAULT_BTXRD_ANNOTS))
     parser.add_argument("--out_dir", default=str(DEFAULT_OUT_DIR))
@@ -359,7 +363,15 @@ def main(args: argparse.Namespace) -> None:
     print(f"Run directory: {run_dir}")
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    pretrain_samples, _, _, _ = build_lace_splits(args, run_dir=run_dir)
+    if args.splits is not None:
+        with open(args.splits, encoding="utf-8") as fh:
+            split_data = json.load(fh)
+        shutil.copy(args.splits, run_dir / "split.json")
+        pretrain_samples = split_data["train"]
+        print(f"Loaded split from {args.splits} ({len(pretrain_samples)} train samples)")
+    else:
+        train, _val, _test = build_stratified_splits(args, run_dir=run_dir)
+        pretrain_samples = train
 
     preprocess_val   = vit.preprocess_val
     preprocess_train = build_train_transform_lace(preprocess_val)

@@ -302,23 +302,19 @@ def main(args: argparse.Namespace) -> None:
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
 
-    downstream_train = splits["downstream_train"]
-    downstream_val   = splits["downstream_val"]
-    test_samples     = splits["test"]
-
-    all_samples    = downstream_train + downstream_val + test_samples
+    all_samples    = splits["train"] + splits["val"] + splits["test"]
     age_sex_lookup = {Path(s["image"]).stem: (s["age"], s["sex"]) for s in all_samples}
 
-    train_ages = [s["age"] for s in downstream_train]
+    train_ages = [s["age"] for s in splits["train"]]
     age_mean   = float(np.mean(train_ages))
     age_std    = float(np.std(train_ages))
     print(f"Age stats (train): mean={age_mean:.1f}, std={age_std:.1f}")
 
-    train_ds = DownstreamDataset(downstream_train, age_sex_lookup, age_mean, age_std,
+    train_ds = DownstreamDataset(splits["train"], age_sex_lookup, age_mean, age_std,
                                   preprocess_train, use_mask=False)
-    val_ds   = DownstreamDataset(downstream_val,   age_sex_lookup, age_mean, age_std,
+    val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
                                   preprocess_val,   use_mask=False)
-    test_ds  = DownstreamDataset(test_samples,     age_sex_lookup, age_mean, age_std,
+    test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
                                   preprocess_val,   use_mask=False)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 

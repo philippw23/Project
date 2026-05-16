@@ -92,10 +92,12 @@ def inject_lora(model: nn.Module, lora_layers: int, r: int, alpha: float) -> Non
     # Unfreeze the contrastive temperature so it adapts to the training batch size.
     model.logit_scale.requires_grad_(True)
 
-    # Unfreeze the image projection matrix so it can re-align the LoRA-adapted
-    # ViT features with the frozen text encoder's embedding space.
-    if hasattr(model.visual, "proj") and model.visual.proj is not None:
-        model.visual.proj.requires_grad_(True)
+    if hasattr(model.visual, "head") and model.visual.head is not None:
+        for p in model.visual.head.parameters():
+            p.requires_grad_(True)
+    if hasattr(model.text, "proj") and model.text.proj is not None:
+        for p in model.text.proj.parameters():
+            p.requires_grad_(True)
 
 
 def count_trainable_params(model: nn.Module) -> int:
