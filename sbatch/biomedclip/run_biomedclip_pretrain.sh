@@ -6,9 +6,11 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
 #SBATCH --partition=all_nodes
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 # ── Training parameters (edit here) ──────────────────────────────────────────
-BATCH_SIZE=256
+BATCH_SIZE=128
 NO_LORA=true       # true → unfreeze blocks, false → LoRA
 LORA_LAYERS=4
 LORA_R=8

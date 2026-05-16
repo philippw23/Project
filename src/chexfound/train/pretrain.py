@@ -1,12 +1,12 @@
-"""CheXFound iBOT continued-pretraining script using SSLMetaArch.
+"""CheXFound iBOT continued-pretraining script using SSLMetaArch (single-GPU).
 
 Implements the joint DINO + iBOT (masked-image-modelling) objective via
 SSLMetaArch, which matches the upstream CheXFound training logic exactly:
 block-based rectangular masking (MaskingGenerator), correct DINO loss
 normalisation, and KoLeo regularisation per the original CheXFound paper.
 
-Usage (single GPU via torchrun):
-    torchrun --nproc_per_node=1 src/chexfound/train/pretrain.py \\
+Usage:
+    python src/chexfound/train/pretrain.py \\
         --config   src/chexfound/configs/chexfound_vitl16_bonetumor.yaml \\
         --base_cfg src/chexfound/data/config.yaml \\
         --out_dir  results/chexfound_pretrain
@@ -27,7 +27,6 @@ from functools import partial
 from pathlib import Path
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import yaml
 from omegaconf import OmegaConf
@@ -147,34 +146,10 @@ def _ema_update(model: SSLMetaArch, momentum: float) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
-    # ── Distributed setup ────────────────────────────────────────────────────
-    # When launched via plain `python` (e.g. W&B sweep agent) rather than
-    # torchrun, the env:// rendezvous variables are absent. Set single-GPU
-    # defaults so dist.init_process_group succeeds.
-    if "RANK" not in os.environ:
-        os.environ.setdefault("RANK", "0")
-        os.environ.setdefault("LOCAL_RANK", "0")
-        os.environ.setdefault("WORLD_SIZE", "1")
-        os.environ.setdefault("MASTER_ADDR", "localhost")
-        os.environ.setdefault("MASTER_PORT", "29500")
-
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    is_main = local_rank == 0
-
-    # Always initialise — iBOTPatchLoss/DINOLoss call dist.all_reduce()
-    # unconditionally, even for world_size=1.
-    # Use gloo for single-GPU runs to avoid NCCL/NVML driver issues.
-    backend = "nccl" if (torch.cuda.is_available() and world_size > 1) else "gloo"
-    dist.init_process_group(backend)
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
-
-    device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
-    if is_main:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Output dir : {out_dir}")
-        print(f"Device     : {device}  |  world_size={world_size}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output dir : {out_dir}")
+    print(f"Device     : {device}")
 
     # ── Extract scalar hyperparams from the merged dict ──────────────────────
     train_cfg   = cfg_dict.get("train",   {})
@@ -223,7 +198,7 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
 
     n_patches = (global_size // patch_size) ** 2
 
-    fix_random_seeds(seed + local_rank)
+    fix_random_seeds(seed)
 
     # ── Prepare OmegaConf config for SSLMetaArch ─────────────────────────────
     # Disable ShardedGradScaler — backprop_loss will call loss.backward() directly,
@@ -257,8 +232,7 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     # Single torch.load covers backbone + heads to avoid redundant NFS reads.
     warm_start = cfg_dict.get("MODEL", {}).get("WEIGHTS", "")
     if warm_start and Path(warm_start).is_file():
-        if is_main:
-            print(f"Warm-starting from {warm_start}")
+        print(f"Warm-starting from {warm_start}")
         _raw        = torch.load(warm_start, map_location="cpu", weights_only=False)
         _teacher_sd = _raw.get("teacher", _raw)
 
@@ -270,10 +244,9 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
         }
         _msg = model.student.backbone.load_state_dict(_backbone_sd, strict=False)
         model.teacher.backbone.load_state_dict(_backbone_sd, strict=False)
-        if is_main:
-            print(f"  backbone : {len(_backbone_sd)} keys "
-                  f"(missing={len(_msg.missing_keys)}, "
-                  f"unexpected={len(_msg.unexpected_keys)})")
+        print(f"  backbone : {len(_backbone_sd)} keys "
+              f"(missing={len(_msg.missing_keys)}, "
+              f"unexpected={len(_msg.unexpected_keys)})")
 
         # Heads: load into student then copy to teacher so both start identically.
         # Previously both heads were randomly initialized from separate factory calls,
@@ -285,13 +258,11 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
         if _dino_sd:
             model.student.dino_head.load_state_dict(_dino_sd, strict=True)
             model.teacher.dino_head.load_state_dict(_dino_sd, strict=True)
-            if is_main:
-                print(f"  dino_head: {len(_dino_sd)} keys (student + teacher synced)")
+            print(f"  dino_head: {len(_dino_sd)} keys (student + teacher synced)")
         if _ibot_sd and "ibot_head" in model.student:
             model.student.ibot_head.load_state_dict(_ibot_sd, strict=True)
             model.teacher.ibot_head.load_state_dict(_ibot_sd, strict=True)
-            if is_main:
-                print(f"  ibot_head: {len(_ibot_sd)} keys (student + teacher synced)")
+            print(f"  ibot_head: {len(_ibot_sd)} keys (student + teacher synced)")
 
     # Inject LoRA after warm-start so pretrained weights land in the right slots.
     if lora_layers > 0:
@@ -322,14 +293,13 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     model = model.to(device)
     model.train()  # keeps teacher in eval() via SSLMetaArch.train()
 
-    if is_main:
-        trainable = sum(p.numel() for p in model.student.parameters() if p.requires_grad)
-        total     = sum(p.numel() for p in model.parameters())
-        print(f"Student trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
-        if lora_layers > 0:
-            print(f"LoRA: last {lora_layers} blocks | r={lora_r} | alpha={lora_alpha}")
-        print(f"Head mode: {head_mode}" +
-              (f" (unfreeze at epoch {head_unfreeze_epoch})" if head_mode == "unfreeze_after" else ""))
+    trainable = sum(p.numel() for p in model.student.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f"Student trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
+    if lora_layers > 0:
+        print(f"LoRA: last {lora_layers} blocks | r={lora_r} | alpha={lora_alpha}")
+    print(f"Head mode: {head_mode}" +
+          (f" (unfreeze at epoch {head_unfreeze_epoch})" if head_mode == "unfreeze_after" else ""))
 
     # ── Augmentation + DataLoader ─────────────────────────────────────────────
     aug = DataAugmentationDINO(
@@ -341,10 +311,6 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     )
 
     dataset = build_dataset(train_cfg["dataset_path"], transform=aug, out_dir=out_dir)
-    sampler = (
-        torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True)
-        if world_size > 1 else None
-    )
 
     mask_generator = MaskingGenerator(
         input_size=(global_size // patch_size, global_size // patch_size),
@@ -362,8 +328,7 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     loader = DataLoader(
         dataset,
         batch_size=batch_per_gpu,
-        shuffle=(sampler is None),
-        sampler=sampler,
+        shuffle=True,
         num_workers=n_workers,
         pin_memory=(device.type == "cuda"),
         drop_last=True,
@@ -373,10 +338,9 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     steps_per_epoch = min(epoch_len, len(loader))
     total_steps     = n_epochs * steps_per_epoch
 
-    if is_main:
-        print(f"\nStarting iBOT training: {n_epochs} epochs × {steps_per_epoch} steps")
-        print(f"  Dataset : {len(dataset)} images")
-        print(f"  Batch   : {batch_per_gpu} × {world_size} GPU(s)")
+    print(f"\nStarting iBOT training: {n_epochs} epochs × {steps_per_epoch} steps")
+    print(f"  Dataset : {len(dataset)} images")
+    print(f"  Batch   : {batch_per_gpu}")
 
     # ── Optimizer & schedules ─────────────────────────────────────────────────
     # unfreeze_after: heads must enter param groups now so they can be updated
@@ -415,9 +379,6 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     stop_training = False
 
     for epoch in range(n_epochs):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-
         # Freeze/unfreeze prototype last layer during initial epochs.
         freeze_last = epoch < freeze_last_layer_epochs
         for g in optimizer.param_groups:
@@ -431,7 +392,7 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
             head_trainable = epoch >= head_unfreeze_epoch
             for _hm in _head_modules:
                 _hm.requires_grad_(head_trainable)
-            if is_main and epoch == head_unfreeze_epoch:
+            if epoch == head_unfreeze_epoch:
                 n_head = sum(p.numel() for _hm in _head_modules
                              for p in _hm.parameters())
                 print(f"Epoch {epoch + 1:03d}: heads unfrozen ({n_head:,} params)")
@@ -483,77 +444,65 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
             n_steps_done   += 1
 
         # ── End-of-epoch logging & checkpointing ─────────────────────────────
-        if is_main:
-            n = max(n_steps_done, 1)
-            avg = {k: v / n for k, v in epoch_losses.items()}
-            lr  = optimizer.param_groups[0]["lr"]
-            elapsed = time.time() - t0
-            print(
-                f"Epoch {epoch + 1:03d}/{n_epochs} | "
-                f"total={avg['total']:.4f} "
-                f"dino_l={avg['dino_local']:.4f} dino_g={avg['dino_global']:.4f} "
-                f"ibot={avg['ibot']:.4f} koleo={avg['koleo']:.4f} | "
-                f"lr={lr:.2e} | {elapsed:.0f}s"
-            )
-            log.append({"epoch": epoch + 1, **avg, "lr": lr})
-            (out_dir / "log.json").write_text(json.dumps(log, indent=2))
+        n = max(n_steps_done, 1)
+        avg = {k: v / n for k, v in epoch_losses.items()}
+        lr  = optimizer.param_groups[0]["lr"]
+        elapsed = time.time() - t0
+        print(
+            f"Epoch {epoch + 1:03d}/{n_epochs} | "
+            f"total={avg['total']:.4f} "
+            f"dino_l={avg['dino_local']:.4f} dino_g={avg['dino_global']:.4f} "
+            f"ibot={avg['ibot']:.4f} koleo={avg['koleo']:.4f} | "
+            f"lr={lr:.2e} | {elapsed:.0f}s"
+        )
+        log.append({"epoch": epoch + 1, **avg, "lr": lr})
+        (out_dir / "log.json").write_text(json.dumps(log, indent=2))
 
-            if use_wandb:
-                wandb.log({
-                    "epoch":                  epoch + 1,
-                    "train/loss_total":       avg["total"],
-                    "train/loss_dino_local":  avg["dino_local"],
-                    "train/loss_dino_global": avg["dino_global"],
-                    "train/loss_ibot":        avg["ibot"],
-                    "train/loss_koleo":       avg["koleo"],
-                    "train/lr":               lr,
-                })
-
-            ckpt = {
-                "epoch":      epoch + 1,
-                "student":    model.student.state_dict(),
-                "teacher":    model.teacher.state_dict(),
-                "optimizer":  optimizer.state_dict(),
-                "lora_config": {
-                    "lora_layers":         lora_layers,
-                    "lora_r":              lora_r,
-                    "lora_alpha":          lora_alpha,
-                    "head_mode":           head_mode,
-                    "head_unfreeze_epoch": head_unfreeze_epoch,
-                },
-            }
-            torch.save(ckpt, out_dir / "checkpoint_last.pth")
-            if (epoch + 1) % save_freq == 0:
-                torch.save(ckpt, out_dir / f"checkpoint_ep{epoch + 1:03d}.pth")
-
-            if es_patience is not None:
-                if avg["total"] < best_loss - es_min_delta:
-                    best_loss = avg["total"]
-                    no_improve = 0
-                    torch.save(ckpt, out_dir / "checkpoint_best.pth")
-                    print(f"  New best loss: {best_loss:.4f} — saved checkpoint_best.pth")
-                else:
-                    no_improve += 1
-                    print(f"  No improvement for {no_improve}/{es_patience} epochs "
-                          f"(best={best_loss:.4f})")
-                    if no_improve >= es_patience:
-                        stop_training = True
-                        print(f"Early stopping triggered after epoch {epoch + 1}.")
-
-        # Broadcast stop decision from rank-0 to all other ranks.
-        if world_size > 1:
-            stop_flag = torch.tensor(int(stop_training), device=device)
-            dist.broadcast(stop_flag, src=0)
-            stop_training = bool(stop_flag.item())
-        if stop_training:
-            break
-
-    dist.destroy_process_group()
-
-    if is_main:
-        print(f"\nTraining complete. Final checkpoint: {out_dir / 'checkpoint_last.pth'}")
         if use_wandb:
-            wandb.finish()
+            wandb.log({
+                "epoch":                  epoch + 1,
+                "train/loss_total":       avg["total"],
+                "train/loss_dino_local":  avg["dino_local"],
+                "train/loss_dino_global": avg["dino_global"],
+                "train/loss_ibot":        avg["ibot"],
+                "train/loss_koleo":       avg["koleo"],
+                "train/lr":               lr,
+            })
+
+        ckpt = {
+            "epoch":      epoch + 1,
+            "student":    model.student.state_dict(),
+            "teacher":    model.teacher.state_dict(),
+            "optimizer":  optimizer.state_dict(),
+            "lora_config": {
+                "lora_layers":         lora_layers,
+                "lora_r":              lora_r,
+                "lora_alpha":          lora_alpha,
+                "head_mode":           head_mode,
+                "head_unfreeze_epoch": head_unfreeze_epoch,
+            },
+        }
+        torch.save(ckpt, out_dir / "checkpoint_last.pth")
+        if (epoch + 1) % save_freq == 0:
+            torch.save(ckpt, out_dir / f"checkpoint_ep{epoch + 1:03d}.pth")
+
+        if es_patience is not None:
+            if avg["total"] < best_loss - es_min_delta:
+                best_loss = avg["total"]
+                no_improve = 0
+                torch.save(ckpt, out_dir / "checkpoint_best.pth")
+                print(f"  New best loss: {best_loss:.4f} — saved checkpoint_best.pth")
+            else:
+                no_improve += 1
+                print(f"  No improvement for {no_improve}/{es_patience} epochs "
+                      f"(best={best_loss:.4f})")
+                if no_improve >= es_patience:
+                    print(f"Early stopping triggered after epoch {epoch + 1}.")
+                    break
+
+    print(f"\nTraining complete. Final checkpoint: {out_dir / 'checkpoint_last.pth'}")
+    if use_wandb:
+        wandb.finish()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
