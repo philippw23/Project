@@ -59,7 +59,7 @@ def _lr_factor(epoch: int, warmup_epochs: int, total_epochs: int) -> float:
     if epoch < warmup_epochs:
         return (epoch + 1) / max(1, warmup_epochs)
     progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-    return 0.5 * (1.0 + math.cos(math.pi * progress))
+    return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 # ── Training / evaluation ─────────────────────────────────────────────────────

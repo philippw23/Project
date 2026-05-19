@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,7 @@ from biomedclip.data.datasets import (
     DownstreamDataset, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
 )
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
-from biomedclip.models.lora import inject_lora
+from biomedclip.models.lora import inject_lora, unfreeze_or_inject_downstream_lora
 from biomedclip.models.classifier import LinearHead, MalignancyMLP, extract_embeddings
 DEFAULT_CHECKPOINT = ROOT_DIR / "results" / "biomedclip_pretrain" / "best_r1_checkpoint.pt"
 
@@ -89,6 +90,59 @@ def train_one_epoch(
         total_loss += loss.item()
 
     return total_loss / len(loader)
+
+
+def train_one_epoch_finetune(
+    head: nn.Module,
+    encoder: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    device: torch.device,
+) -> float:
+    head.train()
+    encoder.eval()  # keeps dropout/BN frozen; LoRA params still receive gradients
+    total_loss = 0.0
+    for batch in loader:
+        images = batch["image"].to(device)
+        age    = batch["age"].to(device)
+        sex    = batch["sex"].to(device)
+        lbl    = batch["label"].to(device)
+        optimizer.zero_grad()
+        emb    = F.normalize(encoder(images), dim=-1)
+        logits = head(emb, age, sex)
+        loss   = criterion(logits, lbl)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(loader)
+
+
+@torch.no_grad()
+def evaluate_finetune(
+    head: nn.Module,
+    encoder: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    head.eval()
+    encoder.eval()
+    total_loss = 0.0
+    all_preds, all_labels = [], []
+    for batch in loader:
+        images = batch["image"].to(device)
+        age    = batch["age"].to(device)
+        sex    = batch["sex"].to(device)
+        lbl    = batch["label"].to(device)
+        emb    = F.normalize(encoder(images), dim=-1)
+        logits = head(emb, age, sex)
+        total_loss += criterion(logits, lbl).item()
+        all_preds.append(logits.argmax(dim=1).cpu())
+        all_labels.append(lbl.cpu())
+    preds  = torch.cat(all_preds).numpy()
+    labels = torch.cat(all_labels).numpy()
+    return total_loss / len(loader), float((preds == labels).mean()), preds, labels
 
 
 @torch.no_grad()
@@ -154,6 +208,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--ldam_max_margin", type=float, default=0.5)
     parser.add_argument("--ldam_scale",      type=float, default=30.0)
 
+    # ── Encoder fine-tuning (LoRA) ────────────────────────────────────────────
+    parser.add_argument("--finetune_lora_layers", type=int, default=0,
+                        help="Unfreeze/inject LoRA into the last N encoder blocks for downstream fine-tuning "
+                             "(0 = frozen encoder / linear probing, default: %(default)s)")
+    parser.add_argument("--lr_encoder",    type=float, default=1e-5,
+                        help="LR for encoder LoRA params when --finetune_lora_layers > 0 (default: %(default)s)")
+    parser.add_argument("--finetune_lora_r", type=int, default=8,
+                        help="LoRA rank for freshly injected downstream LoRA "
+                             "(only used when the loaded block has no pretrained LoRA, default: %(default)s)")
+
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)
     parser.add_argument("--wandb",         action="store_true")
@@ -174,7 +238,8 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
         "lr", "dropout", "meta_embed_dim", "weight_decay", "loss",
         "class_weighting", "label_smoothing", "focal_gamma", "cb_beta",
         "ldam_max_margin", "ldam_scale", "batch_size", "head",
-        "early_stopping_metric",
+        "early_stopping_metric", "finetune_lora_layers", "lr_encoder",
+        "finetune_lora_r",
     ):
         if key in cfg:
             setattr(args, key, cfg[key])
@@ -227,7 +292,18 @@ def main(args: argparse.Namespace) -> None:
     for p in encoder.parameters():
         p.requires_grad_(False)
     encoder.eval()
-    print(f"Encoder: pre-projection ViT features ({EMBED_DIM}-dim), frozen")
+
+    finetune = args.finetune_lora_layers > 0
+    if finetune:
+        lora_params = unfreeze_or_inject_downstream_lora(
+            encoder, args.finetune_lora_layers,
+            r=args.finetune_lora_r, alpha=args.finetune_lora_r * 2,
+        )
+        print(f"Encoder: last {args.finetune_lora_layers} blocks LoRA fine-tuned "
+              f"({len(lora_params)} trainable params, r={args.finetune_lora_r})")
+    else:
+        lora_params = []
+        print(f"Encoder: pre-projection ViT features ({EMBED_DIM}-dim), frozen")
 
     preprocess_train = build_train_transform(preprocess_val)
 
@@ -262,13 +338,6 @@ def main(args: argparse.Namespace) -> None:
     val_loader_raw  = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
     test_loader_raw = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
-    print("Pre-computing val/test embeddings...")
-    val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader_raw,  device)
-    test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
-
-    embed_dim = val_emb.shape[1]
-    print(f"Embedding dim: {embed_dim}")
-
     # ── Class weighting ───────────────────────────────────────────────────────
     train_labels_all = torch.tensor(
         [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
@@ -281,20 +350,37 @@ def main(args: argparse.Namespace) -> None:
     print(f"Class counts (train): { {IDX_TO_LABEL[i]: int(label_counts[i]) for i in range(NUM_CLASSES)} }")
     print(f"Loss: {args.loss} | class_weighting={args.class_weighting}")
 
-    val_emb_ds  = EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl)
-    test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
-    val_loader  = DataLoader(val_emb_ds,  batch_size=args.batch_size, shuffle=False)
-    test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
+    if finetune:
+        # Val is re-evaluated each epoch with on-the-fly embeddings (encoder changes).
+        # Test embeddings are computed once after training from the best checkpoint.
+        val_loader = val_loader_raw
+        embed_dim  = EMBED_DIM
+    else:
+        print("Pre-computing val/test embeddings...")
+        val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader_raw,  device)
+        test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
+        embed_dim = val_emb.shape[1]
+        print(f"Embedding dim: {embed_dim}")
+        val_emb_ds  = EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl)
+        test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
+        val_loader  = DataLoader(val_emb_ds,  batch_size=args.batch_size, shuffle=False)
+        test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
 
     # ── Head, loss, optimiser ─────────────────────────────────────────────────
     head      = build_head(args, embed_dim, device)
     criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
-    optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if finetune:
+        optimizer = torch.optim.AdamW([
+            {"params": head.parameters(),  "lr": args.lr,         "weight_decay": args.weight_decay},
+            {"params": lora_params,         "lr": args.lr_encoder, "weight_decay": args.weight_decay},
+        ], betas=(0.9, 0.98), eps=1e-6)
+    else:
+        optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    out_dir = Path(args.out_dir) / "biomedclip_downstream"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    run_id    = (wandb.run.id if use_wandb and wandb.run else None) or "local"
-    ckpt_path = out_dir / f"best_head_{run_id}.pt"
+    run_name  = f"run_{args.head}_{args.loss}_{args.class_weighting}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir   = Path(args.out_dir) / "biomedclip_downstream" / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = run_dir / "best_head.pt"
 
     # ── Training loop ─────────────────────────────────────────────────────────
     maximize_metric = args.early_stopping_metric == "val_bal_acc"
@@ -304,8 +390,12 @@ def main(args: argparse.Namespace) -> None:
           f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss                               = train_one_epoch(head, encoder, train_loader, optimizer, criterion, device)
-        val_loss, val_acc, val_preds, val_labels = evaluate(head, val_loader, criterion, device)
+        if finetune:
+            train_loss                               = train_one_epoch_finetune(head, encoder, train_loader, optimizer, criterion, device)
+            val_loss, val_acc, val_preds, val_labels = evaluate_finetune(head, encoder, val_loader, criterion, device)
+        else:
+            train_loss                               = train_one_epoch(head, encoder, train_loader, optimizer, criterion, device)
+            val_loss, val_acc, val_preds, val_labels = evaluate(head, val_loader, criterion, device)
         val_bal_acc      = balanced_accuracy_score(val_labels, val_preds)
         val_combined_acc = 0.5 * val_acc + 0.5 * val_bal_acc
 
@@ -328,13 +418,19 @@ def main(args: argparse.Namespace) -> None:
         if improved:
             best_metric      = current_metric
             patience_counter = 0
-            torch.save({
+            save_dict = {
                 "epoch": epoch,
                 "head_state_dict": head.state_dict(),
                 "val_loss": val_loss,
                 "val_bal_acc": val_bal_acc,
                 "head": args.head,
-            }, ckpt_path)
+            }
+            if finetune:
+                save_dict["encoder_lora_state_dict"] = {
+                    name: p.detach().cpu()
+                    for name, p in encoder.named_parameters() if p.requires_grad
+                }
+            torch.save(save_dict, ckpt_path)
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
@@ -342,9 +438,16 @@ def main(args: argparse.Namespace) -> None:
                 break
 
     # ── Test evaluation ───────────────────────────────────────────────────────
-    head.load_state_dict(
-        torch.load(ckpt_path, map_location=device, weights_only=False)["head_state_dict"]
-    )
+    best_ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    head.load_state_dict(best_ckpt["head_state_dict"])
+    if finetune:
+        enc_state = encoder.state_dict()
+        enc_state.update(best_ckpt["encoder_lora_state_dict"])
+        encoder.load_state_dict(enc_state)
+        print("Pre-computing test embeddings from best checkpoint...")
+        test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
+        test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
+        test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
     test_loss, test_acc, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
 
     label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
@@ -388,7 +491,7 @@ def main(args: argparse.Namespace) -> None:
         wandb.finish()
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
-    print(f"Checkpoints saved to: {out_dir}")
+    print(f"Checkpoints saved to: {run_dir}")
 
 
 if __name__ == "__main__":

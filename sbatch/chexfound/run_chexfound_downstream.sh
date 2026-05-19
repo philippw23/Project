@@ -10,8 +10,11 @@
 #SBATCH --error=/dev/null
 
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/chexfound_pretrain/job_6306/checkpoint_last.pth"
+# Set CHECKPOINT to a continued-pretrain .pth path, or "none" to use frozen original weights
+CHECKPOINT="none"
+CHEXFOUND_WEIGHTS="/mnt/nfs/homedirs/philippw/Project/src/chexfound/data/teacher_checkpoint.pth"
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+HEAD="mlp_no_meta"   # linear | mlp | mlp_no_meta
 BATCH_SIZE=64
 LR=1e-3
 DROPOUT=0.3
@@ -41,13 +44,13 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin
 export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/downstream.py \
-    --baseline      chexfound \
-    --chexfound_checkpoint $CHECKPOINT \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfound_downstream.py \
+    --checkpoint    $CHECKPOINT \
+    --chexfound_weights $CHEXFOUND_WEIGHTS \
     --splits        $SPLITS \
-    --excel         $home_dir/Project/data/internal_dataset/metadata.xlsx \
     --out_dir       $home_dir/Project/results \
     --use_mask \
+    --head          $HEAD \
     --epochs        $EPOCHS \
     --batch_size    $BATCH_SIZE \
     --lr            $LR \

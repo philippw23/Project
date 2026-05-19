@@ -46,7 +46,7 @@ if _SRC not in sys.path:
 
 from chexfound.bone_tumor_patch.bone_tumor import BoneTumorDataset
 from chexfound.data import DataAugmentationDINO, MaskingGenerator, collate_data_and_cast
-from chexfound.models.lora import inject_lora_chexfound
+from chexfound.models.lora import inject_lora_chexfound, _iter_real_vit_blocks
 from chexfound.train.ssl_meta_arch import SSLMetaArch
 from chexfound.utils.utils import CosineScheduler, fix_random_seeds
 from biomedclip.data.splits import build_stratified_splits
@@ -73,6 +73,35 @@ def merge_configs(base_path: str | None, override_path: str) -> dict:
     return cfg
 
 
+def _unfreeze_last_backbone_blocks(backbone: nn.Module, unfreeze_blocks: int) -> None:
+    """Freeze all backbone params, then unfreeze the last N real transformer blocks + norm.
+
+    Registers a detach hook at the frozen/unfrozen boundary so the frozen blocks
+    run without building a computation graph, freeing their activations immediately.
+    """
+    for p in backbone.parameters():
+        p.requires_grad_(False)
+
+    blocks = _iter_real_vit_blocks(backbone)
+    n_blocks = len(blocks)
+    effective = min(unfreeze_blocks, n_blocks)
+    first_unfrozen = blocks[n_blocks - effective]
+
+    for block in blocks[n_blocks - effective:]:
+        for p in block.parameters():
+            p.requires_grad_(True)
+
+    if hasattr(backbone, "norm"):
+        for p in backbone.norm.parameters():
+            p.requires_grad_(True)
+
+    # Detach at the boundary: frozen blocks' activations are freed immediately
+    # instead of being kept alive for a backward pass that never reaches them.
+    def _detach(module, args):
+        return tuple(x.detach() if isinstance(x, torch.Tensor) else x for x in args)
+    first_unfrozen.register_forward_pre_hook(_detach)
+
+
 def _apply_sweep_cfg(cfg: dict) -> None:
     """Override Tier-1 pretrain hyperparams from wandb.config (called after wandb.init)."""
     wc = wandb.config
@@ -88,6 +117,8 @@ def _apply_sweep_cfg(cfg: dict) -> None:
         cfg.setdefault("lora", {})["head_mode"] = wc["head_mode"]
     if "head_unfreeze_epoch" in wc:
         cfg.setdefault("lora", {})["head_unfreeze_epoch"] = int(wc["head_unfreeze_epoch"])
+    if "unfreeze_blocks" in wc:
+        cfg.setdefault("backbone", {})["unfreeze_blocks"] = int(wc["unfreeze_blocks"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -170,7 +201,7 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     es_min_delta  = train_cfg.get("early_stopping_min_delta", 0.0)
 
     base_lr    = optim_cfg.get("base_lr", 5e-5)
-    min_lr     = optim_cfg.get("min_lr", 1e-6)
+    min_lr     = base_lr * 0.1
     wd_start   = optim_cfg.get("weight_decay", 0.04)
     wd_end     = optim_cfg.get("weight_decay_end", 0.2)
     clip_grad  = optim_cfg.get("clip_grad", 3.0)
@@ -226,6 +257,9 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     head_mode           = lora_cfg.get("head_mode", "frozen")
     head_unfreeze_epoch = lora_cfg.get("head_unfreeze_epoch", 10)
 
+    backbone_cfg    = cfg_dict.get("backbone", {})
+    unfreeze_blocks = backbone_cfg.get("unfreeze_blocks", 0)
+
     # Warm-start BEFORE LoRA injection so checkpoint key names match.
     # LoRA injection renames e.g. attn.qkv.weight → attn.qkv.linear.weight;
     # loading after injection would leave those 48 backbone weights at random init.
@@ -265,6 +299,9 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
             print(f"  ibot_head: {len(_ibot_sd)} keys (student + teacher synced)")
 
     # Inject LoRA after warm-start so pretrained weights land in the right slots.
+    if lora_layers > 0 and unfreeze_blocks > 0:
+        raise ValueError("lora_layers and unfreeze_blocks are mutually exclusive — set one to 0.")
+
     if lora_layers > 0:
         inject_lora_chexfound(
             model.student.backbone, lora_layers=lora_layers, r=lora_r, alpha=lora_alpha)
@@ -273,6 +310,11 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
         # Teacher backbone already has the same pretrained weights as student;
         # sync so both have identical (random) LoRA initialisations too.
         model.teacher.backbone.load_state_dict(model.student.backbone.state_dict())
+    elif unfreeze_blocks > 0:
+        _unfreeze_last_backbone_blocks(model.student.backbone, unfreeze_blocks)
+        # Teacher backbone stays fully frozen (EMA updated from student).
+        for p in model.teacher.backbone.parameters():
+            p.requires_grad_(False)
 
     # Re-freeze all teacher parameters (LoRA injection may have unfrozen some).
     for p in model.teacher.parameters():
@@ -298,6 +340,8 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
     print(f"Student trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
     if lora_layers > 0:
         print(f"LoRA: last {lora_layers} blocks | r={lora_r} | alpha={lora_alpha}")
+    elif unfreeze_blocks > 0:
+        print(f"Unfreeze: last {unfreeze_blocks} backbone blocks + norm (no LoRA)")
     print(f"Head mode: {head_mode}" +
           (f" (unfreeze at epoch {head_unfreeze_epoch})" if head_mode == "unfreeze_after" else ""))
 
@@ -478,6 +522,7 @@ def train(cfg_dict: dict, out_dir: Path, use_wandb: bool = False) -> None:
                 "lora_layers":         lora_layers,
                 "lora_r":              lora_r,
                 "lora_alpha":          lora_alpha,
+                "unfreeze_blocks":     unfreeze_blocks,
                 "head_mode":           head_mode,
                 "head_unfreeze_epoch": head_unfreeze_epoch,
             },

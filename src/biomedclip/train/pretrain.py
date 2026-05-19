@@ -79,19 +79,18 @@ def make_scheduler(
     optimizer: torch.optim.Optimizer,
     warmup_epochs: int,
     total_epochs: int,
+    min_lr_frac: float = 0.1,
 ) -> torch.optim.lr_scheduler.LambdaLR:
-    """Linear warm-up followed by cosine annealing to zero.
+    """Linear warm-up followed by cosine annealing to min_lr_frac * peak_lr.
 
     During the first warmup_epochs epochs the lr rises linearly from 0 to peak.
-    Afterwards it follows a cosine curve that reaches 0 at epoch total_epochs.
+    Afterwards it follows a cosine curve that reaches min_lr_frac at epoch total_epochs.
     """
     def lr_lambda(epoch: int) -> float:
         if epoch < warmup_epochs:
-            # Linearly ramp up: fraction of warmup complete.
             return float(epoch + 1) / max(1, warmup_epochs)
-        # Cosine decay from 1.0 → 0.0 over the remaining epochs.
         progress = float(epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_frac + (1.0 - min_lr_frac) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -249,6 +248,7 @@ def main(args: argparse.Namespace) -> None:
         _unfreeze_last_blocks(model, args.unfreeze_blocks)
         print(f"Partial fine-tune: last {args.unfreeze_blocks} ViT blocks unfrozen (no LoRA)")
     else:
+        args.lora_alpha = 2.0 * args.lora_r  # enforce alpha = 2r regardless of CLI default
         inject_lora(model, args.lora_layers, args.lora_r, args.lora_alpha)
         print(
             f"LoRA injected into last {args.lora_layers} ViT blocks "

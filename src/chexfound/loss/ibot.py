@@ -47,7 +47,8 @@ class iBOTPatchLoss(nn.Module):
         teacher_output = teacher_output.float()
         Q = torch.exp(teacher_output / teacher_temp).t()  # K-by-B
         B = n_masked_patches_tensor
-        dist.all_reduce(B)
+        if dist.is_initialized():
+            dist.all_reduce(B)
         K = Q.shape[0]
 
         sum_Q = torch.sum(Q)

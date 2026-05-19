@@ -100,5 +100,45 @@ def inject_lora(model: nn.Module, lora_layers: int, r: int, alpha: float) -> Non
             p.requires_grad_(True)
 
 
+def unfreeze_or_inject_downstream_lora(
+    trunk: nn.Module,
+    lora_layers: int,
+    r: int = 8,
+    alpha: float | None = None,
+) -> list[nn.Parameter]:
+    """Prepare a frozen ViT trunk for downstream LoRA fine-tuning.
+
+    For each of the last lora_layers blocks:
+    - If already a LoRALinear (from pretraining): unfreezes lora_A/lora_B in place.
+    - If plain nn.Linear: wraps it with a fresh LoRALinear.
+
+    Returns the list of newly trainable encoder parameters.
+    """
+    if alpha is None:
+        alpha = float(r * 2)
+    blocks = trunk.blocks
+    n_blocks = len(blocks)
+    target_indices = range(n_blocks - min(lora_layers, n_blocks), n_blocks)
+    lora_params: list[nn.Parameter] = []
+
+    for i in target_indices:
+        block = blocks[i]
+        for parent_attr, child_attr in (
+            ("attn", "qkv"), ("attn", "proj"), ("mlp", "fc1"), ("mlp", "fc2")
+        ):
+            parent = getattr(block, parent_attr)
+            module = getattr(parent, child_attr)
+            if isinstance(module, LoRALinear):
+                module.lora_A.requires_grad_(True)
+                module.lora_B.requires_grad_(True)
+                lora_params += [module.lora_A, module.lora_B]
+            else:
+                new_module = LoRALinear(module, r, alpha)
+                setattr(parent, child_attr, new_module)
+                lora_params += [new_module.lora_A, new_module.lora_B]
+
+    return lora_params
+
+
 def count_trainable_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

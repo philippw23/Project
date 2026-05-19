@@ -51,7 +51,7 @@ def make_scheduler(
         if epoch < warmup_epochs:
             return float(epoch + 1) / max(1, warmup_epochs)
         progress = float(epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 

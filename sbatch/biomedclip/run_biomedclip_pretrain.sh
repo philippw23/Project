@@ -11,9 +11,9 @@
 
 # ── Training parameters (edit here) ──────────────────────────────────────────
 BATCH_SIZE=128
-NO_LORA=true       # true → unfreeze blocks, false → LoRA
+NO_LORA=false       # true → unfreeze blocks, false → LoRA
 LORA_LAYERS=4
-LORA_R=8
+LORA_R=64
 UNFREEZE_BLOCKS=11
 # ─────────────────────────────────────────────────────────────────────────────
 

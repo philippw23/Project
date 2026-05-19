@@ -9,19 +9,17 @@ metric:
 
 parameters:
   head:
-    values: [linear, mlp, mlp_no_meta]
+    value: mlp_no_meta
   lr:
     distribution: log_uniform_values
     min: 3e-5
     max: 5e-4
   dropout:
-    values: [0.3, 0.4, 0.5, 0.6]
-  meta_embed_dim:
-    values: [4, 8, 16, 32]
+    values: [0.4, 0.5, 0.6]
   weight_decay:
     values: [0.01, 0.05, 0.1]
   loss:
-    values: [ce, wce, focal, cb_focal, balanced_softmax]
+    values: [wce, focal, cb_focal, balanced_softmax]
   focal_gamma:
     values: [1.0, 2.0, 3.0]
   cb_beta:
@@ -34,6 +32,14 @@ parameters:
       - [64, 32]
   batch_size:
     values: [16, 32, 64]
+  finetune_lora_layers:
+    values: [0, 2, 4]
+  lr_encoder:
+    distribution: log_uniform_values
+    min: 1e-6
+    max: 1e-4
+  finetune_lora_r:
+    values: [4, 8, 16]
 
 command:
   - ${env}
@@ -45,11 +51,9 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --splits
-  - results/biomedclip_pretrain/run_20260428_051525/splits.json
+  - results/biomedclip_pretrain/run_bs128_unfreeze4_20260516_125128/split.json
   - --checkpoint
-  - results/biomedclip_pretrain/run_20260428_051525/best_val_checkpoint.pt
-  - --excel
-  - data/internal_dataset/metadata.xlsx
+  - results/biomedclip_pretrain/run_bs128_unfreeze4_20260516_125128/best_r1_checkpoint.pt
   - --out_dir
   - results
   - --use_mask

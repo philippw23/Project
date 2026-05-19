@@ -12,7 +12,8 @@
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 #run_bs128_unfreeze11_20260516_125128
 #run_bs128_lora11_20260516_125104
-CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_bs128_unfreeze11_20260516_125128/best_r1_checkpoint.pt"
+#run_bs128_lora4_20260516_125103
+CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_bs128_lora4_20260516_125103/best_r1_checkpoint.pt"
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
 BATCH_SIZE=64
 LR=1e-3
@@ -27,7 +28,11 @@ HEAD="mlp_no_meta"
 # Loss: ce, wce, ce_smooth, focal, cb_focal, ldam, balanced_softmax
 LOSS="focal"
 # Class weighting: none, inverse, sqrt, effective
-CLASS_WEIGHTING="sqrt"
+CLASS_WEIGHTING="inverse"
+# Encoder fine-tuning: 0 = frozen (linear probing), N = LoRA last N blocks
+FINETUNE_LORA_LAYERS=0
+LR_ENCODER=1e-5
+FINETUNE_LORA_R=8
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -65,6 +70,9 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/biomedc
     --head          $HEAD \
     --loss          $LOSS \
     --class_weighting $CLASS_WEIGHTING \
+    --finetune_lora_layers $FINETUNE_LORA_LAYERS \
+    --lr_encoder    $LR_ENCODER \
+    --finetune_lora_r $FINETUNE_LORA_R \
     --seed 42 \
     --wandb \
     --wandb_project biomedclip-downstream \

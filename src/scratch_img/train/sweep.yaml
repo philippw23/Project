@@ -9,7 +9,7 @@ metric:
 
 parameters:
   encoder:
-    values: [resnet18, vit_tiny]
+    value: vit_tiny
   lr_encoder:
     distribution: log_uniform_values
     min: 1e-4

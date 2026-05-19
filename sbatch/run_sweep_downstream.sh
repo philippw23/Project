@@ -5,15 +5,15 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=72:00:00
-#SBATCH --exclude=aioserver2
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
+#SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.err"
 
 # Usage:
 #   1. Create sweep and get ID:
 #        wandb sweep src/biomedclip/eval/sweep_downstream.yaml
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_downstream.sh
-SWEEP_ID="philipp-wiese/chexfound-downstream/w1r3qba3"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
+SWEEP_ID="philipp-wiese/chexfound-downstream/dsf7pmjv"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
 
 if [ -z "$SWEEP_ID" ]; then
     echo "ERROR: Set SWEEP_ID in this script before submitting."
@@ -33,9 +33,12 @@ source $home_dir/miniconda3/etc/profile.d/conda.sh
 conda activate $MY_CONDA_ENV
 echo Environment activated
 
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
-export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin:$PATH
+export PYTHONPATH=$home_dir/Project/src
 
 python -m wandb agent $SWEEP_ID
