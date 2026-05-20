@@ -13,12 +13,12 @@
 #run_bs128_unfreeze11_20260516_125128
 #run_bs128_lora11_20260516_125104
 #run_bs128_lora4_20260516_125103
-CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_bs128_lora4_20260516_125103/best_r1_checkpoint.pt"
+CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_bs128_lora4_20260519_191014/best_r1_checkpoint.pt"
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
-BATCH_SIZE=64
-LR=1e-3
+BATCH_SIZE=32
+LR=0.0003181387905557346
 DROPOUT=0.3
-HIDDEN_DIMS="256 128"
+HIDDEN_DIMS="64 32"
 META_EMBED_DIM=16
 WEIGHT_DECAY=0.01
 EPOCHS=50
@@ -28,9 +28,9 @@ HEAD="mlp_no_meta"
 # Loss: ce, wce, ce_smooth, focal, cb_focal, ldam, balanced_softmax
 LOSS="focal"
 # Class weighting: none, inverse, sqrt, effective
-CLASS_WEIGHTING="inverse"
+CLASS_WEIGHTING="sqrt"
 # Encoder fine-tuning: 0 = frozen (linear probing), N = LoRA last N blocks
-FINETUNE_LORA_LAYERS=0
+FINETUNE_LORA_LAYERS=4
 LR_ENCODER=1e-5
 FINETUNE_LORA_R=8
 # ─────────────────────────────────────────────────────────────────────────────

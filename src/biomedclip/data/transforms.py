@@ -90,6 +90,42 @@ def crop_around_mask(
     return crop
 
 
+def compute_crop_box(
+    image_arr: np.ndarray,
+    mask: np.ndarray,
+    context_fraction: float = 0.15,
+) -> tuple[int, int, int, int]:
+    """Return the crop box (r_start, r_end, c_start, c_end) in original image coordinates.
+
+    Uses the same geometry as :func:`crop_around_mask`.  When the mask is empty
+    or the box would exceed the image boundary the coordinates are clamped to the
+    image extent (matching the zero-padding behaviour of the crop function).
+    """
+    binary_mask = mask > 0
+    if not np.any(binary_mask):
+        H, W = image_arr.shape[:2]
+        return 0, H, 0, W
+
+    rows, cols = np.where(binary_mask)
+    r_min, r_max = int(rows.min()), int(rows.max())
+    c_min, c_max = int(cols.min()), int(cols.max())
+
+    box_h = r_max - r_min + 1
+    box_w = c_max - c_min + 1
+
+    H, W = image_arr.shape[:2]
+    context_px = math.ceil(min(H, W) * context_fraction)
+    side = max(box_h, box_w) + 2 * context_px
+
+    cy = (r_min + r_max) / 2
+    cx = (c_min + c_max) / 2
+
+    r_start, r_end, _, _ = _compute_crop_1d(cy, side, H)
+    c_start, c_end, _, _ = _compute_crop_1d(cx, side, W)
+
+    return r_start, r_end, c_start, c_end
+
+
 class SquarePad:
     """Pad the shorter side so the image becomes square (black border, centered)."""
 

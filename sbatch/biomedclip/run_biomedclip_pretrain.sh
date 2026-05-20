@@ -13,7 +13,7 @@
 BATCH_SIZE=128
 NO_LORA=false       # true → unfreeze blocks, false → LoRA
 LORA_LAYERS=4
-LORA_R=64
+LORA_R=32
 UNFREEZE_BLOCKS=11
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
         choices=FIELD_CONFIG.keys(),
         help="Dataset field to analyze.",
     )
+    parser.add_argument(
+        "--save-dir",
+        default=None,
+        help="Directory to save the plot instead of displaying it.",
+    )
     return parser.parse_args()
 
 
@@ -120,7 +125,10 @@ def print_distribution(
 
 
 def plot_distribution(
-    counts: pd.Series, field_name: str, age_data: pd.Series | None = None
+    counts: pd.Series,
+    field_name: str,
+    age_data: pd.Series | None = None,
+    save_dir: Path | None = None,
 ) -> None:
     field = FIELD_CONFIG[field_name]
     plt.figure(figsize=(12, 6))
@@ -144,18 +152,24 @@ def plot_distribution(
                 va="bottom",
             )
         plt.tight_layout()
-        plt.show()
-        return
+    else:
+        ax = counts.plot(kind="bar", alpha=0.5, edgecolor="black")
+        plt.title(f"{field['label']} Distribution")
+        plt.xlabel(field["label"])
+        plt.ylabel("Count")
+        plt.xticks(rotation=45, ha="right")
+        for index, value in enumerate(counts):
+            ax.text(index, value, str(value), ha="center", va="bottom")
+        plt.tight_layout()
 
-    ax = counts.plot(kind="bar", alpha=0.5, edgecolor="black")
-    plt.title(f"{field['label']} Distribution")
-    plt.xlabel(field["label"])
-    plt.ylabel("Count")
-    plt.xticks(rotation=45, ha="right")
-    for index, value in enumerate(counts):
-        ax.text(index, value, str(value), ha="center", va="bottom")
-    plt.tight_layout()
-    plt.show()
+    if save_dir is not None:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        out_path = save_dir / f"{field_name}_distribution.png"
+        plt.savefig(out_path, dpi=150)
+        print(f"Plot saved to: {out_path}")
+    else:
+        plt.show()
+    plt.close()
 
 
 def main() -> int:
@@ -178,8 +192,9 @@ def main() -> int:
     else:
         counts = result
 
+    save_dir = Path(args.save_dir) if args.save_dir else None
     print_distribution(counts, args.field, age_data=age_data)
-    plot_distribution(counts, args.field, age_data=age_data)
+    plot_distribution(counts, args.field, age_data=age_data, save_dir=save_dir)
     return 0
 
 

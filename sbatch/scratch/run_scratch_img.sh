@@ -6,53 +6,70 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
 #SBATCH --exclude=aioserver2
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_scratch_img.out"
-#SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_scratch_img.err"
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
-# Usage:
-#   sbatch run_scratch_img.sh resnet18
-#   sbatch run_scratch_img.sh vit_tiny
+# ── Parameters (edit here) ────────────────────────────────────────────────────
+SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+ENCODER="vit_tiny"   # vit_tiny, resnet18
+EPOCHS=100
+BATCH_SIZE=64
+LR_ENCODER=1e-4
+LR_MLP=3e-4
+WARMUP_EPOCHS=10
+WEIGHT_DECAY=0.05
+DROPOUT=0.3
+HIDDEN_DIMS="64"
+META_EMBED_DIM=0 # only used if head is mlp, e.g 16
 
-ENCODER="${1:?Usage: sbatch run_scratch_img.sh (resnet18|vit_tiny)}"
+# Head mode: mlp (age+sex fusion), mlp_no_meta (image only)
+HEAD="mlp_no_meta"
+# Loss: ce, wce, focal, cb_focal, balanced_softmax
+LOSS="focal"
+# Class weighting: none, inverse, sqrt, effective
+CLASS_WEIGHTING="sqrt"
+
+PATIENCE=100
+# ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
-echo "Starting job ${SLURM_JOBID} — encoder: $ENCODER"
-echo SLURM assigned me these nodes:
+
+LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_scratch_img_${ENCODER}_${HEAD}_${LOSS}.out"
+exec > "$LOG_FILE" 2>&1
+
+echo "Starting job ${SLURM_JOBID} — encoder: $ENCODER | head: $HEAD"
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 
 MY_CONDA_ENV="master"
-export CONDA_EXE=$home_dir/miniconda3/bin/conda
-source $home_dir/miniconda3/etc/profile.d/conda.sh
-conda activate $MY_CONDA_ENV
-echo Environment activated
-
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=1
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
-export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin:$PATH
 export PYTHONPATH=$home_dir/Project/src
-export PYTHONUNBUFFERED=1
-export OMP_NUM_THREADS=1
 unset PYTORCH_NVML_BASED_CUDA_CHECK
+echo "Environment: $MY_CONDA_ENV"
 
-python $home_dir/Project/src/scratch_img_downstream.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/scratch_img_downstream.py \
     --encoder        $ENCODER \
-    --english \
+    --head           $HEAD \
+    --splits         $SPLITS \
     --out_dir        $home_dir/Project/results/scratch_img \
-    --epochs         100 \
-    --patience       15 \
-    --batch_size     64 \
-    --lr_encoder     1e-3 \
-    --lr_mlp         1e-3 \
-    --warmup_epochs  10 \
-    --weight_decay   0.05 \
-    --dropout        0.3 \
-    --hidden_dims    128 \
-    --meta_embed_dim 16 \
-    --loss           focal \
-    --class_weighting sqrt \
+    --epochs         $EPOCHS \
+    --patience       $PATIENCE \
+    --batch_size     $BATCH_SIZE \
+    --lr_encoder     $LR_ENCODER \
+    --lr_mlp         $LR_MLP \
+    --warmup_epochs  $WARMUP_EPOCHS \
+    --weight_decay   $WEIGHT_DECAY \
+    --dropout        $DROPOUT \
+    --hidden_dims    $HIDDEN_DIMS \
+    --meta_embed_dim $META_EMBED_DIM \
+    --loss           $LOSS \
+    --class_weighting $CLASS_WEIGHTING \
     --use_mask \
     --seed           42 \
     --wandb \

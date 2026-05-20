@@ -10,16 +10,18 @@ metric:
 parameters:
   encoder:
     value: vit_tiny
+  head:
+    values: [mlp, mlp_no_meta]
   lr_encoder:
     distribution: log_uniform_values
-    min: 1e-4
-    max: 1e-2
+    min: 1e-5
+    max: 3e-4
   lr_mlp:
     distribution: log_uniform_values
     min: 1e-4
-    max: 5e-3
+    max: 1e-3
   warmup_epochs:
-    values: [5, 10]
+    values: [10, 20]
   weight_decay:
     distribution: log_uniform_values
     min: 0.01

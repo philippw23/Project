@@ -131,6 +131,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
 
     parser.add_argument("--encoder", required=True, choices=["resnet18", "vit_tiny"])
+    parser.add_argument("--head", default="mlp", choices=["mlp", "mlp_no_meta"],
+                        help="mlp: image + age/sex fusion (default);  mlp_no_meta: image only")
 
     parser.add_argument("--splits",  default=None,
                         help="Path to a pre-existing split.json. If omitted, splits are generated.")
@@ -184,7 +186,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     cfg = wandb.config
     sweep_keys = (
-        "encoder", "lr_encoder", "lr_mlp", "warmup_epochs", "weight_decay",
+        "encoder", "head", "lr_encoder", "lr_mlp", "warmup_epochs", "weight_decay",
         "dropout", "meta_embed_dim", "batch_size", "loss", "class_weighting",
         "focal_gamma", "cb_beta",
     )
@@ -219,8 +221,10 @@ def main(args: argparse.Namespace) -> None:
     # ── Encoder + MLP ─────────────────────────────────────────────────────────
     encoder, embed_dim = build_encoder(args.encoder)
     encoder = encoder.to(device)
-    mlp = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim).to(device)
-    print(f"Encoder: {args.encoder} ({embed_dim}-dim) | "
+    use_meta = args.head != "mlp_no_meta"
+    mlp = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim,
+                        use_meta=use_meta).to(device)
+    print(f"Encoder: {args.encoder} ({embed_dim}-dim) | Head: {args.head} | "
           f"Params: {sum(p.numel() for p in encoder.parameters()):,}")
 
     # ── Data ──────────────────────────────────────────────────────────────────
@@ -291,7 +295,7 @@ def main(args: argparse.Namespace) -> None:
 
     # ── Output dir ────────────────────────────────────────────────────────────
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_tag = f"{ts}_{args.encoder}_{args.loss}"
+    run_tag = f"{ts}_{args.encoder}_{args.head}_{args.loss}"
     if use_wandb and wandb.run:
         run_tag = f"{run_tag}_{wandb.run.id}"
     out_dir = Path(args.out_dir) / run_tag

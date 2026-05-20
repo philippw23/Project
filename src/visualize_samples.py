@@ -6,13 +6,14 @@ import random
 import sys
 from pathlib import Path
 
+import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy.ndimage import gaussian_filter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from biomedclip.data.transforms import crop_around_mask
+from biomedclip.data.transforms import compute_crop_box, crop_around_mask
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 RESULTS_DIR = ROOT_DIR / "results"
@@ -110,8 +111,8 @@ def load_sample(image_path: Path, dataset: str) -> tuple[np.ndarray, np.ndarray]
     return image_arr, mask
 
 
-def make_green_overlay(image_arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Return an RGB float [0,1] image with a diffused green overlay on the tumor."""
+def make_red_overlay(image_arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Return an RGB float [0,1] image with a diffused red overlay on the tumor."""
     binary_mask = (mask > 0).astype(float)
 
     rows, cols = np.where(binary_mask > 0)
@@ -131,11 +132,19 @@ def make_green_overlay(image_arr: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
     gray = image_arr / image_arr.max() if image_arr.max() > 0 else image_arr.copy()
 
-    r = gray * (1.0 - alpha)
-    g = gray * (1.0 - alpha) + alpha
+    r = gray * (1.0 - alpha) + alpha
+    g = gray * (1.0 - alpha)
     b = gray * (1.0 - alpha)
 
     return np.stack([r, g, b], axis=-1)
+
+
+def tight_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Return (r_min, c_min, r_max, c_max) of the mask, or None if empty."""
+    rows, cols = np.where(mask > 0)
+    if len(rows) == 0:
+        return None
+    return int(rows.min()), int(cols.min()), int(rows.max()), int(cols.max())
 
 
 def main(argv=None):
@@ -165,7 +174,7 @@ def main(argv=None):
     sample_count = len(samples)
     cols = 5
     groups = math.ceil(sample_count / cols)
-    fig, axes = plt.subplots(groups * 3, cols, figsize=(18, max(9, groups * 10)))
+    fig, axes = plt.subplots(groups * 2, cols, figsize=(18, max(6, groups * 8)))
     axes = np.atleast_2d(axes)
 
     for ax in axes.flat:
@@ -173,27 +182,40 @@ def main(argv=None):
 
     for index, image_path in enumerate(samples):
         image_arr, mask = load_sample(image_path, dataset)
-        overlay = make_green_overlay(image_arr, mask)
+        overlay = make_red_overlay(image_arr, mask)
         cropped = crop_around_mask(image_arr, mask)
 
         group = index // cols
         col = index % cols
-        original_row = group * 3
-        overlay_row = original_row + 1
-        crop_row = original_row + 2
+        overlay_row = group * 2
+        crop_row = overlay_row + 1
 
-        axes[original_row][col].imshow(image_arr, cmap="gray")
-        axes[original_row][col].set_title(image_path.stem, fontsize=7)
+        # --- composite panel: red overlay + green tight bbox + yellow crop box ---
+        ax_ov = axes[overlay_row][col]
+        ax_ov.imshow(overlay)
+        ax_ov.set_title(image_path.stem, fontsize=7)
 
-        axes[overlay_row][col].imshow(overlay)
+        bbox = tight_bbox(mask)
+        if bbox is not None:
+            r_min, c_min, r_max, c_max = bbox
+            ax_ov.add_patch(patches.Rectangle(
+                (c_min, r_min), c_max - c_min, r_max - r_min,
+                linewidth=1.5, edgecolor="lime", facecolor="none",
+            ))
 
+        r_start, r_end, c_start, c_end = compute_crop_box(image_arr, mask)
+        ax_ov.add_patch(patches.Rectangle(
+            (c_start, r_start), c_end - c_start, r_end - r_start,
+            linewidth=1.5, edgecolor="yellow", facecolor="none",
+        ))
+
+        # --- crop panel ---
         axes[crop_row][col].imshow(cropped, cmap="gray")
 
     for group in range(groups):
-        base_row = group * 3
-        axes[base_row][0].set_ylabel("Original", fontsize=11)
-        axes[base_row + 1][0].set_ylabel("Tumor Highlight", fontsize=11)
-        axes[base_row + 2][0].set_ylabel("Tumor Crop", fontsize=11)
+        base_row = group * 2
+        axes[base_row][0].set_ylabel("Overlay", fontsize=11)
+        axes[base_row + 1][0].set_ylabel("Tumor Crop", fontsize=11)
 
     plt.tight_layout()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
