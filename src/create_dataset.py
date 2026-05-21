@@ -10,6 +10,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -18,9 +19,9 @@ import pandas as pd
 ROOT_DIR          = Path(__file__).resolve().parent.parent
 EXCEL_PATH        = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
 FULL_REPORTS_PATH = ROOT_DIR / "data" / "internal_dataset" / "text" / "full_reports.json"
-IMAGES_DIR        = ROOT_DIR / "data" / "internal_dataset" / "images"
-MASKS_DIR         = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
-OUTPUT_PATH       = ROOT_DIR / "data" / "internal_dataset" / "dataset_full.json"
+DEFAULT_IMAGES_DIR  = ROOT_DIR / "data" / "internal_dataset" / "images"
+DEFAULT_MASKS_DIR   = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
+DEFAULT_OUTPUT_PATH = ROOT_DIR / "data" / "internal_dataset" / "dataset_full.json"
 
 
 def _normalise_id(val: str) -> str:
@@ -30,7 +31,27 @@ def _normalise_id(val: str) -> str:
         return str(val)
 
 
-def main() -> None:
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Assemble dataset_full.json from metadata, reports, images, and masks."
+    )
+    parser.add_argument(
+        "--images_dir",
+        default=str(DEFAULT_IMAGES_DIR),
+        help="Directory containing image PNGs (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--output_path",
+        default=str(DEFAULT_OUTPUT_PATH),
+        help="Path to write the dataset JSON (default: %(default)s)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(args: argparse.Namespace) -> None:
+    images_dir = Path(args.images_dir)
+    output_path = Path(args.output_path)
+
     df = pd.read_excel(
         EXCEL_PATH,
         sheet_name="internal_data_matched",
@@ -76,8 +97,8 @@ def main() -> None:
 
     for _, row in df.iterrows():
         stem       = Path(row["file_name"]).stem
-        image_path = IMAGES_DIR / f"{stem}.png"
-        mask_path  = MASKS_DIR  / f"{stem}.png"
+        image_path = images_dir / f"{stem}.png"
+        mask_path  = DEFAULT_MASKS_DIR / f"{stem}.png"
 
         if not image_path.exists():
             skipped_no_image += 1
@@ -147,11 +168,11 @@ def main() -> None:
     print(f"  Unknown age:  {n_unknown_age}")
     print(f"  Unknown sex:  {n_unknown_sex}")
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as fh:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(entries, fh, indent=2, ensure_ascii=False)
-    print(f"Saved -> {OUTPUT_PATH}")
+    print(f"Saved -> {output_path}")
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_args())

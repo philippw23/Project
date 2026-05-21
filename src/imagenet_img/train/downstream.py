@@ -1,0 +1,380 @@
+"""End-to-end supervised downstream classifier — ImageNet pretrained ViT-B/16, frozen.
+
+The encoder (ViT-B/16, ImageNet-1k weights) is kept frozen throughout training.
+Only the MalignancyMLP head is trained (linear probing).
+
+Val and test embeddings are pre-computed once before the training loop.
+Train embeddings are computed each batch because random augmentations differ per epoch.
+
+Usage:
+    python src/imagenet_img_downstream.py \\
+        --splits     data/internal_dataset/split.json \\
+        --out_dir    results/imagenet_img \\
+        --epochs     100 \\
+        --lr_mlp     3e-4
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import warnings
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.metrics import (balanced_accuracy_score, classification_report,
+                              confusion_matrix, f1_score,
+                              precision_recall_fscore_support)
+from torch.utils.data import DataLoader
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
+                                       IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES)
+from biomedclip.data.splits import build_stratified_splits
+from biomedclip.loss.classification import build_classification_loss, compute_class_weights
+from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
+from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_OUT_DIR
+from imagenet_img.data.transforms import build_train_transform, build_val_transform
+from imagenet_img.models.encoders import build_encoder
+
+
+# ── Training / evaluation ─────────────────────────────────────────────────────
+
+def train_one_epoch(
+    encoder: nn.Module,
+    mlp: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    device: torch.device,
+) -> float:
+    mlp.train()
+    total_loss = 0.0
+    for batch in loader:
+        images = batch["image"].to(device)
+        age    = batch["age"].to(device)
+        sex    = batch["sex"].to(device)
+        labels = batch["label"].to(device)
+
+        with torch.no_grad():
+            emb = F.normalize(encoder(images), dim=-1)
+
+        logits = mlp(emb, age, sex)
+        loss   = criterion(logits, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+
+    return total_loss / len(loader)
+
+
+@torch.no_grad()
+def evaluate_cached(
+    mlp: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    """Evaluate on pre-computed embeddings (no encoder forward pass)."""
+    mlp.eval()
+    total_loss = 0.0
+    all_preds, all_labels = [], []
+    for emb, age, sex, labels in loader:
+        emb    = emb.to(device)
+        age    = age.to(device)
+        sex    = sex.to(device)
+        labels = labels.to(device)
+
+        logits = mlp(emb, age, sex)
+        total_loss += criterion(logits, labels).item()
+        all_preds.append(logits.argmax(dim=1).cpu())
+        all_labels.append(labels.cpu())
+
+    preds  = torch.cat(all_preds).numpy()
+    labels = torch.cat(all_labels).numpy()
+    acc    = float((preds == labels).mean())
+    return total_loss / len(loader), acc, preds, labels
+
+
+# ── Argparse ──────────────────────────────────────────────────────────────────
+
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="ImageNet pretrained ViT-B/16 downstream classifier (linear probing)."
+    )
+
+    parser.add_argument("--head", default="mlp", choices=["mlp", "mlp_no_meta"],
+                        help="mlp: image + age/sex fusion (default);  mlp_no_meta: image only")
+
+    parser.add_argument("--splits",  default=None,
+                        help="Path to a pre-existing split.json. If omitted, splits are generated.")
+    parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON),
+                        help="Path to dataset_full.json (default: %(default)s)")
+    parser.add_argument("--downstream_train_frac", type=float, default=0.8)
+    parser.add_argument("--downstream_val_frac",   type=float, default=0.1)
+    parser.add_argument("--test_frac",             type=float, default=0.1)
+    parser.add_argument("--out_dir",  default=str(DEFAULT_OUT_DIR))
+    parser.add_argument("--use_mask", action="store_true",
+                        help="Crop images around the lesion mask before feeding to the encoder.")
+
+    parser.add_argument("--epochs",        type=int,   default=100)
+    parser.add_argument("--patience",      type=int,   default=15)
+    parser.add_argument("--batch_size",    type=int,   default=32)
+    parser.add_argument("--lr_mlp",        type=float, default=3e-4)
+    parser.add_argument("--weight_decay",  type=float, default=0.05)
+    parser.add_argument("--dropout",       type=float, default=0.3)
+    parser.add_argument("--meta_embed_dim", type=int,  default=16)
+    parser.add_argument("--hidden_dims",   type=str,   nargs="+", default=["128"])
+
+    parser.add_argument("--loss", default="ce",
+                        choices=["ce", "wce", "focal", "cb_focal", "balanced_softmax", "ldam"])
+    parser.add_argument("--class_weighting", default="sqrt",
+                        choices=["none", "inverse", "sqrt", "effective"])
+    parser.add_argument("--focal_gamma", type=float, default=2.0)
+    parser.add_argument("--cb_beta",     type=float, default=0.99)
+    parser.add_argument("--label_smoothing", type=float, default=0.0)
+    parser.add_argument("--ldam_max_margin", type=float, default=0.5)
+    parser.add_argument("--ldam_scale",      type=float, default=30.0)
+
+    parser.add_argument("--overfit_n",     type=int, default=0,
+                        help="If > 0, truncate all splits to N samples (overfit sanity check).")
+    parser.add_argument("--seed",          type=int, default=42)
+    parser.add_argument("--wandb",         action="store_true")
+    parser.add_argument("--wandb_project", default="imagenet-img-downstream")
+    parser.add_argument("--wandb_run",     default=None)
+    parser.add_argument("--wandb_entity",  default=None)
+    parser.add_argument("--sweep",         action="store_true")
+
+    args = parser.parse_args(argv)
+
+    raw = " ".join(str(x) for x in args.hidden_dims)
+    args.hidden_dims = [int(x) for x in raw.strip("[]").replace(",", " ").split()]
+
+    return args
+
+
+def _apply_sweep_config(args: argparse.Namespace) -> None:
+    cfg = wandb.config
+    sweep_keys = (
+        "head", "lr_mlp", "weight_decay", "dropout", "meta_embed_dim",
+        "batch_size", "loss", "class_weighting", "focal_gamma", "cb_beta",
+    )
+    for key in sweep_keys:
+        if key in cfg:
+            setattr(args, key, cfg[key])
+    if "hidden_dims" in cfg:
+        args.hidden_dims = list(cfg["hidden_dims"])
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main(args: argparse.Namespace) -> None:
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}  |  Encoder: ViT-B/16 (ImageNet pretrained, frozen)")
+
+    use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
+    if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
+        warnings.warn("--wandb/--sweep set but wandb is not installed.")
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run,
+            config=vars(args),
+        )
+        if args.sweep:
+            _apply_sweep_config(args)
+
+    # ── Encoder + MLP ─────────────────────────────────────────────────────────
+    encoder, embed_dim = build_encoder()
+    encoder = encoder.to(device)
+    encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+
+    use_meta = args.head != "mlp_no_meta"
+    mlp = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim,
+                        use_meta=use_meta).to(device)
+    print(f"Encoder: ViT-B/16 ({embed_dim}-dim, frozen) | Head: {args.head} | "
+          f"MLP params: {sum(p.numel() for p in mlp.parameters()):,}")
+
+    # ── Data ──────────────────────────────────────────────────────────────────
+    if args.splits is not None:
+        with open(args.splits, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        splits = {"train": raw["train"], "val": raw["val"], "test": raw["test"]}
+    else:
+        train, val, test = build_stratified_splits(args, run_dir=Path(args.out_dir))
+        splits = {"train": train, "val": val, "test": test}
+
+    if args.overfit_n > 0:
+        subset = splits["train"][:args.overfit_n]
+        splits["train"] = subset
+        splits["val"]   = subset
+        splits["test"]  = subset
+
+    all_samples = splits["train"] + splits["val"] + splits["test"]
+    age_sex_lookup = {
+        Path(s["image"]).stem: (float(s["age"]), float(s["sex"]))
+        for s in all_samples
+    }
+
+    train_ages = [s["age"] for s in splits["train"]]
+    age_mean = float(np.mean(train_ages))
+    age_std  = float(np.std(train_ages))
+
+    preprocess_train = build_train_transform()
+    preprocess_val   = build_val_transform()
+
+    train_ds = DownstreamDataset(splits["train"], age_sex_lookup, age_mean, age_std,
+                                  preprocess_train, use_mask=args.use_mask)
+    val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
+                                  preprocess_val,   use_mask=args.use_mask)
+    test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
+                                  preprocess_val,   use_mask=args.use_mask)
+    print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
+
+    use_pin       = device.type == "cuda"
+    loader_kwargs = {"batch_size": args.batch_size, "num_workers": 4, "pin_memory": use_pin}
+    train_loader = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
+    val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
+    test_loader  = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
+
+    # ── Pre-compute val and test embeddings ───────────────────────────────────
+    print("Pre-computing val and test embeddings...")
+    val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader,  device)
+    test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader, device)
+
+    emb_loader_kwargs = {"batch_size": args.batch_size, "num_workers": 0, "pin_memory": use_pin}
+    val_emb_loader  = DataLoader(EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl),
+                                 shuffle=False, **emb_loader_kwargs)
+    test_emb_loader = DataLoader(EmbeddingDataset(test_emb, test_age, test_sex, test_lbl),
+                                 shuffle=False, **emb_loader_kwargs)
+
+    # ── Class weighting ───────────────────────────────────────────────────────
+    train_labels_all = torch.tensor(
+        [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
+    )
+    label_counts  = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
+    class_weights = compute_class_weights(label_counts, NUM_CLASSES, args.class_weighting,
+                                           args.cb_beta, device)
+    criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
+
+    # ── Optimizer ─────────────────────────────────────────────────────────────
+    optimizer = torch.optim.AdamW(mlp.parameters(), lr=args.lr_mlp,
+                                   weight_decay=args.weight_decay)
+
+    # ── Output dir ────────────────────────────────────────────────────────────
+    ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_tag = f"{ts}_{args.head}_{args.loss}"
+    if use_wandb and wandb.run:
+        run_tag = f"{run_tag}_{wandb.run.id}"
+    out_dir = Path(args.out_dir) / run_tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = out_dir / "best_checkpoint.pt"
+
+    # ── Training loop ─────────────────────────────────────────────────────────
+    best_val_loss    = float("inf")
+    patience_counter = 0
+    print(f"\nTraining for {args.epochs} epochs (patience={args.patience})\n")
+
+    for epoch in range(1, args.epochs + 1):
+        train_loss                               = train_one_epoch(encoder, mlp, train_loader,
+                                                                    optimizer, criterion, device)
+        val_loss, val_acc, val_preds, val_labels = evaluate_cached(mlp, val_emb_loader,
+                                                                     criterion, device)
+
+        val_bal_acc      = balanced_accuracy_score(val_labels, val_preds)
+        val_combined_acc = 0.5 * val_acc + 0.5 * val_bal_acc
+
+        print(
+            f"Epoch {epoch:03d}/{args.epochs} | "
+            f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
+            f"val_acc={val_acc:.3f} | val_bal_acc={val_bal_acc:.3f} | "
+            f"val_combined_acc={val_combined_acc:.3f}"
+        )
+        if use_wandb:
+            wandb.log({
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "val/acc": val_acc,
+                "val/balanced_acc": val_bal_acc,
+                "val/combined_acc": val_combined_acc,
+            }, step=epoch)
+
+        if val_loss < best_val_loss:
+            best_val_loss    = val_loss
+            patience_counter = 0
+            torch.save({
+                "epoch": epoch,
+                "mlp_state_dict": mlp.state_dict(),
+                "val_loss": val_loss,
+                "args": vars(args),
+            }, ckpt_path)
+        else:
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                print(f"Early stopping at epoch {epoch}.")
+                break
+
+    # ── Test evaluation ───────────────────────────────────────────────────────
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    mlp.load_state_dict(ckpt["mlp_state_dict"])
+
+    test_loss, test_acc, test_preds, test_labels = evaluate_cached(mlp, test_emb_loader,
+                                                                     criterion, device)
+    label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
+
+    print("\n" + "=" * 60)
+    print("TEST RESULTS")
+    print("=" * 60)
+    print(f"Loss: {test_loss:.4f}  |  Accuracy: {test_acc:.3f}")
+    test_bal_acc = balanced_accuracy_score(test_labels, test_preds)
+    print(f"Balanced accuracy: {test_bal_acc:.3f}")
+    print(f"Macro F1: {f1_score(test_labels, test_preds, average='macro'):.3f}")
+    print()
+    print(classification_report(test_labels, test_preds,
+                                  labels=list(range(NUM_CLASSES)),
+                                  target_names=label_names, digits=3, zero_division=0))
+    print("Confusion matrix (rows=true, cols=pred):")
+    print(pd.DataFrame(
+        confusion_matrix(test_labels, test_preds, labels=list(range(NUM_CLASSES))),
+        index=label_names, columns=label_names,
+    ).to_string())
+
+    if use_wandb:
+        test_prec, test_rec, test_f1, _ = precision_recall_fscore_support(
+            test_labels, test_preds, average="macro", zero_division=0
+        )
+        per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
+            test_labels, test_preds, labels=list(range(NUM_CLASSES)), zero_division=0
+        )
+        log_dict = {
+            "test/loss": test_loss, "test/acc": test_acc,
+            "test/balanced_acc": test_bal_acc,
+            "test/precision_macro": test_prec,
+            "test/recall_macro": test_rec,
+            "test/f1_macro": test_f1,
+        }
+        for i, name in enumerate(label_names):
+            log_dict[f"test/precision_{name}"] = per_class_prec[i]
+            log_dict[f"test/recall_{name}"]    = per_class_rec[i]
+            log_dict[f"test/f1_{name}"]        = per_class_f1[i]
+        wandb.log(log_dict)
+        wandb.finish()
+
+    print(f"\nBest val loss: {best_val_loss:.4f}")
+    print(f"Checkpoint saved to: {ckpt_path}")

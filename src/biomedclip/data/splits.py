@@ -6,6 +6,9 @@ import warnings
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
@@ -424,6 +427,14 @@ def _group_by_patient(samples: list[dict]) -> list[list[dict]]:
     return list(groups.values())
 
 
+def _mask_has_pixels(mask_path: Path) -> bool:
+    """Return True iff *mask_path* exists and contains at least one foreground pixel."""
+    if not mask_path.exists():
+        return False
+    mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
+    return bool(np.any(mask > 0))
+
+
 def build_stratified_splits(
     args,
     run_dir: Path | None = None,
@@ -431,7 +442,7 @@ def build_stratified_splits(
     """Create train / val / test splits from dataset_full.json.
 
     Reads from args.dataset (path to dataset_full.json produced by create_dataset.py).
-    Filters to entries with non-null report AND non-null label.
+    Filters to entries with non-null report, non-null label, and a valid segmentation mask.
     Encodes "unknown" age/sex as 0.5 float.
     Splits at the patient level to prevent leakage; stratifies by majority label.
 
@@ -442,13 +453,16 @@ def build_stratified_splits(
         all_entries = json.load(fh)
 
     samples: list[dict] = []
-    skipped = {"no_report": 0, "no_label": 0}
+    skipped = {"no_report": 0, "no_label": 0, "no_mask": 0}
     for e in all_entries:
         if not e.get("report"):
             skipped["no_report"] += 1
             continue
         if not e.get("label"):
             skipped["no_label"] += 1
+            continue
+        if not _mask_has_pixels(Path(e.get("mask", ""))):
+            skipped["no_mask"] += 1
             continue
         sample = dict(e)
         age = e["age"]
@@ -458,8 +472,9 @@ def build_stratified_splits(
         samples.append(sample)
 
     print(
-        f"Complete samples (report+label): {len(samples)}"
-        f"  (skipped: {skipped['no_report']} no report, {skipped['no_label']} no label)"
+        f"Complete samples (report+label+mask): {len(samples)}"
+        f"  (skipped: {skipped['no_report']} no report, {skipped['no_label']} no label,"
+        f" {skipped['no_mask']} no mask)"
     )
 
     if not samples:

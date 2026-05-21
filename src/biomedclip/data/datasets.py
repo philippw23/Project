@@ -106,6 +106,70 @@ class DownstreamDataset(Dataset):
         }
 
 
+class DownstreamDatasetWithText(Dataset):
+    """Returns (image_tensor, text_tokens, age_norm, sex, label_idx) for each sample.
+
+    Text is built from befund_en + beurteilung_en (preferred) or report (fallback).
+    """
+
+    def __init__(
+        self,
+        samples: list[dict],
+        age_sex_lookup: dict[str, tuple[float, float]],
+        age_mean: float,
+        age_std: float,
+        preprocess,
+        tokenizer,
+        use_mask: bool,
+    ) -> None:
+        valid = []
+        for s in samples:
+            stem = Path(s["image"]).stem
+            if stem not in age_sex_lookup:
+                continue
+            if s["label"] not in LABEL_TO_IDX:
+                continue
+            valid.append(s)
+        self.samples        = valid
+        self.age_sex_lookup = age_sex_lookup
+        self.age_mean       = age_mean
+        self.age_std        = age_std
+        self.preprocess     = preprocess
+        self.tokenizer      = tokenizer
+        self.use_mask       = use_mask
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        s    = self.samples[idx]
+        stem = Path(s["image"]).stem
+        age_raw, sex = self.age_sex_lookup[stem]
+
+        image     = Image.open(s["image"]).convert("RGB")
+        mask_path = Path(s["mask"])
+        if self.use_mask and mask_path.exists():
+            image_arr = np.array(image.convert("L"), dtype=float)
+            mask_arr  = np.array(Image.open(mask_path).convert("L"), dtype=float)
+            cropped   = crop_around_mask(image_arr, mask_arr)
+            image     = Image.fromarray(cropped.astype(np.uint8)).convert("RGB")
+
+        image_tensor = self.preprocess(image)
+        age_norm     = (age_raw - self.age_mean) / (self.age_std + 1e-6)
+        label        = LABEL_TO_IDX[s["label"]]
+
+        text        = " ".join(filter(None, [s.get("befund_en"), s.get("beurteilung_en")])) or s.get("report") or ""
+        text_tokens = self.tokenizer([text], context_length=256).squeeze(0)
+
+        return {
+            "image": image_tensor,
+            "text":  text_tokens,
+            "age":   torch.tensor(age_norm, dtype=torch.float32),
+            "sex":   torch.tensor(sex,      dtype=torch.float32),
+            "label": torch.tensor(label,    dtype=torch.long),
+        }
+
+
 class EmbeddingDataset(Dataset):
     """Wraps pre-computed embeddings, age, sex, and labels."""
 
