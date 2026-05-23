@@ -43,6 +43,7 @@ from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_
 from biomedclip.data.datasets import (
     DownstreamDatasetWithText, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
 )
+from biomedclip.data.transforms import build_train_transform
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.lora import inject_lora
 from biomedclip.models.classifier import LinearHead, MalignancyMLP
@@ -87,18 +88,32 @@ def extract_img_text_embeddings(
         torch.cat(all_lbl),
     )
 
-
-def train_one_epoch(
-    head: nn.Module,
-    loader: DataLoader,
+def train_one_epoch_aug(
+    head:      nn.Module,
+    encoder:   nn.Module,
+    loader:    DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
-    device: torch.device,
+    device:    torch.device,
 ) -> float:
+    """Training loop with on-the-fly augmentation.
+
+    Passes augmented images through the frozen encoder each batch so that
+    random augmentations produce different embeddings every epoch.
+    """
     head.train()
+    encoder.eval()
     total_loss = 0.0
-    for emb, age, sex, lbl in loader:
-        emb, age, sex, lbl = emb.to(device), age.to(device), sex.to(device), lbl.to(device)
+    for batch in loader:
+        images = batch["image"].to(device)
+        texts  = batch["text"].to(device)
+        age    = batch["age"].to(device)
+        sex    = batch["sex"].to(device)
+        lbl    = batch["label"].to(device)
+        with torch.no_grad():
+            img_emb = F.normalize(encoder.encode_image(images), dim=-1)
+            txt_emb = F.normalize(encoder.encode_text(texts),   dim=-1)
+            emb     = torch.cat([img_emb, txt_emb], dim=-1)
         optimizer.zero_grad()
         loss = criterion(head(emb, age, sex), lbl)
         loss.backward()
@@ -253,34 +268,33 @@ def main(args: argparse.Namespace) -> None:
     age_std  = float(np.std(train_ages))
     print(f"Age stats (train): mean={age_mean:.1f}, std={age_std:.1f}")
 
-    ds_kwargs = dict(
-        age_sex_lookup=age_sex_lookup, age_mean=age_mean, age_std=age_std,
-        preprocess=preprocess_val, tokenizer=tokenizer, use_mask=args.use_mask,
-    )
-    train_ds = DownstreamDatasetWithText(splits["train"], **ds_kwargs)
-    val_ds   = DownstreamDatasetWithText(splits["val"],   **ds_kwargs)
-    test_ds  = DownstreamDatasetWithText(splits["test"],  **ds_kwargs)
+    preprocess_train = build_train_transform(preprocess_val)
+    val_kwargs   = dict(age_sex_lookup=age_sex_lookup, age_mean=age_mean, age_std=age_std,
+                        preprocess=preprocess_val,   tokenizer=tokenizer, use_mask=args.use_mask)
+    train_kwargs = dict(age_sex_lookup=age_sex_lookup, age_mean=age_mean, age_std=age_std,
+                        preprocess=preprocess_train, tokenizer=tokenizer, use_mask=args.use_mask)
+
+    train_ds = DownstreamDatasetWithText(splits["train"], **train_kwargs)
+    val_ds   = DownstreamDatasetWithText(splits["val"],   **val_kwargs)
+    test_ds  = DownstreamDatasetWithText(splits["test"],  **val_kwargs)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
     use_pin       = device.type == "cuda"
     loader_kwargs = {"batch_size": args.batch_size, "num_workers": 4, "pin_memory": use_pin}
-    train_loader_raw = DataLoader(train_ds, shuffle=False, **loader_kwargs)
+    train_loader = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
     val_loader_raw   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
     test_loader_raw  = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
-    # ── Pre-compute image+text embeddings ─────────────────────────────────────
-    print("Pre-computing image+text embeddings...")
-    train_emb, train_age, train_sex, train_lbl = extract_img_text_embeddings(model, train_loader_raw, device)
-    val_emb,   val_age,   val_sex,   val_lbl   = extract_img_text_embeddings(model, val_loader_raw,   device)
-    test_emb,  test_age,  test_sex,  test_lbl  = extract_img_text_embeddings(model, test_loader_raw,  device)
-    print(f"Embedding dim: {train_emb.shape[1]}")
+    # ── Pre-compute val/test embeddings (train is embedded on-the-fly for augmentation) ──
+    print("Pre-computing val/test embeddings...")
+    val_emb,  val_age,  val_sex,  val_lbl  = extract_img_text_embeddings(model, val_loader_raw,  device)
+    test_emb, test_age, test_sex, test_lbl = extract_img_text_embeddings(model, test_loader_raw, device)
+    print(f"Embedding dim: {val_emb.shape[1]}")
 
-    train_loader = DataLoader(EmbeddingDataset(train_emb, train_age, train_sex, train_lbl),
-                              batch_size=args.batch_size, shuffle=True)
-    val_loader   = DataLoader(EmbeddingDataset(val_emb,   val_age,   val_sex,   val_lbl),
-                              batch_size=args.batch_size, shuffle=False)
-    test_loader  = DataLoader(EmbeddingDataset(test_emb,  test_age,  test_sex,  test_lbl),
-                              batch_size=args.batch_size, shuffle=False)
+    val_loader  = DataLoader(EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl),
+                             batch_size=args.batch_size, shuffle=False)
+    test_loader = DataLoader(EmbeddingDataset(test_emb, test_age, test_sex, test_lbl),
+                             batch_size=args.batch_size, shuffle=False)
 
     # ── Class weighting ───────────────────────────────────────────────────────
     train_labels_all = torch.tensor(
@@ -312,7 +326,7 @@ def main(args: argparse.Namespace) -> None:
           f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss                               = train_one_epoch(head, train_loader, optimizer, criterion, device)
+        train_loss                               = train_one_epoch_aug(head, model, train_loader, optimizer, criterion, device)
         val_loss, val_acc, val_preds, val_labels = evaluate(head, val_loader, criterion, device)
         val_bal_acc      = balanced_accuracy_score(val_labels, val_preds)
         val_combined_acc = 0.5 * val_acc + 0.5 * val_bal_acc

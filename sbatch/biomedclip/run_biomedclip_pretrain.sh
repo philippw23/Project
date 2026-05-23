@@ -14,7 +14,8 @@ BATCH_SIZE=128
 NO_LORA=false       # true → unfreeze blocks, false → LoRA
 LORA_LAYERS=4
 LORA_R=32
-UNFREEZE_BLOCKS=11
+UNFREEZE_BLOCKS=8
+LR=1e-5 # 5e-5 
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -27,7 +28,7 @@ else
     tune_tag="lora${LORA_LAYERS}"
 fi
 
-LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}.out"
+LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}_lr${LR}.out"
 exec > "$LOG_FILE" 2>&1
 
 echo Starting job ${SLURM_JOBID}
@@ -54,7 +55,7 @@ if [ "$NO_LORA" = true ]; then
         --unfreeze_blocks $UNFREEZE_BLOCKS \
         --batch_size $BATCH_SIZE \
         --epochs 100 \
-        --lr 5e-5 \
+        --lr $LR \
         --seed 42 \
         --wandb \
         --wandb_project biomedclip-pretrain \
@@ -68,7 +69,7 @@ else
         --lora_r $LORA_R \
         --batch_size $BATCH_SIZE \
         --epochs 100 \
-        --lr 5e-5 \
+        --lr $LR \
         --seed 42 \
         --wandb \
         --wandb_project biomedclip-pretrain \

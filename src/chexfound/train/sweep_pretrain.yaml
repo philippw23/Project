@@ -13,7 +13,7 @@ parameters:
     min: 1.0e-6
     max: 2.0e-4
   lora_r:
-    values: [4, 8, 16, 32]
+    values: [8, 16, 32]
   lora_layers:
     values: [2, 4, 6]
   momentum_teacher:
@@ -21,9 +21,7 @@ parameters:
     min: 0.990
     max: 0.9995
   head_mode:
-    values: [unfreeze_after]
-  head_unfreeze_epoch:
-    values: [5, 10]
+    value: train
 
 command:
   - ${env}

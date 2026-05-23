@@ -14,7 +14,9 @@ echo SLURM assigned me these nodes:
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 
 MY_CONDA_ENV="master"
-export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin:$PATH
+export CONDA_EXE=$home_dir/miniconda3/bin/conda
+source $home_dir/miniconda3/etc/profile.d/conda.sh
+conda activate $MY_CONDA_ENV
 export PYTHONPATH=$home_dir/Project/src
 echo Environment activated
 

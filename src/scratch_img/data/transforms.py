@@ -8,17 +8,15 @@ _STD  = [0.229, 0.224, 0.225]
 
 
 def build_train_transform() -> transforms.Compose:
-    """Moderate augmentation appropriate for bone-tumour X-rays.
+    """Augmentation pipeline matching biomedclip/LACE for fair comparison.
 
     No horizontal/vertical flip: left-right anatomy is clinically meaningful.
-    RandomAffine covers realistic patient positioning variation.
-    GaussianBlur simulates acquisition sharpness differences.
     """
     return transforms.Compose([
-        transforms.Resize(256),
         transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
-        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1)),
-        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+        transforms.RandomRotation(degrees=10),
+        transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.3),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
         transforms.ToTensor(),
         transforms.Normalize(mean=_MEAN, std=_STD),
     ])
@@ -26,7 +24,7 @@ def build_train_transform() -> transforms.Compose:
 
 def build_val_transform() -> transforms.Compose:
     return transforms.Compose([
-        transforms.Resize(256),
+        transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
         transforms.Normalize(mean=_MEAN, std=_STD),

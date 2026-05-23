@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=biomedclip_downstream
+#SBATCH --job-name=biomedclip_img_text_downstream
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
@@ -10,39 +10,34 @@
 #SBATCH --error=/dev/null
 
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-#run_bs128_unfreeze11_20260516_125128
-#run_bs128_lora11_20260516_125104
-#run_bs128_lora4_20260516_125103
 CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_bs128_unfreeze6_20260521_121550/final_checkpoint.pt"
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
 
 BATCH_SIZE=16
-LR=0.0002743494570757752
-DROPOUT=0.5
-
-WEIGHT_DECAY=0.1
-EPOCHS=50
+LR=1e-5
+DROPOUT=0.3
+WEIGHT_DECAY=0.01
+EPOCHS=300
+PATIENCE=15
 
 # Head mode: mlp (age+sex fusion), mlp_no_meta (no metadata), linear (linear probe)
 HEAD="mlp_no_meta"
-HIDDEN_DIMS="32"
-META_EMBED_DIM=16
+HIDDEN_DIMS="64 32"
+META_EMBED_DIM=0
 # Loss: ce, wce, ce_smooth, focal, cb_focal, ldam, balanced_softmax
 LOSS="focal"
 FOCAL_GAMMA=3.0
 # Class weighting: none, inverse, sqrt, effective
-CLASS_WEIGHTING="sqrt"
-# Encoder fine-tuning: 0 = frozen (linear probing), N = LoRA last N blocks
-FINETUNE_LORA_LAYERS=0
-LR_ENCODER=1e-5
-FINETUNE_LORA_R=8
+CLASS_WEIGHTING="inverse"
+# Early stopping metric: val_loss, val_bal_acc
+EARLY_STOPPING_METRIC="val_loss"
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
 
-LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_biomedclip_downstream_${HEAD}_${LOSS}.out"
+LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_biomedclip_img_text_downstream_${HEAD}_${LOSS}.out"
 exec > "$LOG_FILE" 2>&1
 
 echo "Starting job ${SLURM_JOBID}"
@@ -58,26 +53,25 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin
 export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/biomedclip_downstream.py \
-    --freezed_biomedclip \
-    --splits        $SPLITS \
-    --out_dir       $home_dir/Project/results \
-    --use_mask \
-    --epochs        $EPOCHS \
-    --batch_size    $BATCH_SIZE \
-    --lr            $LR \
-    --dropout       $DROPOUT \
-    --hidden_dims   $HIDDEN_DIMS \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python \
+    $home_dir/Project/src/biomedclip_img_text_downstream.py \
+    --checkpoint     $CHECKPOINT \
+    --splits         $SPLITS \
+    --out_dir        $home_dir/Project/results \
+    --head           $HEAD \
+    --epochs         $EPOCHS \
+    --patience       $PATIENCE \
+    --early_stopping_metric $EARLY_STOPPING_METRIC \
+    --batch_size     $BATCH_SIZE \
+    --lr             $LR \
+    --dropout        $DROPOUT \
+    --hidden_dims    $HIDDEN_DIMS \
     --meta_embed_dim $META_EMBED_DIM \
-    --weight_decay  $WEIGHT_DECAY \
-    --head          $HEAD \
-    --loss          $LOSS \
-    --focal_gamma $FOCAL_GAMMA \
+    --weight_decay   $WEIGHT_DECAY \
+    --loss           $LOSS \
+    --focal_gamma    $FOCAL_GAMMA \
     --class_weighting $CLASS_WEIGHTING \
-    --finetune_lora_layers $FINETUNE_LORA_LAYERS \
-    --lr_encoder    $LR_ENCODER \
-    --finetune_lora_r $FINETUNE_LORA_R \
     --seed 42 \
     --wandb \
-    --wandb_project biomedclip-downstream \
-    --wandb_entity  philipp-wiese
+    --wandb_project  biomedclip-img-text-downstream \
+    --wandb_entity   philipp-wiese

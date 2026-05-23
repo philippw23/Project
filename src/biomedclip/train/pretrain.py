@@ -170,14 +170,16 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="For --no_lora: number of last ViT blocks to unfreeze (default: %(default)s)")
     parser.add_argument("--lr_blocks", type=float, default=1e-5,
                         help="LR for unfrozen ViT blocks in partial fine-tune mode (default: %(default)s)")
+    parser.add_argument("--lr_proj", type=float, default=5e-4,
+                        help="Peak LR for projection heads and logit_scale (default: %(default)s)")
     parser.add_argument("--use_mask",  action="store_true",
                         help="Crop images around the lesion using segmentation masks")
     parser.add_argument("--batch_size", type=int,   default=32,
                         help="Training batch size (default: %(default)s)")
     parser.add_argument("--epochs",     type=int,   default=50,
                         help="Number of training epochs (default: %(default)s)")
-    parser.add_argument("--lr",          type=float, default=5e-4,
-                        help="Peak learning rate for AdamW (default: %(default)s)")
+    parser.add_argument("--lr_lora",     type=float, default=1e-4,
+                        help="Peak LR for LoRA adapter weights (default: %(default)s)")
     parser.add_argument("--weight_decay", type=float, default=0.2,
                         help="AdamW weight decay for non-norm parameters (default: %(default)s)")
     parser.add_argument("--patience",    type=int,   default=20,
@@ -206,7 +208,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 def _apply_sweep_config(args: argparse.Namespace) -> None:
     """Overwrite args with values from wandb.config when running as sweep agent."""
     cfg = wandb.config
-    for key in ("lora_layers", "lora_r", "lr", "weight_decay", "batch_size", "unfreeze_blocks", "lr_blocks"):
+    for key in ("lora_layers", "lora_r", "lr_lora", "lr_proj", "weight_decay", "batch_size", "unfreeze_blocks", "lr_blocks"):
         if key in cfg:
             setattr(args, key, cfg[key])
     if not args.no_lora:
@@ -329,28 +331,33 @@ def main(args: argparse.Namespace) -> None:
             [
                 {"params": block_decay,    "lr": args.lr_blocks, "weight_decay": args.weight_decay},
                 {"params": block_no_decay, "lr": args.lr_blocks, "weight_decay": 0.0},
-                {"params": proj_params,    "lr": args.lr,        "weight_decay": 0.0},
+                {"params": proj_params,    "lr": args.lr_proj,   "weight_decay": 0.0},
             ],
             betas=(0.9, 0.98),
             eps=1e-6,
         )
     else:
-        decay_params, no_decay_params = [], []
+        lr_lora = args.lr_lora
+        lr_proj = args.lr_proj
+        proj_param_names = {"visual.head", "text.proj", "logit_scale"}
+        lora_decay, lora_no_decay, proj_params = [], [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if name.endswith(no_decay_suffixes):
-                no_decay_params.append(param)
+            if any(name == pn or name.startswith(pn + ".") for pn in proj_param_names):
+                proj_params.append(param)
+            elif name.endswith(no_decay_suffixes):
+                lora_no_decay.append(param)
             else:
-                decay_params.append(param)
-        trainable_params = decay_params + no_decay_params
+                lora_decay.append(param)
+        trainable_params = lora_decay + lora_no_decay + proj_params
         optimizer = torch.optim.AdamW(
             [
-                {"params": decay_params,    "weight_decay": args.weight_decay},
-                {"params": no_decay_params, "weight_decay": 0.0},
+                {"params": lora_decay,    "lr": lr_lora, "weight_decay": args.weight_decay},
+                {"params": lora_no_decay, "lr": lr_lora, "weight_decay": 0.0},
+                {"params": proj_params,   "lr": lr_proj, "weight_decay": 0.0},
             ],
-            lr=args.lr,
-            betas=(0.9, 0.98),  # standard CLIP betas
+            betas=(0.9, 0.98),
             eps=1e-6,
         )
 
@@ -375,7 +382,8 @@ def main(args: argparse.Namespace) -> None:
                 "lora_alpha":  args.lora_alpha,
                 "epochs":      args.epochs,
                 "batch_size":  args.batch_size,
-                "lr":          args.lr,
+                "lr_lora":     args.lr_lora,
+                "lr_proj":     args.lr_proj,
                 "weight_decay": args.weight_decay,
                 "seed":        args.seed,
                 "use_mask":    args.use_mask,

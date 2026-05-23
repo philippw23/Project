@@ -134,6 +134,35 @@ wandb sweep src/biomedclip/eval/sweep_downstream.yaml
 sbatch sbatch/run_sweep_downstream.sh
 ```
 
+### 5 — YOLO baseline
+
+Object-detection baseline (YOLOv5l6u) trained directly on the bone-tumor X-rays with CLAHE-enhanced images.
+
+**Prerequisites:**
+```bash
+pip install opencv-python-headless
+```
+
+**Step 1 — CLAHE preprocessing** (creates `data/internal_dataset/images_clahe/`):
+```bash
+sbatch sbatch/data/run_preprocess_clahe.sh
+```
+
+**Step 2 — Create `split_clahe.json`** (run after step 1 completes):
+```bash
+python src/create_split_clahe.py
+```
+
+**Step 3 — Prepare YOLO dataset structure** (creates `data/yolo/`):
+```bash
+sbatch sbatch/yolo/run_prepare_yolo_dataset.sh
+```
+
+**Step 4 — Train:**
+```bash
+sbatch sbatch/yolo/run_yolo_train.sh
+```
+
 ---
 
 ## Model
