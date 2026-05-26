@@ -1,5 +1,5 @@
-program: src/biomedclip_downstream.py
-project: biomedclip-downstream
+program: src/lace_downstream.py
+project: lace-downstream
 entity: philipp-wiese
 method: bayes
 run_cap: 60
@@ -15,9 +15,9 @@ parameters:
     min: 1e-6
     max: 1e-4
   dropout:
-    values: [0.4, 0.5, 0.6]
+    values: [0.3, 0.4, 0.5]
   weight_decay:
-    values: [0.01, 0.05, 0.1, 0.15]
+    values: [0.01, 0.05, 0.1]
   hidden_dims:
     values:
       - [32]
@@ -28,34 +28,35 @@ parameters:
     values: [16, 32, 64]
   loss:
     value: focal
-  class_weighting:           # ignored by cb_focal (uses effective weighting internally via cb_beta)
+  class_weighting:
     values: [effective, inverse]
   focal_gamma:
-    distribution: uniform             # only active for focal and cb_focal
-    min: 2.0
+    distribution: uniform
+    min: 2
     max: 3.5
-  cb_beta:                   # only active for cb_focal
-    values: [0.99, 0.999, 0.9999]
-  
 
 command:
   - ${env}
   - ${interpreter}
   - ${program}
-  - --wandb
-  - --wandb_project
-  - biomedclip-downstream
-  - --wandb_entity
-  - philipp-wiese
+  - --version
+  - v1
+  - --checkpoint
+  - results/lace_pretrain/run_20260525_171213/final_checkpoint.pt
   - --splits
   - data/internal_dataset/split.json
-  - --freezed_biomedclip
   - --out_dir
   - results
-  - --use_mask
   - --epochs
   - "50"
+  - --patience
+  - "10"
   - --seed
   - "42"
+  - --wandb
+  - --wandb_project
+  - lace-downstream
+  - --wandb_entity
+  - philipp-wiese
   - --sweep
   - ${args}

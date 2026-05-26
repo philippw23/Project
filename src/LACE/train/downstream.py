@@ -42,7 +42,7 @@ except ImportError:
 from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
                                        IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES)
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
-from biomedclip.models.classifier import MalignancyMLP
+from biomedclip.models.classifier import LinearHead, MalignancyMLP
 from biomedclip.utils.misc import DEFAULT_OUT_DIR
 from LACE.data.transforms import build_train_transform_lace
 from LACE.models.downstream import LACEv2Classifier
@@ -59,9 +59,10 @@ class _V2HeadWrapper(nn.Module):
 
     def __init__(self, classifier: LACEv2Classifier) -> None:
         super().__init__()
-        self.age_emb = classifier.age_emb
-        self.sex_emb = classifier.sex_emb
-        self.head    = classifier.head
+        self.use_meta = classifier.use_meta
+        self.age_emb  = classifier.age_emb  # None when use_meta=False
+        self.sex_emb  = classifier.sex_emb  # None when use_meta=False
+        self.head     = classifier.head
 
     def forward(
         self,
@@ -69,12 +70,14 @@ class _V2HeadWrapper(nn.Module):
         age: torch.Tensor,
         sex: torch.Tensor,
     ) -> torch.Tensor:
-        if age.dim() == 1:
-            age = age.unsqueeze(-1)
-        age_feat   = self.age_emb(age.float())
-        sex_feat   = self.sex_emb(sex.long())
-        metric_emb = torch.cat([age_feat, sex_feat], dim=-1)
-        return self.head(torch.cat([lesion_repr, metric_emb], dim=-1))
+        if self.use_meta:
+            if age.dim() == 1:
+                age = age.unsqueeze(-1)
+            age_feat   = self.age_emb(age.float())
+            sex_feat   = self.sex_emb(sex.long())
+            metric_emb = torch.cat([age_feat, sex_feat], dim=-1)
+            return self.head(torch.cat([lesion_repr, metric_emb], dim=-1))
+        return self.head(lesion_repr)
 
 
 # ── Model loading ─────────────────────────────────────────────────────────────
@@ -106,12 +109,18 @@ def build_v1_model(
     preprocess_val   = vit.preprocess_val
     preprocess_train = build_train_transform_lace(preprocess_val)
 
-    mlp = MalignancyMLP(
-        embed_dim=768,
-        hidden_dims=args.hidden_dims,
-        dropout=args.dropout,
-        meta_embed_dim=args.meta_embed_dim,
-    ).to(device)
+    if args.head == "linear":
+        mlp = LinearHead(embed_dim=768).to(device)
+    elif args.head == "mlp_no_meta":
+        mlp = MalignancyMLP(
+            embed_dim=768, hidden_dims=args.hidden_dims,
+            dropout=args.dropout, use_meta=False,
+        ).to(device)
+    else:
+        mlp = MalignancyMLP(
+            embed_dim=768, hidden_dims=args.hidden_dims,
+            dropout=args.dropout, meta_embed_dim=args.meta_embed_dim,
+        ).to(device)
 
     print(f"Loaded v1 checkpoint (epoch {ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', float('nan')):.4f})")
     return vit, mlp, preprocess_train, preprocess_val
@@ -131,11 +140,15 @@ def build_v2_model(
     mask_module   = MaskTokenModule(n_tokens=n_mask_tokens)
     mask_module.load_state_dict(ckpt["mask_module_state"])
 
+    use_meta    = args.head == "mlp"
+    linear_head = args.head == "linear"
     classifier = LACEv2Classifier(
         mask_module=mask_module,
         vit=vit,
         n_meta_dim=args.meta_embed_dim,
         n_classes=NUM_CLASSES,
+        use_meta=use_meta,
+        linear_head=linear_head,
     ).to(device)
 
     head_wrapper = _V2HeadWrapper(classifier)
@@ -270,6 +283,19 @@ def evaluate(
     return total_loss / len(loader), float((preds == labels).mean()), preds, labels
 
 
+def _apply_sweep_config(args: argparse.Namespace) -> None:
+    cfg = wandb.config
+    for key in (
+        "lr", "dropout", "meta_embed_dim", "weight_decay", "loss",
+        "class_weighting", "label_smoothing", "focal_gamma", "cb_beta",
+        "ldam_max_margin", "ldam_scale", "batch_size", "head",
+    ):
+        if key in cfg:
+            setattr(args, key, cfg[key])
+    if "hidden_dims" in cfg:
+        args.hidden_dims = list(cfg["hidden_dims"])
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main(args: argparse.Namespace) -> None:
@@ -279,9 +305,9 @@ def main(args: argparse.Namespace) -> None:
     print(f"Device: {device}  |  LACE version: {args.version}")
 
     # ── W&B ──────────────────────────────────────────────────────────────────
-    use_wandb = args.wandb and WANDB_AVAILABLE
-    if args.wandb and not WANDB_AVAILABLE:
-        warnings.warn("--wandb set but wandb is not installed. Skipping.")
+    use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
+    if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
+        warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
     if use_wandb:
         wandb.init(
             project=args.wandb_project,
@@ -289,6 +315,8 @@ def main(args: argparse.Namespace) -> None:
             name=args.wandb_run,
             config=vars(args),
         )
+        if args.sweep:
+            _apply_sweep_config(args)
 
     # ── Build model ───────────────────────────────────────────────────────────
     if args.version == "v1":
@@ -483,9 +511,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--dropout",        type=float, default=0.3,
                         help="Dropout for the v1 MalignancyMLP.")
     parser.add_argument("--meta_embed_dim", type=int,   default=32)
-    parser.add_argument("--hidden_dims",    type=int,   nargs="+", default=[256, 128],
+    parser.add_argument("--hidden_dims",    type=str,   nargs="+", default=[256, 128],
                         help="Hidden layer widths for the v1 MLP.")
     parser.add_argument("--weight_decay",   type=float, default=0.01)
+    parser.add_argument("--head", default="mlp",
+                        choices=["linear", "mlp", "mlp_no_meta"],
+                        help="linear: linear probe; mlp: MLP+meta (default); mlp_no_meta: MLP without metadata.")
 
     # ── Loss ──────────────────────────────────────────────────────────────────
     parser.add_argument("--loss", default="ce",
@@ -504,5 +535,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--wandb_project", default="lace-downstream")
     parser.add_argument("--wandb_run",     default=None)
     parser.add_argument("--wandb_entity",  default=None)
+    parser.add_argument("--sweep",         action="store_true")
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    raw = " ".join(str(x) for x in args.hidden_dims)
+    args.hidden_dims = [int(x) for x in raw.strip("[]").replace(",", " ").split()]
+    return args

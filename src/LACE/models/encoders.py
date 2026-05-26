@@ -209,15 +209,15 @@ class BiomedCLIPTextEncoder(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """CLS + word-token projections of Befund text for L_sim.
+        """CLS + word-token projections of Befund text for L_sim (full-text mode).
 
-        Returns (z_cls [B, 256], proj_words [B, L, 256]).
-        z_cls is kept for API compatibility; sim_loss_v2 uses proj_words only.
+        Returns (z_cls [B, 256], proj_phrases [B, L, 256]).
+        z_cls is kept for API compatibility; sim_loss_v2 uses proj_phrases only.
         """
         seq = self._forward(input_ids, attention_mask)
         B, L, D = seq.shape
-        proj_words = self.word_proj(seq.reshape(-1, D)).reshape(B, L, EMBED_DIM)
-        return self.cls_proj(seq[:, 0, :]), proj_words
+        proj_phrases = self.word_proj(seq.reshape(-1, D)).reshape(B, L, EMBED_DIM)
+        return self.cls_proj(seq[:, 0, :]), proj_phrases
 
     def encode_befund_phrases(
         self,
@@ -225,13 +225,13 @@ class BiomedCLIPTextEncoder(nn.Module):
         phrase_attn: torch.Tensor,
         phrase_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode befund phrases for L_sim.
+        """Encode befund phrases for L_sim (phrase mode).
 
         Returns:
-            z_cls  [B, embed_dim]    mean-pooled phrase CLS (InfoNCE anchor)
-            embs   [B, N, embed_dim] per-phrase embeddings (feeds patch attention)
+            z_cls        [B, embed_dim]    mean-pooled phrase CLS (InfoNCE anchor in v1)
+            proj_phrases [B, N, embed_dim] per-phrase CLS embeddings (feeds sim_loss_v2)
         """
-        embs  = self._encode_phrase_batch(phrase_ids, phrase_attn, phrase_mask)
+        proj_phrases = self._encode_phrase_batch(phrase_ids, phrase_attn, phrase_mask)
         n_real = phrase_mask.float().sum(dim=1, keepdim=True).clamp(min=1)
-        z_cls  = F.normalize(embs.sum(dim=1) / n_real, dim=-1)
-        return z_cls, embs
+        z_cls  = F.normalize(proj_phrases.sum(dim=1) / n_real, dim=-1)
+        return z_cls, proj_phrases

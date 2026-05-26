@@ -4,8 +4,8 @@ entity: philipp-wiese
 method: bayes
 run_cap: 60
 metric:
-  name: val/balanced_acc
-  goal: maximize
+  name: val/loss
+  goal: minimize
 
 parameters:
   lr:
@@ -21,18 +21,17 @@ parameters:
       - [32]
       - [64]
       - [128]
+      - [128, 128]
       - [256, 128]
       - [64, 32]
   batch_size:
     values: [16, 32, 64]
   loss:
-    values: [cb_focal, focal]
+    value: focal
   class_weighting:
-    value: inverse
+    values: [inverse, effective] 
   focal_gamma:
-    distribution: uniform
-    min: 2.0
-    max: 3.7
+    values: [2.0, 2.5, 3.0, 3.25]
   cb_beta:
     values: [0.99, 0.999, 0.9999]
 

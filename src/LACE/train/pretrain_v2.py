@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -37,10 +38,11 @@ from biomedclip.utils.misc import (
     DEFAULT_SPLITS,
     ROOT_DIR,
 )
+
 from LACE.data.datasets import BTXRDOrthoDataset
 from LACE.data.splits import build_pretrain_datasets_lace_v2
 from LACE.data.transforms import build_train_transform_lace
-from LACE.loss.objectives import ita_loss, seg_loss, sim_loss_v2
+from LACE.loss.objectives import multi_positive_soft_semantic_loss, seg_loss
 from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
 from LACE.models.mask_tokens import MaskTokenModule
 
@@ -52,13 +54,106 @@ def make_scheduler(
     optimizer: torch.optim.Optimizer,
     warmup_epochs: int,
     total_epochs: int,
+    schedule: str = "constant",
 ) -> torch.optim.lr_scheduler.LambdaLR:
     def lr_lambda(epoch: int) -> float:
         if epoch < warmup_epochs:
             return float(epoch + 1) / max(1, warmup_epochs)
-        progress = float(epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
+        if schedule == "cosine":
+            progress = float(epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
+            return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
+        return 1.0
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def _phrase_to_image(phrase_mask: torch.Tensor) -> torch.Tensor:
+    """Map each valid phrase to its source image index.
+
+    Args:
+        phrase_mask: [B, J] bool — True = valid phrase
+    Returns:
+        [N_total] int64 — image index for each valid phrase
+    """
+    b_size, j_size = phrase_mask.shape
+    idx = torch.arange(b_size, device=phrase_mask.device).unsqueeze(1).expand(-1, j_size)
+    return idx[phrase_mask]
+
+
+def _encode_text_v2(
+    batch: dict,
+    text_enc: BiomedCLIPTextEncoder,
+    device: torch.device,
+    text_mode: str,
+    stage: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Encode beurteilung for L_ITA and befund for L_sim.
+
+    Returns:
+        z_beur_phrases [B, J, D]    — per-phrase beurteilung embeddings
+        beur_pmask     [B, J] bool  — True = valid phrase
+        proj_phrases   [B, J, D]    — befund phrase embeddings (None when stage < 3)
+        bef_pmask      [B, J] bool  — befund phrase mask (None when stage < 3)
+    """
+    if text_mode in ("phrase_mean", "phrase_attn"):
+        beur_ids   = batch["beur_phrase_ids"].to(device)
+        beur_attn  = batch["beur_phrase_attn"].to(device)
+        beur_pmask = batch["beur_phrase_mask"].to(device)
+        z_beur_phrases = text_enc._encode_phrase_batch(beur_ids, beur_attn, beur_pmask)
+        if stage >= 3:
+            bef_ids   = batch["bef_phrase_ids"].to(device)
+            bef_attn  = batch["bef_phrase_attn"].to(device)
+            bef_pmask = batch["bef_phrase_mask"].to(device)
+            _, proj_phrases = text_enc.encode_befund_phrases(bef_ids, bef_attn, bef_pmask)
+        else:
+            proj_phrases, bef_pmask = None, None
+    else:
+        beur_ids  = batch["beurteilung_ids"].to(device)
+        beur_mask = batch["beurteilung_mask"].to(device)
+        z_text = text_enc.encode_beurteilung(beur_ids, beur_mask)
+        z_beur_phrases = z_text.unsqueeze(1)                                       # [B, 1, D]
+        beur_pmask = torch.ones(z_beur_phrases.shape[:2], dtype=torch.bool, device=device)
+        if stage >= 3:
+            bef_ids  = batch["befund_ids"].to(device)
+            bef_mask = batch["befund_mask"].to(device)
+            _, proj_phrases = text_enc.encode_befund(bef_ids, bef_mask)
+            bef_pmask = bef_mask.bool()
+        else:
+            proj_phrases, bef_pmask = None, None
+    return z_beur_phrases, beur_pmask, proj_phrases, bef_pmask
+
+
+def _compute_crop_features(
+    P_proj: torch.Tensor,
+    H_fg: torch.Tensor,
+    valid_phrases: torch.Tensor,
+    phrase_to_image: torch.Tensor,
+) -> torch.Tensor:
+    """Phrase-specific lesion features via per-image attention loop.
+
+    Avoids [N_total, 196, D] tensor duplication; peak memory is O(n_i * 196 * D)
+    per image rather than O(N_total * 196 * D) for the batch.
+
+    Args:
+        P_proj:         [B_sim, 196, D]  L2-normalised projected patch embeddings
+        H_fg:           [B_sim, 196]     detached lesion heatmap (soft weights)
+        valid_phrases:  [N_total, D]     L2-normalised valid befund phrase embeddings
+        phrase_to_image:[N_total]        image index for each valid phrase
+    Returns:
+        [N_total, D] L2-normalised crop features (one per valid phrase)
+    """
+    b_sim = P_proj.shape[0]
+    weighted_patches = H_fg.unsqueeze(-1) * P_proj      # [B_sim, 196, D]
+
+    crop_features_list = []
+    for i in range(b_sim):
+        phrases_i = valid_phrases[phrase_to_image == i]  # [n_i, D]
+        if phrases_i.shape[0] == 0:
+            continue
+        wp_i = weighted_patches[i]                       # [196, D]
+        alpha_i = F.softmax(phrases_i @ wp_i.T, dim=-1)  # [n_i, 196]
+        crop_features_list.append(alpha_i @ wp_i)        # [n_i, D]
+
+    return F.normalize(torch.cat(crop_features_list, dim=0), dim=-1)  # [N_total, D]
 
 
 def train_one_epoch(
@@ -69,13 +164,14 @@ def train_one_epoch(
     btxrd_loader: DataLoader | None,
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
-    logit_scale: nn.Parameter,
+    τ: nn.Parameter,
     log_lambda_ita: nn.Parameter,
     trainable_params: list,
     device: torch.device,
     stage: int,
     lambda_seg: float,
     lambda_sim: float,
+    text_mode: str = "phrase_attn",
     max_grad_norm: float = 1.0,
 ) -> dict[str, float]:
     vit.train()
@@ -96,62 +192,70 @@ def train_one_epoch(
     zero = torch.zeros(1, device=device)[0]
 
     for batch in pbar:
-        img       = batch["full_image"].to(device)
-        beur_ids  = batch["beurteilung_ids"].to(device)
-        beur_mask = batch["beurteilung_mask"].to(device)
-        bef_ids   = batch["befund_ids"].to(device)
-        bef_mask  = batch["befund_mask"].to(device)
-        plabels   = batch["patch_labels"].to(device)
-        has_mask  = batch["has_mask"].to(device)
-        has_befund= batch["has_befund"].to(device)
+        img        = batch["full_image"].to(device)
+        plabels    = batch["patch_labels"].to(device)
+        has_mask   = batch["has_mask"].to(device)
+        has_befund = batch["has_befund"].to(device)
 
         optimizer.zero_grad()
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
 
-            # Single ViT pass: CLS for L_ITA, patches for mask tokens
+            # Single ViT pass: CLS for L_ITA, patches for mask tokens + L_sim
             cls_feat, patch_feat = vit.forward_all(img)          # [B,768], [B,196,768]
-            z_img  = vit.img_proj(cls_feat)                       # [B, 256]
+            z_img  = vit.img_proj(cls_feat)                       # [B, D]
 
-            # L_ITA (all stages)
-            z_text = text_enc.encode_beurteilung(beur_ids, beur_mask)
-            l_ita  = ita_loss(z_img, z_text, logit_scale)
+            z_beur_phrases, beur_pmask, proj_phrases, bef_pmask = _encode_text_v2(
+                batch, text_enc, device, text_mode, stage
+            )
+
+            # L_ITA (all stages): expand z_img to one row per valid phrase
+            p2i_ita = _phrase_to_image(beur_pmask)                # [N_total_ita]
+            l_ita = multi_positive_soft_semantic_loss(
+                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ
+            )
 
             l_seg = zero
             l_sim = zero
 
             if stage >= 2:
-                H_soft, H_logits, _ = mask_module(patch_feat)    # [B,N,196] each
+                h_soft, h_logits, _ = mask_module(patch_feat)    # [B,N,196] each
 
-                # L_seg from internal Dataset A (samples with GT masks)
+                # L_seg from internal dataset (samples with GT masks)
                 seg_valid = has_mask
                 if seg_valid.any():
-                    l_seg = seg_loss(H_logits[seg_valid], plabels[seg_valid])
+                    l_seg = seg_loss(h_logits[seg_valid], plabels[seg_valid])
 
-                # L_seg from Dataset B (BTXRD annotated bone tumour images)
+                # L_seg from BTXRD annotated images
                 if btxrd_cycle is not None:
                     btxrd_b       = next(btxrd_cycle)
                     btxrd_img     = btxrd_b["image"].to(device)
                     btxrd_labels  = btxrd_b["patch_labels"].to(device)
                     _, btxrd_feat = vit.forward_all(btxrd_img)
-                    _, H_b_logits, _ = mask_module(btxrd_feat)
-                    l_seg = l_seg + seg_loss(H_b_logits, btxrd_labels)
+                    _, h_b_logits, _ = mask_module(btxrd_feat)
+                    l_seg = l_seg + seg_loss(h_b_logits, btxrd_labels)
 
-                # L_sim (stage 3+): project patches into phrase-alignment space
-                if stage >= 3:
-                    B = img.shape[0]
-                    P_proj = vit.patch_proj(
+                # L_sim v2 (stage 3+): phrase-specific lesion features via heatmap
+                if stage >= 3 and proj_phrases is not None:
+                    b_size = img.shape[0]
+                    p_proj = vit.patch_proj(
                         patch_feat.reshape(-1, 768)
-                    ).reshape(B, 196, vit.proj_dim)
+                    ).reshape(b_size, 196, vit.proj_dim)                  # [B, 196, D]
 
-                    _, proj_words = text_enc.encode_befund(bef_ids, bef_mask)
                     sim_valid = has_befund
                     if sim_valid.sum() >= 2:
-                        l_sim = sim_loss_v2(
-                            P_proj[sim_valid],
-                            proj_words[sim_valid],
-                            H_soft[sim_valid],
-                            logit_scale,
+                        bef_phr_sub   = proj_phrases[sim_valid]           # [B_sim, J, D]
+                        bef_pmask_sub = bef_pmask[sim_valid]              # [B_sim, J]
+                        p2i_sim       = _phrase_to_image(bef_pmask_sub)   # [N_total_sim]
+                        valid_phr     = bef_phr_sub[bef_pmask_sub]        # [N_total_sim, D]
+
+                        h_fg = h_soft[sim_valid].mean(dim=1).detach()     # [B_sim, 196]
+                        crop_features = _compute_crop_features(
+                            p_proj[sim_valid], h_fg, valid_phr, p2i_sim
+                        )                                                  # [N_total_sim, D]
+
+                        l_sim = multi_positive_soft_semantic_loss(
+                            crop_features, bef_phr_sub, bef_pmask_sub, τ
                         )
 
             loss = log_lambda_ita.exp() * l_ita + lambda_seg * l_seg + lambda_sim * l_sim
@@ -176,6 +280,7 @@ def train_one_epoch(
         "train/l_seg":      total_seg   / d,
         "train/l_sim":      total_sim   / d,
         "train/lambda_ita": log_lambda_ita.exp().item(),
+        "train/tau":        τ.item(),
     }
 
 
@@ -185,12 +290,13 @@ def evaluate(
     text_enc: BiomedCLIPTextEncoder,
     mask_module: MaskTokenModule,
     val_loader: DataLoader,
-    logit_scale: nn.Parameter,
+    τ: nn.Parameter,
     log_lambda_ita: nn.Parameter,
     device: torch.device,
     stage: int,
     lambda_seg: float,
     lambda_sim: float,
+    text_mode: str = "phrase_attn",
 ) -> dict[str, float]:
     vit.eval()
     text_enc.eval()
@@ -201,41 +307,52 @@ def evaluate(
     zero = torch.zeros(1, device=device)[0]
 
     for batch in val_loader:
-        img       = batch["full_image"].to(device)
-        beur_ids  = batch["beurteilung_ids"].to(device)
-        beur_mask = batch["beurteilung_mask"].to(device)
-        bef_ids   = batch["befund_ids"].to(device)
-        bef_mask  = batch["befund_mask"].to(device)
-        plabels   = batch["patch_labels"].to(device)
-        has_mask  = batch["has_mask"].to(device)
-        has_befund= batch["has_befund"].to(device)
+        img        = batch["full_image"].to(device)
+        plabels    = batch["patch_labels"].to(device)
+        has_mask   = batch["has_mask"].to(device)
+        has_befund = batch["has_befund"].to(device)
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             cls_feat, patch_feat = vit.forward_all(img)
             z_img  = vit.img_proj(cls_feat)
-            z_text = text_enc.encode_beurteilung(beur_ids, beur_mask)
-            l_ita  = ita_loss(z_img, z_text, logit_scale)
+
+            z_beur_phrases, beur_pmask, proj_phrases, bef_pmask = _encode_text_v2(
+                batch, text_enc, device, text_mode, stage
+            )
+
+            p2i_ita = _phrase_to_image(beur_pmask)
+            l_ita = multi_positive_soft_semantic_loss(
+                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ
+            )
 
             l_seg = zero
             l_sim = zero
 
             if stage >= 2:
-                H_soft, H_logits, _ = mask_module(patch_feat)
+                h_soft, h_logits, _ = mask_module(patch_feat)
                 seg_valid = has_mask
                 if seg_valid.any():
-                    l_seg = seg_loss(H_logits[seg_valid], plabels[seg_valid])
+                    l_seg = seg_loss(h_logits[seg_valid], plabels[seg_valid])
 
-                if stage >= 3:
-                    B = img.shape[0]
-                    P_proj = vit.patch_proj(
+                if stage >= 3 and proj_phrases is not None:
+                    b_size = img.shape[0]
+                    p_proj = vit.patch_proj(
                         patch_feat.reshape(-1, 768)
-                    ).reshape(B, 196, vit.proj_dim)
-                    _, proj_words = text_enc.encode_befund(bef_ids, bef_mask)
+                    ).reshape(b_size, 196, vit.proj_dim)
                     sim_valid = has_befund
                     if sim_valid.sum() >= 2:
-                        l_sim = sim_loss_v2(
-                            P_proj[sim_valid], proj_words[sim_valid],
-                            H_soft[sim_valid], logit_scale,
+                        bef_phr_sub   = proj_phrases[sim_valid]
+                        bef_pmask_sub = bef_pmask[sim_valid]
+                        p2i_sim       = _phrase_to_image(bef_pmask_sub)
+                        valid_phr     = bef_phr_sub[bef_pmask_sub]
+
+                        h_fg = h_soft[sim_valid].mean(dim=1).detach()
+                        crop_features = _compute_crop_features(
+                            p_proj[sim_valid], h_fg, valid_phr, p2i_sim
+                        )
+
+                        l_sim = multi_positive_soft_semantic_loss(
+                            crop_features, bef_phr_sub, bef_pmask_sub, τ
                         )
 
             loss = log_lambda_ita.exp() * l_ita + lambda_seg * l_seg + lambda_sim * l_sim
@@ -258,9 +375,9 @@ def evaluate(
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LACE v2 pretraining (mask-token architecture)")
 
-    parser.add_argument("--splits", default=None,
-                        help="Path to a pre-existing split.json (from create_split.py). "
-                             "If omitted, a new split is generated from --dataset.")
+    parser.add_argument("--splits", default=str(DEFAULT_SPLITS),
+                        help="Path to split.json (default: %(default)s). "
+                             "Pass --splits '' to generate a fresh split from --dataset.")
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON),
                         help="Path to dataset_full.json — used only when --splits is omitted "
                              "(default: %(default)s)")
@@ -282,11 +399,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--btxrd_batch_size", type=int,   default=16)
     parser.add_argument("--max_text_len",     type=int,   default=128)
 
+    parser.add_argument(
+        "--text_mode", default="phrase_attn",
+        choices=["full", "phrase_mean", "phrase_attn"],
+        help="Text encoding strategy (default: phrase_attn).",
+    )
+    parser.add_argument("--max_bef_phrases",  type=int, default=16,
+                        help="Max befund phrases per sample (phrase modes only).")
+    parser.add_argument("--max_beur_phrases", type=int, default=16,
+                        help="Max beurteilung phrases per sample (phrase modes only).")
+
     parser.add_argument("--stage1_epochs", type=int,   default=10)
     parser.add_argument("--stage2_epochs", type=int,   default=15)
     parser.add_argument("--stage3_epochs", type=int,   default=15)
 
     parser.add_argument("--lr",           type=float, default=5e-5)
+    parser.add_argument("--scheduler",    default="constant", choices=["constant", "cosine"])
     parser.add_argument("--weight_decay", type=float, default=0.2)
     parser.add_argument("--lambda_seg",   type=float, default=1.0)
     parser.add_argument("--lambda_sim",   type=float, default=1.0)
@@ -323,7 +451,7 @@ def main(args: argparse.Namespace) -> None:
         n_tokens=args.n_mask_tokens,
         tau_spatial_init=args.tau_spatial,
     ).to(device)
-    logit_scale    = nn.Parameter(torch.ones([], device=device) * math.log(1.0 / 0.07))
+    τ              = nn.Parameter(torch.tensor(0.07, device=device))
     log_lambda_ita = nn.Parameter(torch.zeros([], device=device))
 
     # ── Run directory ─────────────────────────────────────────────────────────
@@ -352,6 +480,9 @@ def main(args: argparse.Namespace) -> None:
     train_ds, val_ds = build_pretrain_datasets_lace_v2(
         pretrain_samples, preprocess_train, preprocess_val,
         tokenizer, args.seed, max_text_len=args.max_text_len,
+        text_mode=args.text_mode,
+        max_bef_phrases=args.max_bef_phrases,
+        max_beur_phrases=args.max_beur_phrases,
     )
 
     use_pin = device.type == "cuda"
@@ -390,7 +521,7 @@ def main(args: argparse.Namespace) -> None:
     txt_decay,  txt_nd  = _split_params(text_enc)
     msk_decay,  msk_nd  = _split_params(mask_module)
 
-    decay_params    = vit_decay  + txt_decay  + msk_decay  + [logit_scale, log_lambda_ita]
+    decay_params    = vit_decay  + txt_decay  + msk_decay  + [τ, log_lambda_ita]
     no_decay_params = vit_nd     + txt_nd     + msk_nd
 
     optimizer = torch.optim.AdamW(
@@ -404,7 +535,7 @@ def main(args: argparse.Namespace) -> None:
 
     total_epochs  = args.stage1_epochs + args.stage2_epochs + args.stage3_epochs
     warmup_epochs = max(1, total_epochs // 5)
-    scheduler     = make_scheduler(optimizer, warmup_epochs, total_epochs)
+    scheduler     = make_scheduler(optimizer, warmup_epochs, total_epochs, args.scheduler)
     scaler        = (
         torch.amp.GradScaler("cuda") if device.type == "cuda"
         else torch.amp.GradScaler("cpu")
@@ -455,15 +586,17 @@ def main(args: argparse.Namespace) -> None:
 
         train_metrics = train_one_epoch(
             vit, text_enc, mask_module, internal_loader, active_btxrd,
-            optimizer, scaler, logit_scale, log_lambda_ita, trainable_params,
+            optimizer, scaler, τ, log_lambda_ita, trainable_params,
             device=device, stage=stage,
             lambda_seg=args.lambda_seg, lambda_sim=args.lambda_sim,
+            text_mode=args.text_mode,
         )
         val_metrics = evaluate(
             vit, text_enc, mask_module, val_loader,
-            logit_scale, log_lambda_ita,
+            τ, log_lambda_ita,
             device=device, stage=stage,
             lambda_seg=args.lambda_seg, lambda_sim=args.lambda_sim,
+            text_mode=args.text_mode,
         )
         scheduler.step()
 
@@ -498,7 +631,7 @@ def main(args: argparse.Namespace) -> None:
                     "vit_state":          vit.state_dict(),
                     "text_enc_state":     text_enc.state_dict(),
                     "mask_module_state":  mask_module.state_dict(),
-                    "logit_scale":        logit_scale.data,
+                    "tau":                τ.data,
                     "log_lambda_ita":     log_lambda_ita.data,
                     "optimizer_state":    optimizer.state_dict(),
                 },
@@ -520,7 +653,7 @@ def main(args: argparse.Namespace) -> None:
             "vit_state":         vit.state_dict(),
             "text_enc_state":    text_enc.state_dict(),
             "mask_module_state": mask_module.state_dict(),
-            "logit_scale":       logit_scale.data,
+            "tau":               τ.data,
             "log_lambda_ita":    log_lambda_ita.data,
         },
         run_dir / "final_checkpoint.pt",

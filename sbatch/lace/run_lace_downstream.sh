@@ -25,19 +25,36 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
+# ── Hyperparameter ────────────────────────────────────────────────────────────
+VERSION=v1       # v1: ViT CLS token → MalignancyMLP | v2: ViT + MaskTokenModule → LACEv2Classifier (requires v2 pretrain checkpoint)
+HEAD=mlp_no_meta   # Head mode
+CHECKPOINT=$home_dir/Project/results/lace_pretrain/run_20260525_171213/final_checkpoint.pt
+EPOCHS=50
+PATIENCE=10
+BATCH_SIZE=16
+LR=0.0002743494570757752
+META_EMBED_DIM=32
+HIDDEN_DIMS="32"
+LOSS=focal
+CLASS_WEIGHTING=inverse
+SEED=42
+# ─────────────────────────────────────────────────────────────────────────────
+
 python $home_dir/Project/src/lace_downstream.py \
-    --version    v2 \
-    --checkpoint $home_dir/Project/results/lace_v2_pretrain/run_YYYYMMDD_HHMMSS/best_checkpoint.pt \
-    --splits     $home_dir/Project/results/lace_v2_pretrain/run_YYYYMMDD_HHMMSS/splits.json \
+    --version    $VERSION \
+    --head       $HEAD \
+    --checkpoint $CHECKPOINT \
+    --splits     $home_dir/Project/data/internal_dataset/split.json \
     --out_dir    $home_dir/Project/results \
-    --epochs     50 \
-    --patience   10 \
-    --batch_size 64 \
-    --lr         1e-3 \
-    --meta_embed_dim 32 \
-    --loss       wce \
-    --class_weighting sqrt \
-    --seed       42 \
+    --epochs     $EPOCHS \
+    --patience   $PATIENCE \
+    --batch_size $BATCH_SIZE \
+    --lr         $LR \
+    --meta_embed_dim $META_EMBED_DIM \
+    --hidden_dims $HIDDEN_DIMS \
+    --loss       $LOSS \
+    --class_weighting $CLASS_WEIGHTING \
+    --seed       $SEED \
     --wandb \
     --wandb_project lace-downstream \
     --wandb_entity  philipp-wiese

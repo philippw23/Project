@@ -28,10 +28,13 @@ class LACEv2Classifier(nn.Module):
         vit: SharedViT,
         n_meta_dim: int = 32,
         n_classes: int = 1,
+        use_meta: bool = True,
+        linear_head: bool = False,
     ) -> None:
         super().__init__()
         self.vit         = vit
         self.mask_module = mask_module
+        self.use_meta    = use_meta
 
         for p in self.vit.parameters():
             p.requires_grad_(False)
@@ -40,17 +43,25 @@ class LACEv2Classifier(nn.Module):
 
         vit_dim = mask_module.vit_dim
 
-        self.age_emb = nn.Linear(1, n_meta_dim // 2)
-        self.sex_emb = nn.Embedding(2, n_meta_dim // 2)
+        if use_meta:
+            self.age_emb = nn.Linear(1, n_meta_dim // 2)
+            self.sex_emb = nn.Embedding(2, n_meta_dim // 2)
+            feat_dim = vit_dim + n_meta_dim
+        else:
+            self.age_emb = None
+            self.sex_emb = None
+            feat_dim = vit_dim
 
-        feat_dim = vit_dim + n_meta_dim
-        self.head = nn.Sequential(
-            nn.LayerNorm(feat_dim),
-            nn.Linear(feat_dim, 256),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, n_classes),
-        )
+        if linear_head:
+            self.head = nn.Linear(feat_dim, n_classes)
+        else:
+            self.head = nn.Sequential(
+                nn.LayerNorm(feat_dim),
+                nn.Linear(feat_dim, 256),
+                nn.GELU(),
+                nn.Dropout(0.1),
+                nn.Linear(256, n_classes),
+            )
 
     def forward(
         self,
@@ -73,9 +84,12 @@ class LACEv2Classifier(nn.Module):
 
         lesion_repr = mask_feats.mean(dim=1)                     # [B, 768]
 
-        age_feat = self.age_emb(age.float())                     # [B, n_meta//2]
-        sex_feat = self.sex_emb(sex.long())                      # [B, n_meta//2]
-        metric_emb = torch.cat([age_feat, sex_feat], dim=-1)     # [B, n_meta]
+        if self.use_meta:
+            age_feat   = self.age_emb(age.float())               # [B, n_meta//2]
+            sex_feat   = self.sex_emb(sex.long())                # [B, n_meta//2]
+            metric_emb = torch.cat([age_feat, sex_feat], dim=-1) # [B, n_meta]
+            x = torch.cat([lesion_repr, metric_emb], dim=-1)     # [B, vit_dim + n_meta]
+        else:
+            x = lesion_repr                                       # [B, vit_dim]
 
-        x = torch.cat([lesion_repr, metric_emb], dim=-1)         # [B, vit_dim + n_meta]
         return self.head(x)                                       # [B, n_classes]

@@ -62,6 +62,9 @@ def build_pretrain_datasets_lace_v2(
     seed: int,
     monitor_val_frac: float = 0.1,
     max_text_len: int = 128,
+    text_mode: str = "phrase_attn",
+    max_bef_phrases: int = 16,
+    max_beur_phrases: int = 16,
 ) -> tuple[InternalDatasetV2, InternalDatasetV2]:
     """90/10 random split of pretrain_samples into train and monitor-val datasets (v2)."""
     rng     = random.Random(seed)
@@ -73,6 +76,12 @@ def build_pretrain_datasets_lace_v2(
 
     print(f"Pretrain loop split (v2): {len(train_samp)} train / {len(val_samp)} monitor-val")
 
-    train_ds = InternalDatasetV2(train_samp, preprocess_train, tokenizer, max_text_len)
-    val_ds   = InternalDatasetV2(val_samp,   preprocess_val,   tokenizer, max_text_len)
+    train_ds = InternalDatasetV2(
+        train_samp, preprocess_train, tokenizer, max_text_len,
+        text_mode, max_bef_phrases, max_beur_phrases,
+    )
+    val_ds = InternalDatasetV2(
+        val_samp, preprocess_val, tokenizer, max_text_len,
+        text_mode, max_bef_phrases, max_beur_phrases,
+    )
     return train_ds, val_ds
