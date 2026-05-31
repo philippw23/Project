@@ -51,6 +51,18 @@ def parse_args(argv=None):
         metavar="NAME",
         help="Image stem(s) or filenames to display instead of random sampling.",
     )
+    parser.add_argument(
+        "--global_context_fraction",
+        type=float,
+        default=0.4,
+        help="Context fraction for the global crop shown in panel 3 (default 0.4).",
+    )
+    parser.add_argument(
+        "--context_fraction",
+        type=float,
+        default=0.15,
+        help="Context fraction for the tumor crop shown in panel 2 (default 0.15).",
+    )
     return parser.parse_args(argv)
 
 
@@ -174,7 +186,7 @@ def main(argv=None):
     sample_count = len(samples)
     cols = 5
     groups = math.ceil(sample_count / cols)
-    fig, axes = plt.subplots(groups * 2, cols, figsize=(18, max(6, groups * 8)))
+    fig, axes = plt.subplots(groups * 3, cols, figsize=(18, max(9, groups * 12)))
     axes = np.atleast_2d(axes)
 
     for ax in axes.flat:
@@ -183,14 +195,16 @@ def main(argv=None):
     for index, image_path in enumerate(samples):
         image_arr, mask = load_sample(image_path, dataset)
         overlay = make_red_overlay(image_arr, mask)
-        cropped = crop_around_mask(image_arr, mask)
+        cropped = crop_around_mask(image_arr, mask, context_fraction=args.context_fraction)
+        global_cropped = crop_around_mask(image_arr, mask, context_fraction=args.global_context_fraction)
 
         group = index // cols
         col = index % cols
-        overlay_row = group * 2
-        crop_row = overlay_row + 1
+        overlay_row     = group * 3
+        crop_row        = overlay_row + 1
+        global_crop_row = overlay_row + 2
 
-        # --- composite panel: red overlay + green tight bbox + yellow crop box ---
+        # --- composite panel: overlay + green tight bbox + yellow crop box + blue global crop box ---
         ax_ov = axes[overlay_row][col]
         ax_ov.imshow(overlay)
         ax_ov.set_title(image_path.stem, fontsize=7)
@@ -209,13 +223,25 @@ def main(argv=None):
             linewidth=1.5, edgecolor="yellow", facecolor="none",
         ))
 
-        # --- crop panel ---
+        r_start_g, r_end_g, c_start_g, c_end_g = compute_crop_box(
+            image_arr, mask, context_fraction=args.global_context_fraction
+        )
+        ax_ov.add_patch(patches.Rectangle(
+            (c_start_g, r_start_g), c_end_g - c_start_g, r_end_g - r_start_g,
+            linewidth=1.5, edgecolor="deepskyblue", facecolor="none",
+        ))
+
+        # --- tumor crop panel ---
         axes[crop_row][col].imshow(cropped, cmap="gray")
 
+        # --- global crop panel ---
+        axes[global_crop_row][col].imshow(global_cropped, cmap="gray")
+
     for group in range(groups):
-        base_row = group * 2
+        base_row = group * 3
         axes[base_row][0].set_ylabel("Overlay", fontsize=11)
-        axes[base_row + 1][0].set_ylabel("Tumor Crop", fontsize=11)
+        axes[base_row + 1][0].set_ylabel("Tumor Crop\n(context=0.15)", fontsize=11)
+        axes[base_row + 2][0].set_ylabel(f"Global Crop\n(context={args.global_context_fraction})", fontsize=11)
 
     plt.tight_layout()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

@@ -10,15 +10,27 @@ from LACE.models.lora import inject_lora_vit, count_trainable_params
 
 VIT_DIM   = 768
 BERT_DIM  = 768
-EMBED_DIM = 256
+EMBED_DIM = 512
 
 
 class ProjectionHead(nn.Module):
-    """Linear(in_dim, embed_dim) followed by L2-normalisation."""
+    """Projection head followed by L2-normalisation.
 
-    def __init__(self, in_dim: int, embed_dim: int = EMBED_DIM) -> None:
+    hidden_dim=None → single Linear; hidden_dim=k → Linear→GELU→Linear (2-layer MLP).
+    """
+
+    def __init__(
+        self, in_dim: int, embed_dim: int = EMBED_DIM, hidden_dim: int | None = None
+    ) -> None:
         super().__init__()
-        self.proj = nn.Linear(in_dim, embed_dim, bias=False)
+        if hidden_dim is not None:
+            self.proj = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim, bias=False),
+                nn.GELU(),
+                nn.Linear(hidden_dim, embed_dim, bias=False),
+            )
+        else:
+            self.proj = nn.Linear(in_dim, embed_dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.normalize(self.proj(x), dim=-1)
@@ -52,6 +64,14 @@ class SharedViT(nn.Module):
             f"trainable: {n_train:,} / {n_total:,} ({100 * n_train / n_total:.2f}%)"
         )
 
+    def load_pretrained_projections(self) -> None:
+        """Copy img_proj weights from BiomedCLIP's pretrained visual.head.proj."""
+        _model, _, _ = open_clip.create_model_and_transforms(MODEL_TAG)
+        src = _model.visual.head.proj
+        self.img_proj.proj.weight.data.copy_(src.weight.data)
+        del _model
+        print(f"SharedViT: loaded pretrained img_proj from BiomedCLIP visual.head.proj {tuple(src.weight.shape)}")
+
     def _features(self, images: torch.Tensor) -> torch.Tensor:
         """trunk.forward_features -> [B, 197, 768] (CLS at index 0, patches at 1:)."""
         return self.trunk.forward_features(images)
@@ -71,48 +91,15 @@ class SharedViT(nn.Module):
         return self._features(images)[:, 1:, :]
 
 
-class PhraseAttentionPool(nn.Module):
-    """Learned-query attention pooling over N phrase CLS embeddings.
-
-    A single trainable query vector scores each phrase; softmax weights are
-    used to compute a weighted sum. Padding slots are masked to -inf before
-    softmax so they contribute zero to the output.
-    """
-
-    def __init__(self, embed_dim: int = EMBED_DIM) -> None:
-        super().__init__()
-        self.query = nn.Parameter(torch.empty(embed_dim))
-        nn.init.normal_(self.query, std=0.02)
-
-    def forward(
-        self,
-        phrase_embs: torch.Tensor,
-        phrase_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Args:
-            phrase_embs: [B, N, D] L2-normalised phrase embeddings
-            phrase_mask: [B, N]    True = real phrase, False = padding
-        Returns:
-            [B, D] L2-normalised pooled embedding
-        """
-        attn = phrase_embs @ self.query                        # [B, N]
-        attn = attn.masked_fill(~phrase_mask, float("-inf"))
-        attn = F.softmax(attn, dim=-1)                         # [B, N]
-        out  = (attn.unsqueeze(-1) * phrase_embs).sum(dim=1)   # [B, D]
-        return F.normalize(out, dim=-1)
-
-
 class BiomedCLIPTextEncoder(nn.Module):
     """BiomedCLIP PubMedBERT text encoder with trainable projection heads.
 
-    Transformer weights are frozen; cls_proj, word_proj, and phrase_pool are trained.
+    Transformer weights are frozen; cls_proj and word_proj are trained.
     self.tokenizer is exposed for data loading.
 
-    encode_beurteilung        →  CLS projection for L_ITA  (full / concat modes)
-    encode_beurteilung_phrases→  pooled phrase CLS for L_ITA  (phrase modes)
-    encode_befund             →  (CLS, word projections) for L_sim  (full / concat)
-    encode_befund_phrases     →  (mean CLS, phrase embeddings) for L_sim  (phrase modes)
+    encode_beurteilung    →  CLS projection for L_ITA  (full / concat modes)
+    encode_befund         →  (CLS, word projections) for L_sim  (full / concat)
+    encode_befund_phrases →  (mean CLS, phrase embeddings) for L_sim  (phrase modes)
     """
 
     def __init__(self, embed_dim: int = EMBED_DIM) -> None:
@@ -124,18 +111,26 @@ class BiomedCLIPTextEncoder(nn.Module):
         for p in self.transformer.parameters():
             p.requires_grad_(False)
 
-        self.cls_proj   = ProjectionHead(BERT_DIM, embed_dim)
-        self.word_proj  = ProjectionHead(BERT_DIM, embed_dim)
-        self.phrase_pool = PhraseAttentionPool(embed_dim)
+        self.embed_dim = embed_dim
+        self.cls_proj  = ProjectionHead(BERT_DIM, embed_dim, hidden_dim=640)
+        self.word_proj = ProjectionHead(BERT_DIM, embed_dim, hidden_dim=640)
 
         n_bert = sum(p.numel() for p in self.transformer.parameters())
         n_proj = (sum(p.numel() for p in self.cls_proj.parameters()) +
-                  sum(p.numel() for p in self.word_proj.parameters()) +
-                  sum(p.numel() for p in self.phrase_pool.parameters()))
+                  sum(p.numel() for p in self.word_proj.parameters()))
         print(
             f"BiomedCLIPTextEncoder: frozen transformer ({n_bert:,} params) + "
             f"trainable projections ({n_proj:,} params)"
         )
+
+    def load_pretrained_projections(self) -> None:
+        """Copy cls_proj weights from BiomedCLIP's pretrained text.proj (768→640→512)."""
+        _model, _, _ = open_clip.create_model_and_transforms(MODEL_TAG)
+        src = _model.text.proj
+        self.cls_proj.proj[0].weight.data.copy_(src[0].weight.data)
+        self.cls_proj.proj[2].weight.data.copy_(src[2].weight.data)
+        del _model
+        print("BiomedCLIPTextEncoder: loaded pretrained cls_proj from BiomedCLIP text.proj")
 
     @torch.no_grad()
     def _forward(
@@ -180,30 +175,6 @@ class BiomedCLIPTextEncoder(nn.Module):
         seq = self._forward(input_ids, attention_mask)
         return self.cls_proj(seq[:, 0, :])
 
-    def encode_beurteilung_phrases(
-        self,
-        phrase_ids: torch.Tensor,
-        phrase_attn: torch.Tensor,
-        phrase_mask: torch.Tensor,
-        mode: str,
-    ) -> torch.Tensor:
-        """Pool beurteilung phrase CLS embeddings into a single vector for L_ITA.
-
-        Args:
-            phrase_ids:  [B, N, T]
-            phrase_attn: [B, N, T]
-            phrase_mask: [B, N]    True = real phrase
-            mode:        "phrase_mean" or "phrase_attn"
-        Returns:
-            [B, embed_dim] L2-normalised embedding
-        """
-        embs = self._encode_phrase_batch(phrase_ids, phrase_attn, phrase_mask)
-        if mode == "phrase_attn":
-            return self.phrase_pool(embs, phrase_mask)
-        # phrase_mean
-        n_real = phrase_mask.float().sum(dim=1, keepdim=True).clamp(min=1)
-        return F.normalize(embs.sum(dim=1) / n_real, dim=-1)
-
     def encode_befund(
         self,
         input_ids: torch.Tensor,
@@ -216,7 +187,7 @@ class BiomedCLIPTextEncoder(nn.Module):
         """
         seq = self._forward(input_ids, attention_mask)
         B, L, D = seq.shape
-        proj_phrases = self.word_proj(seq.reshape(-1, D)).reshape(B, L, EMBED_DIM)
+        proj_phrases = self.word_proj(seq.reshape(-1, D)).reshape(B, L, self.embed_dim)
         return self.cls_proj(seq[:, 0, :]), proj_phrases
 
     def encode_befund_phrases(

@@ -202,6 +202,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="W&B team/entity name (default: personal account)")
     parser.add_argument("--sweep", action="store_true",
                         help="Run as wandb sweep agent (hyperparams come from wandb.config)")
+    parser.add_argument("--use_phrases", action="store_true",
+                        help="Replace full report text with concatenated LLM-extracted phrases "
+                             "(befund_phrases + beurteilung_phrases, separated by '. '). "
+                             "Samples missing either phrase list are dropped.")
     return parser.parse_args(argv)
 
 
@@ -265,7 +269,8 @@ def main(args: argparse.Namespace) -> None:
         tune_tag = f"unfreeze{args.unfreeze_blocks}"
     else:
         tune_tag = f"lora{args.lora_layers}"
-    run_name = f"run_bs{args.batch_size}_{tune_tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    text_tag = "_phrases" if args.use_phrases else ""
+    run_name = f"run_bs{args.batch_size}_{tune_tag}{text_tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(args.out_dir) / "biomedclip_pretrain" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run directory: {run_dir}")
@@ -282,6 +287,19 @@ def main(args: argparse.Namespace) -> None:
         train_samples, val_samples, _ = build_stratified_splits(args, run_dir=run_dir)
 
     def _to_tuples(samples: list[dict]) -> list[tuple]:
+        if args.use_phrases:
+            result = []
+            dropped = 0
+            for s in samples:
+                bp  = s.get("befund_phrases") or []
+                bep = s.get("beurteilung_phrases") or []
+                if not bp or not bep:
+                    dropped += 1
+                    continue
+                result.append((Path(s["image"]), Path(s["mask"]), ". ".join(bp + bep)))
+            if dropped:
+                print(f"  use_phrases: dropped {dropped} samples missing phrase lists.")
+            return result
         return [(Path(s["image"]), Path(s["mask"]), s["report"]) for s in samples]
 
     train_ds = BoneTumorPairDataset(_to_tuples(train_samples), augment_transform, tokenizer, args.use_mask)
@@ -387,6 +405,7 @@ def main(args: argparse.Namespace) -> None:
                 "weight_decay": args.weight_decay,
                 "seed":        args.seed,
                 "use_mask":    args.use_mask,
+                "text_mode":   "phrases" if args.use_phrases else "full",
             },
         )
         if args.sweep:

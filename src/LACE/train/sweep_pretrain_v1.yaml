@@ -2,52 +2,89 @@ program: src/lace_pretrain.py
 project: lace-pretrain
 entity: philipp-wiese
 method: bayes
-run_cap: 25
+run_cap: 30
 metric:
-  name: val/loss
-  goal: minimize
+  name: retrieval/mean_r1
+  goal: maximize
 
 parameters:
-  lora_layers:
-    values: [2, 4, 6]
-  lora_r:
-    values: [4, 8, 16]
-  lora_alpha:
-    values: [8.0, 16.0, 32.0]
-  embed_dim:
-    values: [128, 256, 512]
   lr:
     distribution: log_uniform_values
     min: 5e-6
     max: 2e-4
+  lora_r:
+    values: [4, 8, 16]
+  lora_layers:
+    values: [2, 4, 6]
   weight_decay:
     distribution: log_uniform_values
-    min: 0.05
-    max: 0.3
+    min: 0.001
+    max: 0.1
+  tau_s_beur:
+    values: [0.02, 0.04, 0.07]
+  tau_s_bef:
+    values: [0.02, 0.04, 0.07]
+  tau_s_img_crop:
+    values: [0.03, 0.05, 0.07]
+  tau_s_img_full:
+    values: [0.03, 0.05, 0.07]
+  same_image_boost:
+    values: [0.0, 10.0, 20.0]
+  global_context_fraction:
+    values: [0.3, 0.4]
+  context_fraction:
+    values: [0.1, 0.15]
   lambda_sim:
-    values: [0.5, 1.0, 2.0]
+    values: [0.5, 0.8, 1.0]
   lambda_reg:
-    values: [0.05, 0.1, 0.5]
-  batch_size:
-    values: [16, 32]
+    values: [0.3, 0.5, 0.8]
+  lambda_ita:
+    values: [0.5, 0.8, 1.0]
 
 command:
   - ${env}
   - ${interpreter}
   - ${program}
+  - --splits
+  - /mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json
+  - --btxrd_images
+  - /mnt/nfs/homedirs/philippw/Project/data/BTXRD/images
+  - --btxrd_annots
+  - /mnt/nfs/homedirs/philippw/Project/data/BTXRD/Annotations
+  - --out_dir
+  - /mnt/nfs/homedirs/philippw/Project/results
+  - --embed_dim
+  - "512"
+  - --lora_alpha
+  - "16"
+  - --batch_size
+  - "128"
+  - --btxrd_batch_size
+  - "128"
+  - --text_mode
+  - phrase
+  - --max_bef_phrases
+  - "16"
+  - --max_beur_phrases
+  - "16"
+  - --epochs
+  - "100"
+  - --patience
+  - "25"
+  - --warmup_epochs
+  - "5"
+  - --tau_s_bef
+  - "0.07"
+  - --tau_s_img_crop
+  - "0.05"
+  - --reweight_by_n_phrases
+  - --learn_loss_weights
+  - --warm_start_projections
   - --wandb
   - --wandb_project
   - lace-pretrain
   - --wandb_entity
   - philipp-wiese
-  - --stage1_epochs
-  - "10"
-  - --stage2_epochs
-  - "15"
-  - --stage3_epochs
-  - "15"
-  - --patience
-  - "20"
   - --seed
   - "42"
   - ${args}

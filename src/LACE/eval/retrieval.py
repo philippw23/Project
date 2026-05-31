@@ -14,13 +14,15 @@ def evaluate_retrieval_lace(
     text_enc: BiomedCLIPTextEncoder,
     val_loader: DataLoader,
     device: torch.device,
-    text_mode: str = "phrase_attn",
+    text_mode: str = "phrase",
 ) -> dict[str, float]:
     """Image-to-text and text-to-image retrieval on the full val set.
 
     Embeds every val sample once, builds the full NxN similarity matrix,
     and computes R@1, R@5 and median rank for both directions.
-    Only samples with at least one valid beurteilung phrase are included.
+    In phrase modes the text anchor is the concatenated befund+beurteilung
+    phrases encoded as a single sequence; in full/concat modes the
+    beurteilung text is used.
     """
     vit.eval()
     text_enc.eval()
@@ -33,25 +35,12 @@ def evaluate_retrieval_lace(
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             z_img = vit.forward_cls(full_img)                        # [B, D]
 
-            if text_mode in ("phrase_mean", "phrase_attn"):
-                pids   = batch["beur_phrase_ids"].to(device)
-                pattn  = batch["beur_phrase_attn"].to(device)
-                pmask  = batch["beur_phrase_mask"].to(device)
-                # skip samples with no valid phrase
-                has_phrase = pmask.any(dim=1)                        # [B]
-                if not has_phrase.any():
-                    continue
-                embs = text_enc._encode_phrase_batch(pids, pattn, pmask)  # [B, J, D]
-                n_real = pmask.float().sum(dim=1, keepdim=True).clamp(min=1)
-                z_txt = F.normalize(
-                    (embs * pmask.float().unsqueeze(-1)).sum(dim=1) / n_real, dim=-1
-                )                                                    # [B, D]
-                z_img = z_img[has_phrase]
-                z_txt = z_txt[has_phrase]
-            else:
-                ids  = batch["beurteilung_ids"].to(device)
-                mask = batch["beurteilung_mask"].to(device)
-                z_txt = text_enc.encode_beurteilung(ids, mask)       # [B, D]
+            txt_key = "concat_phrase" if text_mode == "phrase" \
+                      else "beurteilung"
+            z_txt = text_enc.encode_beurteilung(
+                batch[f"{txt_key}_ids"].to(device),
+                batch[f"{txt_key}_mask"].to(device),
+            )                                                        # [B, D]
 
         img_embs.append(F.normalize(z_img.float(), dim=-1))
         txt_embs.append(F.normalize(z_txt.float(), dim=-1))

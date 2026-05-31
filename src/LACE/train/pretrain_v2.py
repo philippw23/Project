@@ -94,7 +94,7 @@ def _encode_text_v2(
         proj_phrases   [B, J, D]    — befund phrase embeddings (None when stage < 3)
         bef_pmask      [B, J] bool  — befund phrase mask (None when stage < 3)
     """
-    if text_mode in ("phrase_mean", "phrase_attn"):
+    if text_mode == "phrase":
         beur_ids   = batch["beur_phrase_ids"].to(device)
         beur_attn  = batch["beur_phrase_attn"].to(device)
         beur_pmask = batch["beur_phrase_mask"].to(device)
@@ -171,8 +171,10 @@ def train_one_epoch(
     stage: int,
     lambda_seg: float,
     lambda_sim: float,
-    text_mode: str = "phrase_attn",
+    text_mode: str = "phrase",
     max_grad_norm: float = 1.0,
+    same_image_boost: float = 0.0,
+    reweight_by_n_phrases: bool = False,
 ) -> dict[str, float]:
     vit.train()
     text_enc.train()
@@ -212,7 +214,9 @@ def train_one_epoch(
             # L_ITA (all stages): expand z_img to one row per valid phrase
             p2i_ita = _phrase_to_image(beur_pmask)                # [N_total_ita]
             l_ita = multi_positive_soft_semantic_loss(
-                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ
+                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ,
+                phrase_to_image=p2i_ita, same_image_boost=same_image_boost,
+                reweight_by_n_phrases=reweight_by_n_phrases,
             )
 
             l_seg = zero
@@ -255,7 +259,9 @@ def train_one_epoch(
                         )                                                  # [N_total_sim, D]
 
                         l_sim = multi_positive_soft_semantic_loss(
-                            crop_features, bef_phr_sub, bef_pmask_sub, τ
+                            crop_features, bef_phr_sub, bef_pmask_sub, τ,
+                            phrase_to_image=p2i_sim, same_image_boost=same_image_boost,
+                            reweight_by_n_phrases=reweight_by_n_phrases,
                         )
 
             loss = log_lambda_ita.exp() * l_ita + lambda_seg * l_seg + lambda_sim * l_sim
@@ -293,10 +299,11 @@ def evaluate(
     τ: nn.Parameter,
     log_lambda_ita: nn.Parameter,
     device: torch.device,
-    stage: int,
     lambda_seg: float,
     lambda_sim: float,
-    text_mode: str = "phrase_attn",
+    text_mode: str = "phrase",
+    same_image_boost: float = 0.0,
+    reweight_by_n_phrases: bool = False,
 ) -> dict[str, float]:
     vit.eval()
     text_enc.eval()
@@ -317,43 +324,46 @@ def evaluate(
             z_img  = vit.img_proj(cls_feat)
 
             z_beur_phrases, beur_pmask, proj_phrases, bef_pmask = _encode_text_v2(
-                batch, text_enc, device, text_mode, stage
+                batch, text_enc, device, text_mode, stage=3
             )
 
             p2i_ita = _phrase_to_image(beur_pmask)
             l_ita = multi_positive_soft_semantic_loss(
-                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ
+                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ,
+                phrase_to_image=p2i_ita, same_image_boost=same_image_boost,
+                reweight_by_n_phrases=reweight_by_n_phrases,
             )
 
             l_seg = zero
             l_sim = zero
 
-            if stage >= 2:
-                h_soft, h_logits, _ = mask_module(patch_feat)
-                seg_valid = has_mask
-                if seg_valid.any():
-                    l_seg = seg_loss(h_logits[seg_valid], plabels[seg_valid])
+            h_soft, h_logits, _ = mask_module(patch_feat)
+            seg_valid = has_mask
+            if seg_valid.any():
+                l_seg = seg_loss(h_logits[seg_valid], plabels[seg_valid])
 
-                if stage >= 3 and proj_phrases is not None:
-                    b_size = img.shape[0]
-                    p_proj = vit.patch_proj(
-                        patch_feat.reshape(-1, 768)
-                    ).reshape(b_size, 196, vit.proj_dim)
-                    sim_valid = has_befund
-                    if sim_valid.sum() >= 2:
-                        bef_phr_sub   = proj_phrases[sim_valid]
-                        bef_pmask_sub = bef_pmask[sim_valid]
-                        p2i_sim       = _phrase_to_image(bef_pmask_sub)
-                        valid_phr     = bef_phr_sub[bef_pmask_sub]
+            if proj_phrases is not None:
+                b_size = img.shape[0]
+                p_proj = vit.patch_proj(
+                    patch_feat.reshape(-1, 768)
+                ).reshape(b_size, 196, vit.proj_dim)
+                sim_valid = has_befund
+                if sim_valid.sum() >= 2:
+                    bef_phr_sub   = proj_phrases[sim_valid]
+                    bef_pmask_sub = bef_pmask[sim_valid]
+                    p2i_sim       = _phrase_to_image(bef_pmask_sub)
+                    valid_phr     = bef_phr_sub[bef_pmask_sub]
 
-                        h_fg = h_soft[sim_valid].mean(dim=1).detach()
-                        crop_features = _compute_crop_features(
-                            p_proj[sim_valid], h_fg, valid_phr, p2i_sim
-                        )
+                    h_fg = h_soft[sim_valid].mean(dim=1).detach()
+                    crop_features = _compute_crop_features(
+                        p_proj[sim_valid], h_fg, valid_phr, p2i_sim
+                    )
 
-                        l_sim = multi_positive_soft_semantic_loss(
-                            crop_features, bef_phr_sub, bef_pmask_sub, τ
-                        )
+                    l_sim = multi_positive_soft_semantic_loss(
+                        crop_features, bef_phr_sub, bef_pmask_sub, τ,
+                        phrase_to_image=p2i_sim, same_image_boost=same_image_boost,
+                        reweight_by_n_phrases=reweight_by_n_phrases,
+                    )
 
             loss = log_lambda_ita.exp() * l_ita + lambda_seg * l_seg + lambda_sim * l_sim
 
@@ -388,8 +398,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--lora_layers", type=int,   default=4)
     parser.add_argument("--lora_r",      type=int,   default=8)
     parser.add_argument("--lora_alpha",  type=float, default=16.0)
-    parser.add_argument("--embed_dim",   type=int,   default=256,
-                        help="Projection head output dimension (default: 256)")
+    parser.add_argument("--embed_dim",   type=int,   default=512,
+                        help="Projection head output dimension (default: 512)")
+    parser.add_argument("--warm_start_projections", action="store_true",
+                        help="Init projection heads from pretrained BiomedCLIP weights.")
 
     parser.add_argument("--n_mask_tokens", type=int,   default=16)
     parser.add_argument("--tau_spatial",   type=float, default=0.1,
@@ -400,9 +412,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--max_text_len",     type=int,   default=128)
 
     parser.add_argument(
-        "--text_mode", default="phrase_attn",
-        choices=["full", "phrase_mean", "phrase_attn"],
-        help="Text encoding strategy (default: phrase_attn).",
+        "--text_mode", default="phrase",
+        choices=["full", "phrase"],
+        help="Text encoding strategy (default: phrase).",
     )
     parser.add_argument("--max_bef_phrases",  type=int, default=16,
                         help="Max befund phrases per sample (phrase modes only).")
@@ -416,8 +428,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--lr",           type=float, default=5e-5)
     parser.add_argument("--scheduler",    default="constant", choices=["constant", "cosine"])
     parser.add_argument("--weight_decay", type=float, default=0.2)
-    parser.add_argument("--lambda_seg",   type=float, default=1.0)
-    parser.add_argument("--lambda_sim",   type=float, default=1.0)
+    parser.add_argument("--lambda_seg",       type=float, default=1.0)
+    parser.add_argument("--lambda_sim",       type=float, default=1.0)
+    parser.add_argument("--same_image_boost", type=float, default=0.0,
+                        help="Logit boost added to same-image phrase pairs in the I2T "
+                             "soft target (0.0 = original behaviour)")
+    parser.add_argument("--reweight_by_n_phrases", action="store_true",
+                        help="Weight each phrase's loss contribution by 1/n_phrases_i so "
+                             "every image contributes equally regardless of phrase count.")
     parser.add_argument("--patience",     type=int,   default=20,
                         help="Early stopping patience (0 to disable)")
 
@@ -445,8 +463,13 @@ def main(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
 
     # ── Models ────────────────────────────────────────────────────────────────
-    vit         = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim).to(device)
-    text_enc    = BiomedCLIPTextEncoder(embed_dim=args.embed_dim).to(device)
+    vit      = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim)
+    text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim)
+    if args.warm_start_projections:
+        vit.load_pretrained_projections()
+        text_enc.load_pretrained_projections()
+    vit      = vit.to(device)
+    text_enc = text_enc.to(device)
     mask_module = MaskTokenModule(
         n_tokens=args.n_mask_tokens,
         tau_spatial_init=args.tau_spatial,
@@ -590,13 +613,17 @@ def main(args: argparse.Namespace) -> None:
             device=device, stage=stage,
             lambda_seg=args.lambda_seg, lambda_sim=args.lambda_sim,
             text_mode=args.text_mode,
+            same_image_boost=args.same_image_boost,
+            reweight_by_n_phrases=args.reweight_by_n_phrases,
         )
         val_metrics = evaluate(
             vit, text_enc, mask_module, val_loader,
             τ, log_lambda_ita,
-            device=device, stage=stage,
+            device=device,
             lambda_seg=args.lambda_seg, lambda_sim=args.lambda_sim,
             text_mode=args.text_mode,
+            same_image_boost=args.same_image_boost,
+            reweight_by_n_phrases=args.reweight_by_n_phrases,
         )
         scheduler.step()
 

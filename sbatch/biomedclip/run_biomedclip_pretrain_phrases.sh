@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=biomedclip_pretrain
+#SBATCH --job-name=biomedclip_pretrain_phrases
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
@@ -18,6 +18,10 @@ UNFREEZE_BLOCKS=2
 LR_BLOCKS=7.12952265879182e-05
 LR_PROJ=0.0003727751781632684
 LR_LORA=1e-5
+# lr_blocks: 8.092711688332708e-05
+# 	lr_proj: 0.00048819265833317647
+# 	unfreeze_blocks: 2
+# 	weight_decay: 0.04296442145644197
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -30,7 +34,7 @@ else
     tune_tag="lora${LORA_LAYERS}"
 fi
 
-LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}_lr${LR}.out"
+LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}_lr${LR}_phrases.out"
 exec > "$LOG_FILE" 2>&1
 
 echo Starting job ${SLURM_JOBID}
@@ -53,6 +57,7 @@ if [ "$NO_LORA" = true ]; then
         --splits   $home_dir/Project/data/internal_dataset/split.json \
         --out_dir  $home_dir/Project/results \
         --use_mask \
+        --use_phrases \
         --no_lora \
         --unfreeze_blocks $UNFREEZE_BLOCKS \
         --batch_size $BATCH_SIZE \
@@ -68,6 +73,7 @@ else
         --splits   $home_dir/Project/data/internal_dataset/split.json \
         --out_dir  $home_dir/Project/results \
         --use_mask \
+        --use_phrases \
         --lora_layers $LORA_LAYERS \
         --lora_r $LORA_R \
         --batch_size $BATCH_SIZE \

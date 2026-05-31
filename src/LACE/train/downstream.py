@@ -90,7 +90,7 @@ def _load_vit(checkpoint: dict, device: torch.device) -> SharedViT:
         lora_layers=lora_cfg["lora_layers"],
         r=lora_cfg["lora_r"],
         alpha=lora_cfg["lora_alpha"],
-        embed_dim=lora_cfg.get("embed_dim", 256),
+        embed_dim=lora_cfg.get("embed_dim", 512),
     )
     vit.load_state_dict(checkpoint["vit_state"])
     for p in vit.parameters():
@@ -339,11 +339,11 @@ def main(args: argparse.Namespace) -> None:
     print(f"Age stats (train): mean={age_mean:.1f}, std={age_std:.1f}")
 
     train_ds = DownstreamDataset(splits["train"], age_sex_lookup, age_mean, age_std,
-                                  preprocess_train, use_mask=False)
+                                  preprocess_train, use_mask=args.use_mask)
     val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   use_mask=False)
+                                  preprocess_val,   use_mask=args.use_mask)
     test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   use_mask=False)
+                                  preprocess_val,   use_mask=args.use_mask)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
     use_pin       = device.type == "cuda"
@@ -528,6 +528,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--cb_beta",         type=float, default=0.99)
     parser.add_argument("--ldam_max_margin", type=float, default=0.5)
     parser.add_argument("--ldam_scale",      type=float, default=30.0)
+
+    # ── Data ──────────────────────────────────────────────────────────────────
+    parser.add_argument("--use_mask", nargs="?", const=True, default=False,
+                        type=lambda x: str(x).lower() in ("true", "1", "yes"),
+                        help="Apply lesion mask cropping to input images (via DownstreamDataset).")
 
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)

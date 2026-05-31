@@ -1,0 +1,50 @@
+program: src/biomedclip_pretrain.py
+project: biomedclip-pretrain
+entity: philipp-wiese
+method: bayes
+run_cap: 30
+metric:
+  name: retrieval/mean_r1
+  goal: maximize
+
+parameters:
+  unfreeze_blocks:
+    values: [2, 4, 6, 8]
+  lr_proj:
+    distribution: log_uniform_values
+    min: 5e-5
+    max: 5e-4
+  lr_blocks:
+    distribution: log_uniform_values
+    min: 1e-6
+    max: 1e-4
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.3
+  batch_size:
+    value: 128
+    
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --wandb
+  - --wandb_project
+  - biomedclip-pretrain
+  - --wandb_entity
+  - philipp-wiese
+  - --splits
+  - data/internal_dataset/split.json
+  - --out_dir
+  - results
+  - --use_mask
+  - --no_lora
+  - --use_phrases
+  - --epochs
+  - "55"
+  - --seed
+  - "42"
+  - --sweep
+  - ${args}

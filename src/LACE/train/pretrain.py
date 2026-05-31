@@ -36,7 +36,7 @@ from LACE.data.datasets import BTXRDOrthoDataset
 from LACE.data.splits import build_pretrain_datasets_lace
 from LACE.data.transforms import build_train_transform_lace
 from LACE.eval.retrieval import evaluate_retrieval_lace
-from LACE.loss.objectives import multi_positive_soft_semantic_loss, ortho_loss
+from LACE.loss.objectives import ortho_loss, symmetric_soft_semantic_loss
 from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
 
 DEFAULT_BTXRD_IMAGES = ROOT_DIR / "data" / "BTXRD" / "images"
@@ -83,7 +83,7 @@ def _encode_text(batch, text_enc, device, text_mode):
         z_bef_phrases  [B, J, D]   — per-phrase befund embeddings for L_sim
         bef_pmask      [B, J] bool — True = real phrase
     """
-    if text_mode in ("phrase_mean", "phrase_attn"):
+    if text_mode == "phrase":
         beur_pids  = batch["beur_phrase_ids"].to(device)
         beur_pattn = batch["beur_phrase_attn"].to(device)
         beur_pmask = batch["beur_phrase_mask"].to(device)
@@ -115,17 +115,25 @@ def train_one_epoch(
     scaler: torch.amp.GradScaler,
     τ: nn.Parameter,
     log_lambda_ita: nn.Parameter,
+    log_lambda_sim: nn.Parameter,
+    log_lambda_reg: nn.Parameter,
     trainable_params: list,
     device: torch.device,
-    lambda_sim: float,
-    lambda_reg: float,
-    text_mode: str = "phrase_attn",
+    text_mode: str = "phrase",
     max_grad_norm: float = 1.0,
+    τ_s_beur: float = 0.015,
+    τ_s_bef: float = 0.07,
+    τ_s_img_full: float = 0.07,
+    τ_s_img_crop: float = 0.07,
+    same_image_boost: float = 0.0,
+    reweight_by_n_phrases: bool = False,
 ) -> dict[str, float]:
     vit.train()
     text_enc.train()
 
-    total_ita = total_sim = total_ortho = total_total = 0.0
+    total_ita = total_ita_i2t = total_ita_t2i = 0.0
+    total_sim = total_sim_i2t = total_sim_t2i = 0.0
+    total_ortho = total_total = 0.0
     n_batches = 0
 
     btxrd_cycle = itertools.cycle(btxrd_loader) if btxrd_loader is not None else None
@@ -152,22 +160,32 @@ def train_one_epoch(
                 batch, text_enc, device, text_mode
             )
 
-            # L_ITA: full-image CLS vs beurteilung phrases
-            p2i_ita = _phrase_to_image(beur_pmask)                        # [N_total_ita]
-            l_ita = multi_positive_soft_semantic_loss(
-                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ
+            # L_ITA: full-image CLS (I2T) + beurteilung phrases (T2I), anchored by
+            #        phrase-phrase (τ_s_beur) and full-image-image (τ_s_img_full)
+            p2i_ita = _phrase_to_image(beur_pmask)
+            l_ita, l_ita_i2t, l_ita_t2i = symmetric_soft_semantic_loss(
+                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ,
+                τ_s_phrase=τ_s_beur, τ_s_img=τ_s_img_full,
+                phrase_to_image=p2i_ita, same_image_boost=same_image_boost,
+                reweight_by_n_phrases=reweight_by_n_phrases,
             )
 
-            # L_sim: crop CLS vs befund phrases
-            l_sim = torch.zeros(1, device=device)[0]
+            # L_sim: crop CLS (I2T) + befund phrases (T2I), anchored by
+            #        phrase-phrase (τ_s_bef) and crop-image-image (τ_s_img_crop)
+            l_sim     = torch.zeros(1, device=device)[0]
+            l_sim_i2t = torch.zeros(1, device=device)[0]
+            l_sim_t2i = torch.zeros(1, device=device)[0]
             sim_valid = has_mask & has_befund
             if sim_valid.sum() >= 2:
-                crop_cls      = vit.forward_cls(crop_img[sim_valid])  # [B_sim, D]
-                bef_phr_sub   = z_bef_phrases[sim_valid]              # [B_sim, J, D]
-                bef_pmask_sub = bef_pmask[sim_valid]                  # [B_sim, J]
-                p2i_sim       = _phrase_to_image(bef_pmask_sub)       # [N_total_sim]
-                l_sim = multi_positive_soft_semantic_loss(
-                    crop_cls[p2i_sim], bef_phr_sub, bef_pmask_sub, τ
+                crop_cls      = vit.forward_cls(crop_img[sim_valid])
+                bef_phr_sub   = z_bef_phrases[sim_valid]
+                bef_pmask_sub = bef_pmask[sim_valid]
+                p2i_sim       = _phrase_to_image(bef_pmask_sub)
+                l_sim, l_sim_i2t, l_sim_t2i = symmetric_soft_semantic_loss(
+                    crop_cls[p2i_sim], bef_phr_sub, bef_pmask_sub, τ,
+                    τ_s_phrase=τ_s_bef, τ_s_img=τ_s_img_crop,
+                    phrase_to_image=p2i_sim, same_image_boost=same_image_boost,
+                    reweight_by_n_phrases=reweight_by_n_phrases,
                 )
 
             # L_ortho: lesion-background patch orthogonality
@@ -181,10 +199,11 @@ def train_one_epoch(
                 btxrd_patches = vit.forward_patches(btxrd_img)
                 ortho_patches = torch.cat([ortho_patches, btxrd_patches], dim=0)
                 ortho_labels  = torch.cat([ortho_labels,  btxrd_labels],  dim=0)
-
                 l_ortho = ortho_loss(ortho_patches, ortho_labels)
 
-            loss = log_lambda_ita.exp() * l_ita + lambda_sim * l_sim + lambda_reg * l_ortho
+            loss = (log_lambda_ita.exp() * l_ita
+                    + log_lambda_sim.exp() * l_sim
+                    + log_lambda_reg.exp() * l_ortho)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -192,20 +211,30 @@ def train_one_epoch(
         scaler.step(optimizer)
         scaler.update()
 
-        total_ita   += l_ita.item()
-        total_sim   += l_sim.item()
-        total_ortho += l_ortho.item()
-        total_total += loss.item()
-        n_batches   += 1
+        total_ita     += l_ita.item()
+        total_ita_i2t += l_ita_i2t.item()
+        total_ita_t2i += l_ita_t2i.item()
+        total_sim     += l_sim.item()
+        total_sim_i2t += l_sim_i2t.item()
+        total_sim_t2i += l_sim_t2i.item()
+        total_ortho   += l_ortho.item()
+        total_total   += loss.item()
+        n_batches     += 1
         pbar.set_postfix(loss=f"{loss.item():.4f}", ita=f"{l_ita.item():.4f}")
 
     d = max(1, n_batches)
     return {
-        "train/loss":       total_total / d,
-        "train/l_ita":      total_ita   / d,
-        "train/l_sim":      total_sim   / d,
-        "train/l_ortho":    total_ortho / d,
+        "train/loss":       total_total   / d,
+        "train/l_ita":      total_ita     / d,
+        "train/l_ita_i2t":  total_ita_i2t / d,
+        "train/l_ita_t2i":  total_ita_t2i / d,
+        "train/l_sim":      total_sim     / d,
+        "train/l_sim_i2t":  total_sim_i2t / d,
+        "train/l_sim_t2i":  total_sim_t2i / d,
+        "train/l_ortho":    total_ortho   / d,
         "train/lambda_ita": log_lambda_ita.exp().item(),
+        "train/lambda_sim": log_lambda_sim.exp().item(),
+        "train/lambda_reg": log_lambda_reg.exp().item(),
         "train/tau":        τ.item(),
     }
 
@@ -217,15 +246,23 @@ def evaluate_lace(
     val_loader: DataLoader,
     τ: nn.Parameter,
     log_lambda_ita: nn.Parameter,
+    log_lambda_sim: nn.Parameter,
+    log_lambda_reg: nn.Parameter,
     device: torch.device,
-    lambda_sim: float,
-    lambda_reg: float,
-    text_mode: str = "phrase_attn",
+    text_mode: str = "phrase",
+    τ_s_beur: float = 0.015,
+    τ_s_bef: float = 0.07,
+    τ_s_img_full: float = 0.07,
+    τ_s_img_crop: float = 0.07,
+    same_image_boost: float = 0.0,
+    reweight_by_n_phrases: bool = False,
 ) -> dict[str, float]:
     vit.eval()
     text_enc.eval()
 
-    total_ita = total_sim = total_ortho = total_total = 0.0
+    total_ita = total_ita_i2t = total_ita_t2i = 0.0
+    total_sim = total_sim_i2t = total_sim_t2i = 0.0
+    total_ortho = total_total = 0.0
     n_batches = 0
 
     for batch in val_loader:
@@ -237,44 +274,62 @@ def evaluate_lace(
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             cls_feat, patch_feat = vit.forward_all(full_img)
-            z_img  = vit.img_proj(cls_feat)
+            z_img = vit.img_proj(cls_feat)
 
             z_beur_phrases, beur_pmask, z_bef_phrases, bef_pmask = _encode_text(
                 batch, text_enc, device, text_mode
             )
 
             p2i_ita = _phrase_to_image(beur_pmask)
-            l_ita = multi_positive_soft_semantic_loss(
-                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ
+            l_ita, l_ita_i2t, l_ita_t2i = symmetric_soft_semantic_loss(
+                z_img[p2i_ita], z_beur_phrases, beur_pmask, τ,
+                τ_s_phrase=τ_s_beur, τ_s_img=τ_s_img_full,
+                phrase_to_image=p2i_ita, same_image_boost=same_image_boost,
+                reweight_by_n_phrases=reweight_by_n_phrases,
             )
 
-            l_sim = torch.zeros(1, device=device)[0]
+            l_sim     = torch.zeros(1, device=device)[0]
+            l_sim_i2t = torch.zeros(1, device=device)[0]
+            l_sim_t2i = torch.zeros(1, device=device)[0]
             sim_valid = has_mask & has_befund
             if sim_valid.sum() >= 2:
                 crop_cls      = vit.forward_cls(crop_img[sim_valid])
                 bef_phr_sub   = z_bef_phrases[sim_valid]
                 bef_pmask_sub = bef_pmask[sim_valid]
                 p2i_sim       = _phrase_to_image(bef_pmask_sub)
-                l_sim = multi_positive_soft_semantic_loss(
-                    crop_cls[p2i_sim], bef_phr_sub, bef_pmask_sub, τ
+                l_sim, l_sim_i2t, l_sim_t2i = symmetric_soft_semantic_loss(
+                    crop_cls[p2i_sim], bef_phr_sub, bef_pmask_sub, τ,
+                    τ_s_phrase=τ_s_bef, τ_s_img=τ_s_img_crop,
+                    phrase_to_image=p2i_sim, same_image_boost=same_image_boost,
+                    reweight_by_n_phrases=reweight_by_n_phrases,
                 )
 
             l_ortho = ortho_loss(patch_feat, plabels)
 
-            loss = log_lambda_ita.exp() * l_ita + lambda_sim * l_sim + lambda_reg * l_ortho
+            loss = (log_lambda_ita.exp() * l_ita
+                    + log_lambda_sim.exp() * l_sim
+                    + log_lambda_reg.exp() * l_ortho)
 
-        total_ita   += l_ita.item()
-        total_sim   += l_sim.item()
-        total_ortho += l_ortho.item()
-        total_total += loss.item()
-        n_batches   += 1
+        total_ita     += l_ita.item()
+        total_ita_i2t += l_ita_i2t.item()
+        total_ita_t2i += l_ita_t2i.item()
+        total_sim     += l_sim.item()
+        total_sim_i2t += l_sim_i2t.item()
+        total_sim_t2i += l_sim_t2i.item()
+        total_ortho   += l_ortho.item()
+        total_total   += loss.item()
+        n_batches     += 1
 
     d = max(1, n_batches)
     return {
-        "val/loss":    total_total / d,
-        "val/l_ita":   total_ita   / d,
-        "val/l_sim":   total_sim   / d,
-        "val/l_ortho": total_ortho / d,
+        "val/loss":       total_total   / d,
+        "val/l_ita":      total_ita     / d,
+        "val/l_ita_i2t":  total_ita_i2t / d,
+        "val/l_ita_t2i":  total_ita_t2i / d,
+        "val/l_sim":      total_sim     / d,
+        "val/l_sim_i2t":  total_sim_i2t / d,
+        "val/l_sim_t2i":  total_sim_t2i / d,
+        "val/l_ortho":    total_ortho   / d,
     }
 
 
@@ -294,17 +349,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--lora_layers", type=int,   default=4)
     parser.add_argument("--lora_r",      type=int,   default=8)
     parser.add_argument("--lora_alpha",  type=float, default=16.0)
-    parser.add_argument("--embed_dim",   type=int,   default=256,
-                        help="Projection head output dimension (default: 256)")
+    parser.add_argument("--embed_dim",   type=int,   default=512,
+                        help="Projection head output dimension (default: 512)")
+    parser.add_argument("--warm_start_projections", action="store_true",
+                        help="Init projection heads from pretrained BiomedCLIP weights.")
 
     parser.add_argument("--batch_size",       type=int,   default=32)
     parser.add_argument("--btxrd_batch_size", type=int,   default=16)
     parser.add_argument("--max_text_len",     type=int,   default=128)
 
     parser.add_argument(
-        "--text_mode", default="phrase_attn",
-        choices=["full", "concat", "phrase_mean", "phrase_attn"],
-        help="Text encoding strategy for pretraining (default: phrase_attn).",
+        "--text_mode", default="phrase",
+        choices=["full", "concat", "phrase"],
+        help="Text encoding strategy for pretraining (default: phrase).",
     )
     parser.add_argument("--max_bef_phrases",  type=int, default=16,
                         help="Max befund phrases per sample (phrase modes only).")
@@ -318,8 +375,29 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--lr",           type=float, default=5e-5)
     parser.add_argument("--scheduler",    default="constant", choices=["constant", "cosine"])
     parser.add_argument("--weight_decay", type=float, default=0.2)
+    parser.add_argument("--lambda_ita",   type=float, default=1.0)
     parser.add_argument("--lambda_sim",   type=float, default=1.0)
     parser.add_argument("--lambda_reg",   type=float, default=0.1)
+    parser.add_argument("--tau_s_beur",     type=float, default=0.015,
+                        help="Soft-target temperature for beurteilung phrase-phrase anchor (I2T, default: 0.015).")
+    parser.add_argument("--tau_s_bef",      type=float, default=0.07,
+                        help="Soft-target temperature for befund phrase-phrase anchor (I2T, default: 0.07).")
+    parser.add_argument("--tau_s_img_full", type=float, default=0.07,
+                        help="Soft-target temperature for full-image-image anchor (T2I, default: 0.07).")
+    parser.add_argument("--same_image_boost", type=float, default=0.0,
+                        help="Logit boost added to same-image phrase pairs in the I2T "
+                             "soft target (0.0 = original behaviour)")
+    parser.add_argument("--reweight_by_n_phrases", action="store_true",
+                        help="Weight each phrase's loss contribution by 1/n_phrases_i so "
+                             "every image contributes equally regardless of phrase count.")
+    parser.add_argument("--global_context_fraction", type=float, default=0.4,
+                        help="Context fraction for the global crop used as full_image (default 0.4).")
+    parser.add_argument("--context_fraction", type=float, default=0.15,
+                        help="Context fraction for the tight tumor crop used as crop_image (default 0.15).")
+    parser.add_argument("--tau_s_img_crop", type=float, default=0.07,
+                        help="Soft-target temperature for crop-image-image anchor (T2I, default: 0.07).")
+    parser.add_argument("--learn_loss_weights", action="store_true",
+                        help="Make λ_ita, λ_sim, λ_reg learnable log-scale parameters.")
 
     parser.add_argument("--downstream_train_frac", type=float, default=0.8)
     parser.add_argument("--downstream_val_frac",   type=float, default=0.1)
@@ -345,10 +423,26 @@ def main(args: argparse.Namespace) -> None:
     print(f"Device: {device}")
 
     # ── Models ────────────────────────────────────────────────────────────────
-    vit      = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim).to(device)
-    text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim).to(device)
+    vit      = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim)
+    text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim)
+    if args.warm_start_projections:
+        vit.load_pretrained_projections()
+        text_enc.load_pretrained_projections()
+    vit      = vit.to(device)
+    text_enc = text_enc.to(device)
     τ              = nn.Parameter(torch.tensor(0.07, device=device))
-    log_lambda_ita = nn.Parameter(torch.zeros([], device=device))
+    log_lambda_ita = nn.Parameter(
+        torch.tensor(math.log(args.lambda_ita), device=device),
+        requires_grad=args.learn_loss_weights,
+    )
+    log_lambda_sim = nn.Parameter(
+        torch.tensor(math.log(args.lambda_sim), device=device),
+        requires_grad=args.learn_loss_weights,
+    )
+    log_lambda_reg = nn.Parameter(
+        torch.tensor(math.log(args.lambda_reg), device=device),
+        requires_grad=args.learn_loss_weights,
+    )
 
     # ── Run directory ─────────────────────────────────────────────────────────
     run_dir = (
@@ -379,6 +473,8 @@ def main(args: argparse.Namespace) -> None:
         text_mode=args.text_mode,
         max_bef_phrases=args.max_bef_phrases,
         max_beur_phrases=args.max_beur_phrases,
+        global_context_fraction=args.global_context_fraction,
+        context_fraction=args.context_fraction,
     )
 
     use_pin = device.type == "cuda"
@@ -415,8 +511,10 @@ def main(args: argparse.Namespace) -> None:
 
     vit_decay, vit_no_decay       = _split_params(vit)
     txt_decay, txt_no_decay       = _split_params(text_enc)
-    decay_params   = vit_decay   + txt_decay   + [τ, log_lambda_ita]
-    no_decay_params= vit_no_decay+ txt_no_decay
+    decay_params    = vit_decay + txt_decay
+    lambda_params   = [log_lambda_ita, log_lambda_sim, log_lambda_reg] \
+                      if args.learn_loss_weights else []
+    no_decay_params = vit_no_decay + txt_no_decay + [τ] + lambda_params
 
     optimizer = torch.optim.AdamW(
         [
@@ -452,24 +550,38 @@ def main(args: argparse.Namespace) -> None:
         "lora_alpha":  args.lora_alpha,
         "embed_dim":   args.embed_dim,
     }
-    best_val_loss    = float("inf")
-    patience_counter = 0
+    best_val_loss       = float("inf")
+    best_mean_retrieval = -float("inf")
+    patience_counter    = 0
 
     print(f"\nStarting LACE v1 training: {args.epochs} epochs, patience={args.patience}\n")
 
     for epoch in range(1, args.epochs + 1):
         train_metrics = train_one_epoch(
             vit, text_enc, internal_loader, btxrd_loader,
-            optimizer, scaler, τ, log_lambda_ita, trainable_params,
+            optimizer, scaler, τ,
+            log_lambda_ita, log_lambda_sim, log_lambda_reg,
+            trainable_params,
             device=device,
-            lambda_sim=args.lambda_sim, lambda_reg=args.lambda_reg,
             text_mode=args.text_mode,
+            τ_s_beur=args.tau_s_beur,
+            τ_s_bef=args.tau_s_bef,
+            τ_s_img_full=args.tau_s_img_full,
+            τ_s_img_crop=args.tau_s_img_crop,
+            same_image_boost=args.same_image_boost,
+            reweight_by_n_phrases=args.reweight_by_n_phrases,
         )
         val_metrics = evaluate_lace(
-            vit, text_enc, val_loader, τ, log_lambda_ita,
+            vit, text_enc, val_loader, τ,
+            log_lambda_ita, log_lambda_sim, log_lambda_reg,
             device=device,
-            lambda_sim=args.lambda_sim, lambda_reg=args.lambda_reg,
             text_mode=args.text_mode,
+            τ_s_beur=args.tau_s_beur,
+            τ_s_bef=args.tau_s_bef,
+            τ_s_img_full=args.tau_s_img_full,
+            τ_s_img_crop=args.tau_s_img_crop,
+            same_image_boost=args.same_image_boost,
+            reweight_by_n_phrases=args.reweight_by_n_phrases,
         )
         scheduler.step()
 
@@ -505,27 +617,43 @@ def main(args: argparse.Namespace) -> None:
                 step=epoch,
             )
 
+        def _checkpoint_dict(extra: dict) -> dict:
+            return {
+                "epoch":           epoch,
+                "val_loss":        val_loss,
+                "lora_config":     lora_cfg,
+                "vit_state":       vit.state_dict(),
+                "text_enc_state":  text_enc.state_dict(),
+                "tau":             τ.data,
+                "log_lambda_ita":  log_lambda_ita.data,
+                "log_lambda_sim":  log_lambda_sim.data,
+                "log_lambda_reg":  log_lambda_reg.data,
+                "optimizer_state": optimizer.state_dict(),
+                **extra,
+            }
+
         if val_loss < best_val_loss:
-            best_val_loss    = val_loss
-            patience_counter = 0
-            torch.save(
-                {
-                    "epoch":           epoch,
-                    "val_loss":        val_loss,
-                    "lora_config":     lora_cfg,
-                    "vit_state":       vit.state_dict(),
-                    "text_enc_state":  text_enc.state_dict(),
-                    "tau":             τ.data,
-                    "log_lambda_ita":  log_lambda_ita.data,
-                    "optimizer_state": optimizer.state_dict(),
-                },
-                run_dir / "best_checkpoint.pt",
-            )
-        else:
-            patience_counter += 1
-            if patience_counter >= args.patience:
-                print(f"\nEarly stopping at epoch {epoch} (no improvement for {args.patience} epochs).\n")
-                break
+            best_val_loss = val_loss
+            ckpt_path = run_dir / "best_val_loss_checkpoint.pt"
+            torch.save(_checkpoint_dict({"best_val_loss": best_val_loss}), ckpt_path)
+            print(f"  Saved checkpoint -> {ckpt_path}")
+
+        if retrieval:
+            mean_r1 = (retrieval["retrieval/i2t_r1"] + retrieval["retrieval/t2i_r1"]) / 2
+            if mean_r1 > best_mean_retrieval:
+                best_mean_retrieval = mean_r1
+                patience_counter    = 0
+                ckpt_path = run_dir / "best_retrieval_checkpoint.pt"
+                torch.save(_checkpoint_dict({"best_mean_r1": best_mean_retrieval, **retrieval}), ckpt_path)
+                print(f"  Saved checkpoint -> {ckpt_path}")
+            else:
+                patience_counter += 1
+                print(f"  No improvement in mean R@1 ({patience_counter}/{args.patience}) "
+                      f"(current={mean_r1:.1%}, best={best_mean_retrieval:.1%})")
+                if patience_counter >= args.patience:
+                    print(f"\nEarly stopping at epoch {epoch} "
+                          f"(mean R@1 did not improve for {args.patience} epochs).\n")
+                    break
 
     torch.save(
         {
@@ -536,10 +664,15 @@ def main(args: argparse.Namespace) -> None:
             "text_enc_state": text_enc.state_dict(),
             "tau":            τ.data,
             "log_lambda_ita": log_lambda_ita.data,
+            "log_lambda_sim": log_lambda_sim.data,
+            "log_lambda_reg": log_lambda_reg.data,
         },
         run_dir / "final_checkpoint.pt",
     )
-    print(f"\nDone. Best val loss: {best_val_loss:.4f}. Checkpoints: {run_dir}")
+    print(
+        f"\nDone. Best val loss: {best_val_loss:.4f} | "
+        f"Best mean R@1: {best_mean_retrieval:.1%}. Checkpoints: {run_dir}"
+    )
     if use_wandb:
         wandb.finish()
 

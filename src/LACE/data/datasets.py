@@ -8,7 +8,8 @@ import torch
 from PIL import Image, ImageFile
 from torch.utils.data import Dataset
 
-from LACE.data.transforms import extract_centered_crop, rasterize_shapes, mask_to_patch_labels
+from LACE.data.transforms import rasterize_shapes, mask_to_patch_labels
+from biomedclip.data.transforms import crop_around_mask, crop_around_mask_pair
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -20,9 +21,8 @@ class InternalDatasetV2(Dataset):
     align with the 196 ViT patch positions used by MaskTokenModule.
 
     text_mode controls text encoding — same options as InternalTripleDataset:
-      "full"        — tokenize full befund/beurteilung strings
-      "phrase_mean" — tokenize each phrase separately; encoder mean-pools CLS
-      "phrase_attn" — tokenize each phrase separately; encoder attention-pools CLS
+      "full"   — tokenize full befund/beurteilung strings
+      "phrase" — tokenize each phrase separately; returns per-phrase embeddings
     """
 
     def __init__(
@@ -31,7 +31,7 @@ class InternalDatasetV2(Dataset):
         preprocess,
         tokenizer,
         max_text_len: int = 128,
-        text_mode: str = "phrase_attn",
+        text_mode: str = "phrase",
         max_bef_phrases: int = 16,
         max_beur_phrases: int = 16,
         phrase_tok_len: int = 32,
@@ -44,7 +44,7 @@ class InternalDatasetV2(Dataset):
         self.max_beur_phrases = max_beur_phrases
         self.phrase_tok_len   = phrase_tok_len
 
-        if text_mode in ("phrase_mean", "phrase_attn"):
+        if text_mode == "phrase":
             self.samples = [
                 s for s in samples
                 if s.get("befund_phrases") and s.get("beurteilung_phrases")
@@ -121,21 +121,25 @@ class InternalDatasetV2(Dataset):
                 "befund_mask":      f_enc["attention_mask"].squeeze(0),
                 "has_befund":       torch.tensor(bool(befund), dtype=torch.bool),
             }
-        else:  # phrase_mean or phrase_attn
+        else:  # phrase
             beur_ids, beur_pattn, beur_pmask = self._encode_phrase_list(
                 beur_phrases, self.max_beur_phrases,
             )
             bef_ids, bef_pattn, bef_pmask = self._encode_phrase_list(
                 bef_phrases, self.max_bef_phrases,
             )
+            all_text = ", ".join(beur_phrases + bef_phrases)
+            concat_enc = self._tok(all_text, self.max_text_len)
             text_fields = {
-                "beur_phrase_ids":  beur_ids,
-                "beur_phrase_attn": beur_pattn,
-                "beur_phrase_mask": beur_pmask,
-                "bef_phrase_ids":   bef_ids,
-                "bef_phrase_attn":  bef_pattn,
-                "bef_phrase_mask":  bef_pmask,
-                "has_befund":       torch.tensor(bool(bef_phrases), dtype=torch.bool),
+                "beur_phrase_ids":    beur_ids,
+                "beur_phrase_attn":   beur_pattn,
+                "beur_phrase_mask":   beur_pmask,
+                "bef_phrase_ids":     bef_ids,
+                "bef_phrase_attn":    bef_pattn,
+                "bef_phrase_mask":    bef_pmask,
+                "concat_phrase_ids":  concat_enc["input_ids"].squeeze(0),
+                "concat_phrase_mask": concat_enc["attention_mask"].squeeze(0),
+                "has_befund":         torch.tensor(bool(bef_phrases), dtype=torch.bool),
             }
 
         return {
@@ -158,10 +162,9 @@ class InternalTripleDataset(Dataset):
     text_mode controls how text is encoded:
       "full"        — tokenize full befund/beurteilung strings (existing behaviour)
       "concat"      — join phrase lists with ", " and tokenize as one string
-      "phrase_mean" — tokenize each phrase separately; encoder mean-pools CLS
-      "phrase_attn" — tokenize each phrase separately; encoder attention-pools CLS
+      "phrase" — tokenize each phrase separately; returns per-phrase embeddings
 
-    For phrase_mean/phrase_attn, samples with empty phrase lists are dropped.
+    For phrase mode, samples with empty phrase lists are dropped.
     """
 
     def __init__(
@@ -174,16 +177,20 @@ class InternalTripleDataset(Dataset):
         max_bef_phrases: int = 16,
         max_beur_phrases: int = 16,
         phrase_tok_len: int = 32,
+        global_context_fraction: float = 0.4,
+        context_fraction: float = 0.15,
     ) -> None:
-        self.preprocess       = preprocess
-        self.tokenizer        = tokenizer
-        self.max_text_len     = max_text_len
-        self.text_mode        = text_mode
-        self.max_bef_phrases  = max_bef_phrases
-        self.max_beur_phrases = max_beur_phrases
-        self.phrase_tok_len   = phrase_tok_len
+        self.preprocess              = preprocess
+        self.tokenizer               = tokenizer
+        self.max_text_len            = max_text_len
+        self.text_mode               = text_mode
+        self.max_bef_phrases         = max_bef_phrases
+        self.max_beur_phrases        = max_beur_phrases
+        self.phrase_tok_len          = phrase_tok_len
+        self.global_context_fraction = global_context_fraction
+        self.context_fraction        = context_fraction
 
-        if text_mode in ("phrase_mean", "phrase_attn"):
+        if text_mode == "phrase":
             self.samples = [
                 s for s in samples
                 if s.get("befund_phrases") and s.get("beurteilung_phrases")
@@ -246,19 +253,28 @@ class InternalTripleDataset(Dataset):
         bef_phrases  = s.get("befund_phrases") or []
 
         image = Image.open(image_path).convert("RGB")
-        full_image = self.preprocess(image)
 
         has_mask     = False
-        crop_pil     = image
+        img_pil      = image          # fallback global image: full X-ray
+        crop_pil     = image          # fallback crop: full X-ray
         patch_labels = torch.zeros(196, dtype=torch.float32)
 
         if mask_path.exists():
             mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
             if np.any(mask_arr > 0):
-                crop_pil, mask_crop = extract_centered_crop(image, mask_arr, crop_size=224)
-                patch_labels        = mask_to_patch_labels(mask_crop)
-                has_mask            = True
+                img_arr = np.array(image)
+                img_crop_arr, mask_crop = crop_around_mask_pair(img_arr, mask_arr, context_fraction=self.context_fraction)
+                crop_pil     = Image.fromarray(img_crop_arr)
+                patch_labels = mask_to_patch_labels(mask_crop)
+                has_mask     = True
 
+                global_arr = crop_around_mask(
+                    img_arr, mask_arr,
+                    context_fraction=self.global_context_fraction,
+                )
+                img_pil = Image.fromarray(global_arr)
+
+        full_image = self.preprocess(img_pil)
         crop_image = self.preprocess(crop_pil)
 
         if self.text_mode == "full":
@@ -283,21 +299,25 @@ class InternalTripleDataset(Dataset):
                 "befund_mask":      f_enc["attention_mask"].squeeze(0),
                 "has_befund":       torch.tensor(bool(bef_phrases), dtype=torch.bool),
             }
-        else:  # phrase_mean or phrase_attn
+        else:  # phrase
             beur_ids, beur_pattn, beur_pmask = self._encode_phrase_list(
                 beur_phrases, self.max_beur_phrases,
             )
             bef_ids, bef_pattn, bef_pmask = self._encode_phrase_list(
                 bef_phrases, self.max_bef_phrases,
             )
+            all_text = ", ".join(beur_phrases + bef_phrases)
+            concat_enc = self._tok(all_text, self.max_text_len)
             text_fields = {
-                "beur_phrase_ids":  beur_ids,
-                "beur_phrase_attn": beur_pattn,
-                "beur_phrase_mask": beur_pmask,
-                "bef_phrase_ids":   bef_ids,
-                "bef_phrase_attn":  bef_pattn,
-                "bef_phrase_mask":  bef_pmask,
-                "has_befund":       torch.tensor(bool(bef_phrases), dtype=torch.bool),
+                "beur_phrase_ids":    beur_ids,
+                "beur_phrase_attn":   beur_pattn,
+                "beur_phrase_mask":   beur_pmask,
+                "bef_phrase_ids":     bef_ids,
+                "bef_phrase_attn":    bef_pattn,
+                "bef_phrase_mask":    bef_pmask,
+                "concat_phrase_ids":  concat_enc["input_ids"].squeeze(0),
+                "concat_phrase_mask": concat_enc["attention_mask"].squeeze(0),
+                "has_befund":         torch.tensor(bool(bef_phrases), dtype=torch.bool),
             }
 
         return {

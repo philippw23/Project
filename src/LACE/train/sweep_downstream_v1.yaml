@@ -34,6 +34,8 @@ parameters:
     distribution: uniform
     min: 2
     max: 3.5
+  use_mask:
+    value: true
 
 command:
   - ${env}
@@ -42,13 +44,13 @@ command:
   - --version
   - v1
   - --checkpoint
-  - results/lace_pretrain/run_20260525_171213/final_checkpoint.pt
+  - results/lace_pretrain/run_20260530_104844/best_retrieval_checkpoint.pt
   - --splits
   - data/internal_dataset/split.json
   - --out_dir
   - results
   - --epochs
-  - "50"
+  - "100"
   - --patience
   - "10"
   - --seed

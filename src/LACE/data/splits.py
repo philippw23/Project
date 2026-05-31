@@ -32,6 +32,8 @@ def build_pretrain_datasets_lace(
     text_mode: str = "full",
     max_bef_phrases: int = 16,
     max_beur_phrases: int = 16,
+    global_context_fraction: float = 0.4,
+    context_fraction: float = 0.15,
 ) -> tuple[InternalTripleDataset, InternalTripleDataset]:
     """90/10 random split of pretrain_samples into train and monitor-val datasets."""
     rng     = random.Random(seed)
@@ -46,10 +48,14 @@ def build_pretrain_datasets_lace(
     train_ds = InternalTripleDataset(
         train_samp, preprocess_train, tokenizer, max_text_len,
         text_mode, max_bef_phrases, max_beur_phrases,
+        global_context_fraction=global_context_fraction,
+        context_fraction=context_fraction,
     )
     val_ds = InternalTripleDataset(
         val_samp, preprocess_val, tokenizer, max_text_len,
         text_mode, max_bef_phrases, max_beur_phrases,
+        global_context_fraction=global_context_fraction,
+        context_fraction=context_fraction,
     )
     return train_ds, val_ds
 
@@ -62,7 +68,7 @@ def build_pretrain_datasets_lace_v2(
     seed: int,
     monitor_val_frac: float = 0.1,
     max_text_len: int = 128,
-    text_mode: str = "phrase_attn",
+    text_mode: str = "phrase",
     max_bef_phrases: int = 16,
     max_beur_phrases: int = 16,
 ) -> tuple[InternalDatasetV2, InternalDatasetV2]:

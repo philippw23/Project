@@ -13,14 +13,14 @@
 #run_bs128_unfreeze11_20260516_125128
 #run_bs128_lora11_20260516_125104
 #run_bs128_lora4_20260516_125103
-CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_bs128_unfreeze6_20260521_121550/final_checkpoint.pt"
+CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/lace_pretrain/run_20260530_104844/best_retrieval_checkpoint.pt"
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
 
 BATCH_SIZE=16
 LR=0.0002743494570757752
 DROPOUT=0.5
 
-WEIGHT_DECAY=0.1
+WEIGHT_DECAY=0.01
 EPOCHS=50
 
 # Head mode: mlp (age+sex fusion), mlp_no_meta (no metadata), linear (linear probe)
