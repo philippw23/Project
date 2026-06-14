@@ -16,7 +16,7 @@ class BertEncoder(nn.Module):
         self.agg_tokens = cfg.model.text.agg_tokens
 
         self.model = AutoModel.from_pretrained(
-            self.bert_type, output_hidden_states=True
+            self.bert_type, output_hidden_states=True, use_safetensors=True
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.bert_type)

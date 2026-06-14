@@ -123,5 +123,44 @@ def inject_lora_gloria(
     img_encoder.local_embedder = LoRAConv2d(img_encoder.local_embedder, r, alpha)
 
 
+def unfreeze_gloria(
+    img_encoder: nn.Module,
+    n_layers: int,
+) -> None:
+    """Freeze img_encoder, then unfreeze last N ResNet layer3 blocks + all of layer4 + projection heads.
+
+    Symmetric semantics to inject_lora_gloria:
+      n_layers == 0 → only projection heads (global_embedder, local_embedder) trainable
+      n_layers  > 0 → additionally unfreezes all layer4 blocks and last n_layers layer3 blocks
+    """
+    for p in img_encoder.parameters():
+        p.requires_grad_(False)
+
+    backbone = img_encoder.model
+
+    if n_layers > 0:
+        for block in backbone.layer4:
+            for p in block.parameters():
+                p.requires_grad_(True)
+
+        layer3_blocks = list(backbone.layer3)
+        n = len(layer3_blocks)
+        effective = min(n_layers, n)
+        if effective < n_layers:
+            warnings.warn(
+                f"n_layers={n_layers} exceeds layer3 block count ({n}). "
+                f"Unfreezing all {n} blocks.",
+                stacklevel=2,
+            )
+        for block in layer3_blocks[-effective:]:
+            for p in block.parameters():
+                p.requires_grad_(True)
+
+    for p in img_encoder.global_embedder.parameters():
+        p.requires_grad_(True)
+    for p in img_encoder.local_embedder.parameters():
+        p.requires_grad_(True)
+
+
 def count_trainable_params(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

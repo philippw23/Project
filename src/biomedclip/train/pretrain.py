@@ -455,7 +455,7 @@ def main(args: argparse.Namespace) -> None:
                 f" | T2I R@1={retrieval['retrieval/t2i_r1']:.1%}"
                 f"  R@5={retrieval['retrieval/t2i_r5']:.1%}"
                 f"  med={retrieval['retrieval/t2i_median_rank']:.0f}"
-                f" | avg/bs={int(retrieval['retrieval/batch_size'])} n={int(retrieval['retrieval/n_pairs'])}"
+                f" | n={int(retrieval['retrieval/n_pairs'])}"
             )
         if use_wandb:
             log_dict = {

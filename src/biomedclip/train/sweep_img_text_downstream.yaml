@@ -10,30 +10,28 @@ metric:
 parameters:
   lr:
     distribution: log_uniform_values
-    min: 1e-6
-    max: 1e-4
+    min: 3e-5
+    max: 5e-4
   dropout:
-    values: [0.3, 0.4, 0.5, 0.6]
+    values: [0.2, 0.3, 0.4, 0.5]
   weight_decay:
-    values: [0.01, 0.05, 0.1, 0.15]
+    values: [0.01, 0.05, 0.1]
   hidden_dims:
     values:
       - [32]
       - [64]
       - [128]
-      - [128, 128]
-      - [256, 128]
       - [64, 32]
   batch_size:
     values: [16, 32, 64]
   loss:
-    value: focal
+    values: [focal, cb_focal]
   class_weighting:
     values: [inverse, effective] 
   focal_gamma:
     values: [2.0, 2.5, 3.0, 3.25]
   cb_beta:
-    values: [0.99, 0.999, 0.9999]
+    values: [0.99, 0.999]
 
 command:
   - ${env}

@@ -2,7 +2,7 @@
 #SBATCH --job-name=check_aioserver2
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --nodelist=aioserver3
+#SBATCH --nodelist=aioserver2
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:05:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"

@@ -39,8 +39,7 @@ from biomedclip.utils.misc import (
     ROOT_DIR,
 )
 
-from LACE.data.datasets import BTXRDOrthoDataset
-from LACE.data.splits import build_pretrain_datasets_lace_v2
+from LACE.data.datasets import BTXRDOrthoDataset, InternalDatasetV2
 from LACE.data.transforms import build_train_transform_lace
 from LACE.loss.objectives import multi_positive_soft_semantic_loss, seg_loss
 from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
@@ -491,22 +490,25 @@ def main(args: argparse.Namespace) -> None:
             split_data = json.load(fh)
         shutil.copy(args.splits, run_dir / "split.json")
         pretrain_samples = split_data["train"]
-        print(f"Loaded split from {args.splits} ({len(pretrain_samples)} train samples)")
+        val_samples      = split_data["val"]
+        print(f"Loaded split from {args.splits} "
+              f"({len(pretrain_samples)} train, {len(val_samples)} val samples)")
     else:
-        train, _val, _test = build_stratified_splits(args, run_dir=run_dir)
-        pretrain_samples = train
+        pretrain_samples, val_samples, _test = build_stratified_splits(args, run_dir=run_dir)
 
     preprocess_val   = vit.preprocess_val
     preprocess_train = build_train_transform_lace(preprocess_val)
     tokenizer        = text_enc.tokenizer
 
-    train_ds, val_ds = build_pretrain_datasets_lace_v2(
-        pretrain_samples, preprocess_train, preprocess_val,
-        tokenizer, args.seed, max_text_len=args.max_text_len,
+    ds_kwargs = dict(
+        max_text_len=args.max_text_len,
         text_mode=args.text_mode,
         max_bef_phrases=args.max_bef_phrases,
         max_beur_phrases=args.max_beur_phrases,
     )
+    train_ds = InternalDatasetV2(pretrain_samples, preprocess_train, tokenizer, **ds_kwargs)
+    val_ds   = InternalDatasetV2(val_samples,      preprocess_val,   tokenizer, **ds_kwargs)
+    print(f"Pretrain datasets: {len(train_ds)} train / {len(val_ds)} val")
 
     use_pin = device.type == "cuda"
     internal_loader = DataLoader(

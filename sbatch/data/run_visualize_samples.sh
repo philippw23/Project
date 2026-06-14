@@ -20,7 +20,7 @@ export MPLCONFIGDIR=$home_dir/.config/matplotlib
 echo Environment activated
 
 GLOBAL_CONTEXT_FRACTION=0.3
-CONTEXT_FRACTION=0.10
+CONTEXT_FRACTION=0.05
 
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/visualize_samples.py \
     --samples 10 \

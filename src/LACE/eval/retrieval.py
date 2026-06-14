@@ -30,17 +30,26 @@ def evaluate_retrieval_lace(
     img_embs, txt_embs = [], []
 
     for batch in val_loader:
-        full_img = batch["full_image"].to(device)
+        crop_img = batch["crop_image"].to(device)
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
-            z_img = vit.forward_cls(full_img)                        # [B, D]
+            z_img = vit.forward_cls(crop_img)                        # [B, D]
 
-            txt_key = "concat_phrase" if text_mode == "phrase" \
-                      else "beurteilung"
-            z_txt = text_enc.encode_beurteilung(
-                batch[f"{txt_key}_ids"].to(device),
-                batch[f"{txt_key}_mask"].to(device),
-            )                                                        # [B, D]
+            if text_mode == "mixed":
+                z_txt = text_enc.encode_beurteilung(
+                    batch["concat_full_ids"].to(device),
+                    batch["concat_full_mask"].to(device),
+                )
+            elif text_mode == "phrase":
+                z_txt = text_enc.encode_beurteilung(
+                    batch["concat_phrase_ids"].to(device),
+                    batch["concat_phrase_mask"].to(device),
+                )
+            else:
+                z_txt = text_enc.encode_beurteilung(
+                    batch["beurteilung_ids"].to(device),
+                    batch["beurteilung_mask"].to(device),
+                )                                                    # [B, D]
 
         img_embs.append(F.normalize(z_img.float(), dim=-1))
         txt_embs.append(F.normalize(z_txt.float(), dim=-1))

@@ -24,22 +24,24 @@ parameters:
     values: [0.02, 0.04, 0.07]
   tau_s_bef:
     values: [0.02, 0.04, 0.07]
-  tau_s_img_crop:
-    values: [0.03, 0.05, 0.07]
+  tau2:
+    values: [0.03, 0.04, 0.07, 0.1]
   tau_s_img_full:
-    values: [0.03, 0.05, 0.07]
+    values: [0.03, 0.04, 0.07]
+  t2i_mode:
+    values: [text_text, infonce]
   same_image_boost:
     values: [0.0, 10.0, 20.0]
   global_context_fraction:
-    values: [0.3, 0.4]
+    value: 0.15
   context_fraction:
-    values: [0.1, 0.15]
+    value: 0.15
   lambda_sim:
-    values: [0.5, 0.8, 1.0]
-  lambda_reg:
-    values: [0.3, 0.5, 0.8]
+    value: 1.0
+  lambda_ortho:
+    value: 1.0
   lambda_ita:
-    values: [0.5, 0.8, 1.0]
+    value: 1.0
 
 command:
   - ${env}
@@ -55,8 +57,6 @@ command:
   - /mnt/nfs/homedirs/philippw/Project/results
   - --embed_dim
   - "512"
-  - --lora_alpha
-  - "16"
   - --batch_size
   - "128"
   - --btxrd_batch_size
@@ -73,13 +73,10 @@ command:
   - "25"
   - --warmup_epochs
   - "5"
-  - --tau_s_bef
-  - "0.07"
-  - --tau_s_img_crop
-  - "0.05"
   - --reweight_by_n_phrases
   - --learn_loss_weights
   - --warm_start_projections
+  - --sim_lesion_only
   - --wandb
   - --wandb_project
   - lace-pretrain

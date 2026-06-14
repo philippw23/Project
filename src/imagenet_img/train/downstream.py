@@ -297,7 +297,10 @@ def main(args: argparse.Namespace) -> None:
         val_loss, val_acc, val_preds, val_labels = evaluate_cached(mlp, val_emb_loader,
                                                                      criterion, device)
 
-        val_bal_acc      = balanced_accuracy_score(val_labels, val_preds)
+        val_bal_acc       = balanced_accuracy_score(val_labels, val_preds)
+        val_weighted_prec, val_weighted_rec, _, _ = precision_recall_fscore_support(
+            val_labels, val_preds, average="weighted", zero_division=0
+        )
         val_combined_acc = 0.5 * val_acc + 0.5 * val_bal_acc
 
         print(
@@ -311,8 +314,10 @@ def main(args: argparse.Namespace) -> None:
                 "train/loss": train_loss,
                 "val/loss": val_loss,
                 "val/acc": val_acc,
-                "val/balanced_acc": val_bal_acc,
-                "val/combined_acc": val_combined_acc,
+                "val/balanced_acc":        val_bal_acc,
+                "val/precision_weighted":  val_weighted_prec,
+                "val/recall_weighted":     val_weighted_rec,
+                "val/combined_acc":        val_combined_acc,
             }, step=epoch)
 
         if val_loss < best_val_loss:
@@ -345,6 +350,10 @@ def main(args: argparse.Namespace) -> None:
     test_bal_acc = balanced_accuracy_score(test_labels, test_preds)
     print(f"Balanced accuracy: {test_bal_acc:.3f}")
     print(f"Macro F1: {f1_score(test_labels, test_preds, average='macro'):.3f}")
+    test_weighted_prec, test_weighted_rec, _, _ = precision_recall_fscore_support(
+        test_labels, test_preds, average="weighted", zero_division=0
+    )
+    print(f"Weighted Precision: {test_weighted_prec:.3f}  |  Weighted Recall: {test_weighted_rec:.3f}")
     print()
     print(classification_report(test_labels, test_preds,
                                   labels=list(range(NUM_CLASSES)),
@@ -365,9 +374,11 @@ def main(args: argparse.Namespace) -> None:
         log_dict = {
             "test/loss": test_loss, "test/acc": test_acc,
             "test/balanced_acc": test_bal_acc,
-            "test/precision_macro": test_prec,
-            "test/recall_macro": test_rec,
-            "test/f1_macro": test_f1,
+            "test/precision_macro":    test_prec,
+            "test/recall_macro":       test_rec,
+            "test/precision_weighted": test_weighted_prec,
+            "test/recall_weighted":    test_weighted_rec,
+            "test/f1_macro":           test_f1,
         }
         for i, name in enumerate(label_names):
             log_dict[f"test/precision_{name}"] = per_class_prec[i]
