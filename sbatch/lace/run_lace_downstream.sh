@@ -47,7 +47,8 @@ python $home_dir/Project/src/lace_downstream.py \
     --version    $VERSION \
     --head       $HEAD \
     --checkpoint $CHECKPOINT \
-    --splits     $home_dir/Project/data/internal_dataset/split.json \
+    --binary \
+    --splits     $home_dir/Project/data/internal_dataset/split_binary.json \
     --out_dir    $home_dir/Project/results \
     --epochs     $EPOCHS \
     --patience   $PATIENCE \

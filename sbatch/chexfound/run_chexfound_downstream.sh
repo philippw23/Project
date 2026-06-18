@@ -13,7 +13,7 @@
 # Set CHECKPOINT to a continued-pretrain .pth path, or "none" to use frozen original weights
 CHECKPOINT="none"
 CHEXFOUND_WEIGHTS="/mnt/nfs/homedirs/philippw/Project/src/chexfound/data/teacher_checkpoint.pth"
-SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_binary.json"
 HEAD="mlp_no_meta"   # linear | mlp | mlp_no_meta
 BATCH_SIZE=64
 LR=1e-3
@@ -45,6 +45,7 @@ export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfound_downstream.py \
+    --binary \
     --checkpoint    $CHECKPOINT \
     --chexfound_weights $CHEXFOUND_WEIGHTS \
     --splits        $SPLITS \

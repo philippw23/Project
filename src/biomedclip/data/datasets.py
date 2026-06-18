@@ -15,6 +15,10 @@ LABEL_TO_IDX = {"benign": 0, "intermediate": 1, "malignant": 2}
 IDX_TO_LABEL = {v: k for k, v in LABEL_TO_IDX.items()}
 NUM_CLASSES  = 3
 
+LABEL_TO_IDX_BINARY = {"benign": 0, "malignant": 1}
+IDX_TO_LABEL_BINARY = {v: k for k, v in LABEL_TO_IDX_BINARY.items()}
+NUM_CLASSES_BINARY  = 2
+
 
 class BoneTumorPairDataset(Dataset):
     """(image tensor, text token tensor) pairs for contrastive pretraining."""
@@ -62,13 +66,15 @@ class DownstreamDataset(Dataset):
         age_std: float,
         preprocess,
         use_mask: bool,
+        label_to_idx: dict[str, int] | None = None,
     ) -> None:
+        self._label_to_idx = label_to_idx if label_to_idx is not None else LABEL_TO_IDX
         valid = []
         for s in samples:
             stem = Path(s["image"]).stem
             if stem not in age_sex_lookup:
                 continue
-            if s["label"] not in LABEL_TO_IDX:
+            if s["label"] not in self._label_to_idx:
                 continue
             valid.append(s)
         self.samples       = valid
@@ -87,8 +93,8 @@ class DownstreamDataset(Dataset):
         age_raw, sex = self.age_sex_lookup[stem]
 
         image     = Image.open(s["image"]).convert("RGB")
-        mask_path = Path(s["mask"])
-        if self.use_mask and mask_path.exists():
+        mask_path = Path(s["mask"] or "")
+        if self.use_mask and mask_path.name and mask_path.exists():
             image_arr = np.array(image.convert("L"), dtype=float)
             mask_arr  = np.array(Image.open(mask_path).convert("L"), dtype=float)
             cropped   = crop_around_mask(image_arr, mask_arr)
@@ -96,7 +102,7 @@ class DownstreamDataset(Dataset):
 
         image_tensor = self.preprocess(image)
         age_norm     = (age_raw - self.age_mean) / (self.age_std + 1e-6)
-        label        = LABEL_TO_IDX[s["label"]]
+        label        = self._label_to_idx[s["label"]]
 
         return {
             "image": image_tensor,
@@ -121,13 +127,15 @@ class DownstreamDatasetWithText(Dataset):
         preprocess,
         tokenizer,
         use_mask: bool,
+        label_to_idx: dict[str, int] | None = None,
     ) -> None:
+        self._label_to_idx = label_to_idx if label_to_idx is not None else LABEL_TO_IDX
         valid = []
         for s in samples:
             stem = Path(s["image"]).stem
             if stem not in age_sex_lookup:
                 continue
-            if s["label"] not in LABEL_TO_IDX:
+            if s["label"] not in self._label_to_idx:
                 continue
             valid.append(s)
         self.samples        = valid
@@ -147,8 +155,8 @@ class DownstreamDatasetWithText(Dataset):
         age_raw, sex = self.age_sex_lookup[stem]
 
         image     = Image.open(s["image"]).convert("RGB")
-        mask_path = Path(s["mask"])
-        if self.use_mask and mask_path.exists():
+        mask_path = Path(s["mask"] or "")
+        if self.use_mask and mask_path.name and mask_path.exists():
             image_arr = np.array(image.convert("L"), dtype=float)
             mask_arr  = np.array(Image.open(mask_path).convert("L"), dtype=float)
             cropped   = crop_around_mask(image_arr, mask_arr)
@@ -156,7 +164,7 @@ class DownstreamDatasetWithText(Dataset):
 
         image_tensor = self.preprocess(image)
         age_norm     = (age_raw - self.age_mean) / (self.age_std + 1e-6)
-        label        = LABEL_TO_IDX[s["label"]]
+        label        = self._label_to_idx[s["label"]]
 
         text        = " ".join(filter(None, [s.get("befund_en"), s.get("beurteilung_en")])) or s.get("report") or ""
         text_tokens = self.tokenizer([text], context_length=256).squeeze(0)

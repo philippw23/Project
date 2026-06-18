@@ -429,7 +429,7 @@ def _group_by_patient(samples: list[dict]) -> list[list[dict]]:
 
 def _mask_has_pixels(mask_path: Path) -> bool:
     """Return True iff *mask_path* exists and contains at least one foreground pixel."""
-    if not mask_path.exists():
+    if not mask_path.name or not mask_path.exists():
         return False
     mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
     return bool(np.any(mask > 0))
@@ -452,8 +452,10 @@ def build_stratified_splits(
     with open(dataset_path, encoding="utf-8") as fh:
         all_entries = json.load(fh)
 
+    binary = getattr(args, "binary", False)
+
     samples: list[dict] = []
-    skipped = {"no_report": 0, "no_label": 0, "no_mask": 0}
+    skipped = {"no_report": 0, "no_label": 0, "no_mask": 0, "intermediate": 0}
     for e in all_entries:
         if not e.get("report"):
             skipped["no_report"] += 1
@@ -461,7 +463,10 @@ def build_stratified_splits(
         if not e.get("label"):
             skipped["no_label"] += 1
             continue
-        if not _mask_has_pixels(Path(e.get("mask", ""))):
+        if binary and e["label"] == "intermediate":
+            skipped["intermediate"] += 1
+            continue
+        if not _mask_has_pixels(Path(e.get("mask") or "")):
             skipped["no_mask"] += 1
             continue
         sample = dict(e)
@@ -471,10 +476,11 @@ def build_stratified_splits(
         sample["sex"] = 1.0 if sex == "m" else (0.0 if sex == "f" else 0.5)
         samples.append(sample)
 
+    intermediate_msg = f", {skipped['intermediate']} intermediate excluded" if binary else ""
     print(
         f"Complete samples (report+label+mask): {len(samples)}"
         f"  (skipped: {skipped['no_report']} no report, {skipped['no_label']} no label,"
-        f" {skipped['no_mask']} no mask)"
+        f" {skipped['no_mask']} no mask{intermediate_msg})"
     )
 
     if not samples:
@@ -534,7 +540,7 @@ def build_stratified_splits(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     manifest: dict[str, list] = {name: list(split) for name, split in splits.items()}
-    manifest_path = out_dir / "split.json"
+    manifest_path = out_dir / ("split_binary.json" if binary else "split.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
     print(f"  Split manifest saved -> {manifest_path}\n")

@@ -24,13 +24,11 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/create_split.py \
-    --excel    $home_dir/Project/data/internal_dataset/metadata.xlsx \
-    --reports  $home_dir/Project/data/internal_dataset/text/translated_reports.json \
-    --english \
-    --images   $home_dir/Project/data/internal_dataset/images \
-    --masks    $home_dir/Project/data/internal_dataset/segmentations \
+    --dataset  $home_dir/Project/data/internal_dataset/dataset_full.json \
     --out_dir  $home_dir/Project/data/internal_dataset \
     --downstream_train_frac 0.8 \
     --downstream_val_frac 0.1 \
     --test_frac 0.1 \
-    --seed 42
+    --seed 42 \
+    --binary
+    # Add --binary to exclude intermediate cases and save to split_binary.json

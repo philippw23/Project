@@ -144,7 +144,7 @@ def main(args: argparse.Namespace) -> None:
 
         entries.append({
             "image":               str(image_path),
-            "mask":                str(mask_path),
+            "mask":                str(mask_path) if mask_path.exists() else None,
             "report":              report,
             "label":               label,
             "age":                 age,

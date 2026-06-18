@@ -41,7 +41,9 @@ except ImportError:
 from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_SPLITS
 from biomedclip.data.transforms import build_train_transform
 from biomedclip.data.datasets import (
-    DownstreamDataset, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
+    DownstreamDataset, EmbeddingDataset,
+    LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
+    LABEL_TO_IDX_BINARY, IDX_TO_LABEL_BINARY, NUM_CLASSES_BINARY,
 )
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.lora import inject_lora, unfreeze_or_inject_downstream_lora
@@ -51,15 +53,18 @@ DEFAULT_CHECKPOINT = ROOT_DIR / "results" / "biomedclip_pretrain" / "best_r1_che
 EMBED_DIM = 768  # always pre-projection ViT CLS token
 
 
-def build_head(args: argparse.Namespace, embed_dim: int, device: torch.device) -> nn.Module:
+def build_head(args: argparse.Namespace, embed_dim: int, device: torch.device,
+               num_classes: int = NUM_CLASSES) -> nn.Module:
     if args.head == "linear":
-        return LinearHead(embed_dim).to(device)
+        return LinearHead(embed_dim, num_classes=num_classes).to(device)
     elif args.head == "mlp_no_meta":
         return MalignancyMLP(embed_dim, args.hidden_dims, args.dropout,
-                             args.meta_embed_dim, use_meta=False).to(device)
+                             args.meta_embed_dim, use_meta=False,
+                             num_classes=num_classes).to(device)
     else:  # mlp (default)
         return MalignancyMLP(embed_dim, args.hidden_dims, args.dropout,
-                             args.meta_embed_dim, use_meta=True).to(device)
+                             args.meta_embed_dim, use_meta=True,
+                             num_classes=num_classes).to(device)
 
 
 def train_one_epoch(
@@ -218,6 +223,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="LoRA rank for freshly injected downstream LoRA "
                              "(only used when the loaded block has no pretrained LoRA, default: %(default)s)")
 
+    # ── Binary classification ─────────────────────────────────────────────────
+    parser.add_argument("--binary", action="store_true",
+                        help="Binary classification (benign vs malignant). "
+                             "Use with split_binary.json — intermediate cases must already be excluded.")
+
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)
     parser.add_argument("--wandb",         action="store_true")
@@ -307,6 +317,17 @@ def main(args: argparse.Namespace) -> None:
 
     preprocess_train = build_train_transform(preprocess_val)
 
+    # ── Label mapping ─────────────────────────────────────────────────────────
+    if args.binary:
+        label_to_idx = LABEL_TO_IDX_BINARY
+        idx_to_label = IDX_TO_LABEL_BINARY
+        num_classes  = NUM_CLASSES_BINARY
+        print("Mode: binary (benign vs malignant)")
+    else:
+        label_to_idx = LABEL_TO_IDX
+        idx_to_label = IDX_TO_LABEL
+        num_classes  = NUM_CLASSES
+
     # ── Data ──────────────────────────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
         raw = json.load(fh)
@@ -324,11 +345,11 @@ def main(args: argparse.Namespace) -> None:
     print(f"Age stats (train): mean={age_mean:.1f}, std={age_std:.1f}")
 
     train_ds = DownstreamDataset(splits["train"], age_sex_lookup, age_mean, age_std,
-                                  preprocess_train, args.use_mask)
+                                  preprocess_train, args.use_mask, label_to_idx=label_to_idx)
     val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   args.use_mask)
+                                  preprocess_val,   args.use_mask, label_to_idx=label_to_idx)
     test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   args.use_mask)
+                                  preprocess_val,   args.use_mask, label_to_idx=label_to_idx)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
     use_pin       = device.type == "cuda"
@@ -340,14 +361,14 @@ def main(args: argparse.Namespace) -> None:
 
     # ── Class weighting ───────────────────────────────────────────────────────
     train_labels_all = torch.tensor(
-        [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
+        [label_to_idx[s["label"]] for s in train_ds.samples], dtype=torch.long
     )
-    label_counts  = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
+    label_counts  = torch.bincount(train_labels_all, minlength=num_classes).float()
     class_weights = compute_class_weights(
-        label_counts, num_classes=NUM_CLASSES, mode=args.class_weighting,
+        label_counts, num_classes=num_classes, mode=args.class_weighting,
         beta=args.cb_beta, device=device,
     )
-    print(f"Class counts (train): { {IDX_TO_LABEL[i]: int(label_counts[i]) for i in range(NUM_CLASSES)} }")
+    print(f"Class counts (train): { {idx_to_label[i]: int(label_counts[i]) for i in range(num_classes)} }")
     print(f"Loss: {args.loss} | class_weighting={args.class_weighting}")
 
     if finetune:
@@ -367,8 +388,8 @@ def main(args: argparse.Namespace) -> None:
         test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
 
     # ── Head, loss, optimiser ─────────────────────────────────────────────────
-    head      = build_head(args, embed_dim, device)
-    criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
+    head      = build_head(args, embed_dim, device, num_classes=num_classes)
+    criterion = build_classification_loss(args, label_counts, num_classes, class_weights, device)
     if finetune:
         optimizer = torch.optim.AdamW([
             {"params": head.parameters(),  "lr": args.lr,         "weight_decay": args.weight_decay},
@@ -455,7 +476,7 @@ def main(args: argparse.Namespace) -> None:
         test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
     test_loss, test_acc, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
 
-    label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
+    label_names = [idx_to_label[i] for i in range(num_classes)]
     print("\n" + "=" * 60)
     print("TEST RESULTS")
     print("=" * 60)
@@ -469,12 +490,12 @@ def main(args: argparse.Namespace) -> None:
     print()
     print(classification_report(
         test_labels, test_preds,
-        labels=list(range(NUM_CLASSES)), target_names=label_names,
+        labels=list(range(num_classes)), target_names=label_names,
         digits=3, zero_division=0,
     ))
     print("Confusion matrix (rows=true, cols=pred):")
     print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=list(range(NUM_CLASSES))),
+        confusion_matrix(test_labels, test_preds, labels=list(range(num_classes))),
         index=label_names, columns=label_names,
     ).to_string())
 
@@ -484,7 +505,7 @@ def main(args: argparse.Namespace) -> None:
             test_labels, test_preds, average="macro", zero_division=0
         )
         per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=list(range(NUM_CLASSES)), zero_division=0
+            test_labels, test_preds, labels=list(range(num_classes)), zero_division=0
         )
         log_dict = {
             "test/loss": test_loss, "test/acc": test_acc,

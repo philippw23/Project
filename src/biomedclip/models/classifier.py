@@ -12,9 +12,9 @@ from biomedclip.data.datasets import NUM_CLASSES
 class LinearHead(nn.Module):
     """Single linear layer — no metadata, no non-linearities (true linear probe)."""
 
-    def __init__(self, embed_dim: int) -> None:
+    def __init__(self, embed_dim: int, num_classes: int = NUM_CLASSES) -> None:
         super().__init__()
-        self.fc = nn.Linear(embed_dim, NUM_CLASSES)
+        self.fc = nn.Linear(embed_dim, num_classes)
 
     def forward(
         self,
@@ -42,6 +42,7 @@ class MalignancyMLP(nn.Module):
         dropout: float,
         meta_embed_dim: int = 32,
         use_meta: bool = True,
+        num_classes: int = NUM_CLASSES,
     ) -> None:
         super().__init__()
         self.use_meta = use_meta
@@ -57,7 +58,7 @@ class MalignancyMLP(nn.Module):
         for h in hidden_dims:
             layers += [nn.Linear(in_dim, h), nn.ReLU(), nn.Dropout(dropout)]
             in_dim = h
-        layers.append(nn.Linear(in_dim, NUM_CLASSES))
+        layers.append(nn.Linear(in_dim, num_classes))
         self.net = nn.Sequential(*layers)
 
     def forward(

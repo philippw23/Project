@@ -211,7 +211,7 @@ Antworte NUR mit diesem JSON:
 #   "beurteilung_phrases": []
 # }}"""
 
-SYSTEM_PROMPT_ENGLISH = """\
+SYSTEM_PROMPT_ENGLISH_BACKUP = """\
 You are an experienced radiologist specializing in structured medical information extraction.
 
 Your task: read a radiology report and classify all medically relevant phrases into two categories:
@@ -226,7 +226,7 @@ Ignore section boundaries — classify every phrase by its CONTENT TYPE only.
 Work close to the source text. No hallucinations. Reply with valid JSON only.
 """
 
-USER_PROMPT_TEMPLATE_ENGLISH = """\
+USER_PROMPT_TEMPLATE_ENGLISH_BACKUP = """\
 Read the following radiology report and extract all medically relevant phrases, \
 classified by content type — not by section.
 
@@ -292,6 +292,130 @@ breakthrough, no periosteal reaction.
                        "distal femoral metaphysis", "no cortical breakthrough",
                        "no periosteal reaction"],
     "beurteilung_phrases": ["sharply marginated lesion without cortical involvement"]}}
+
+Report:
+{formatted_report}
+
+Reply ONLY with this JSON:
+{{
+  "befund_phrases": [],
+  "beurteilung_phrases": []
+}}"""
+
+SYSTEM_PROMPT_ENGLISH = """\
+You are an experienced radiologist specializing in structured medical information extraction \
+for bone tumor radiology reports.
+
+Your task: read a radiology report and extract ONLY phrases that are relevant to \
+bone tumor characterization. Classify them into two categories:
+
+- befund_phrases: DESCRIPTIVE observations about the tumor — its morphology, location,
+  size, matrix, margins, cortical status, periosteal reaction, soft tissue involvement
+  (what the lesion looks like)
+- beurteilung_phrases: DIAGNOSTIC interpretations — diagnoses, differentials, clinical
+  assessments, recommendations, benign/malignant characterizations (what the lesion means)
+
+Focus exclusively on features relevant to bone tumor assessment. Ignore incidental findings,
+patient history unrelated to the tumor, and post-operative context unless it describes
+residual tumor features.
+
+The following radiological descriptor categories define what is considered relevant:
+  MARGIN & BORDER: sclerotic/well-defined margin, geographic border (Lodwick), permeative/
+    moth-eaten/infiltrative pattern, cortical destruction/breakthrough, endosteal scalloping
+  PERIOSTEAL REACTION: any periosteal reaction, sunburst/spiculated pattern,
+    Codman triangle, lamellar/onion-skin periosteal reaction
+  MATRIX & DENSITY: osteolytic/radiolucent, osteoblastic/sclerotic/radiodense,
+    mixed lytic-blastic, chondroid matrix (rings and arcs), ossified/mineralized matrix
+  LESION GEOMETRY: expansile lesion/bone expansion, soft tissue mass/extraosseous extension,
+    epiphyseal involvement/growth plate, diaphyseal location, metaphyseal location
+  HOST BONE RESPONSE: pathological/insufficiency fracture, bone remodeling/trabecular changes
+  DIAGNOSIS: tumor type, differential diagnoses, malignancy assessment, biopsy/follow-up
+
+Section headers may overlap or be absent. Classify every phrase by CONTENT TYPE only.
+Work close to the source text. No hallucinations. Reply with valid JSON only.
+"""
+
+USER_PROMPT_TEMPLATE_ENGLISH = """\
+Read the following bone tumor radiology report and extract phrases relevant to tumor \
+characterization, classified by content type — not by section.
+
+Definitions:
+- "befund_phrases": Descriptive observations about the bone tumor
+  Focus on: margin type, border pattern, cortical integrity, periosteal reaction,
+  matrix/density (lytic/blastic/chondroid/ossified), lesion geometry (expansile, soft tissue),
+  anatomical location (diaphysis/metaphysis/epiphysis), size
+  Examples: "osteolytic lesion", "chondroid matrix", "cortical breakthrough",
+  "proximal tibial metaphysis", "approx. 4 cm diameter", "sclerotic rim",
+  "permeative pattern", "no periosteal reaction", "soft tissue extension",
+  "endosteal scalloping", "expansile lesion", "geographic border"
+
+- "beurteilung_phrases": Diagnostic interpretations and clinical assessments
+  What it means: diagnoses, differential diagnoses, benign/malignant characterizations,
+  clinical conclusions, recommendations
+  Examples: "suspected enchondroma", "DDx low-grade chondrosarcoma",
+  "consistent with benign process", "no evidence of malignancy",
+  "biopsy indicated", "follow-up recommended"
+
+Rules:
+1. Extract ONLY tumor-relevant features — skip incidental findings and unrelated history
+2. Classify by content type — ignore section headers entirely
+3. Use original phrasing from the text (no paraphrasing or interpretation)
+4. Preserve anatomical details and measurements
+5. Concise phrases (2–8 words), one concept per phrase
+6. AT LEAST one phrase per category
+7. NO hallucinations or invented information not in the text
+
+BEFORE ANSWERING CHECK:
+- Does "befund_phrases" contain at least 1 tumor-relevant descriptive observation?
+  If not, extract the most prominent morphological or anatomical feature present.
+- Does "beurteilung_phrases" contain at least 1 diagnostic interpretation?
+  If none exists in the report, extract the closest clinical characterization available.
+- Only reply once both lists contain at least one entry.
+
+Example 1 (standard report with both types present):
+FINDINGS:
+Proximal tibial metaphysis approx. 4 cm osteolytic lesion with chondroid matrix.
+IMPRESSION:
+Suspected enchondroma. DDx low-grade chondrosarcoma.
+
+→ {{"befund_phrases": ["osteolytic lesion", "chondroid matrix", "approx. 4 cm lesion",
+                       "proximal tibial metaphysis"],
+    "beurteilung_phrases": ["suspected enchondroma", "DDx low-grade chondrosarcoma"]}}
+
+Example 2 (impression mixes descriptive and diagnostic content):
+FINDINGS:
+Rounded osteolysis with sclerotic rim in the proximal phalanx shaft of finger III left.
+IMPRESSION:
+Rim-sclerotic osteolysis in the proximal phalanx shaft, consistent with enchondroma.
+
+→ {{"befund_phrases": ["rounded osteolysis", "sclerotic rim",
+                       "proximal phalanx shaft finger III left",
+                       "rim-sclerotic osteolysis"],
+    "beurteilung_phrases": ["consistent with enchondroma"]}}
+
+Example 3 (no explicit impression, all content is findings):
+FINDINGS:
+Distal femoral metaphysis small osteolytic lesion, sharply marginated, no cortical \
+breakthrough, no periosteal reaction.
+
+→ {{"befund_phrases": ["small osteolytic lesion", "sharply marginated",
+                       "distal femoral metaphysis", "no cortical breakthrough",
+                       "no periosteal reaction"],
+    "beurteilung_phrases": ["sharply marginated lesion without cortical involvement"]}}
+
+Example 4 (report with incidental findings to ignore):
+FINDINGS:
+Distal femur metaphysis: large osteolytic lesion with cortical destruction and soft tissue
+mass. Mild degenerative changes at the knee joint. Patient has known hypertension.
+IMPRESSION:
+Aggressive bone lesion, cortical breakthrough with extraosseous extension. Osteosarcoma
+suspected. Biopsy indicated.
+
+→ {{"befund_phrases": ["large osteolytic lesion", "cortical destruction", "soft tissue mass",
+                       "distal femur metaphysis"],
+    "beurteilung_phrases": ["aggressive bone lesion", "cortical breakthrough",
+                            "extraosseous extension", "osteosarcoma suspected",
+                            "biopsy indicated"]}}
 
 Report:
 {formatted_report}

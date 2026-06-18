@@ -31,6 +31,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Fraction of data held out for final evaluation (default: %(default)s)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: %(default)s)")
+    parser.add_argument("--binary", action="store_true",
+                        help="Exclude intermediate cases; keep only benign and malignant labels. "
+                             "Saves to split_binary.json instead of split.json.")
     return parser.parse_args(argv)
 
 

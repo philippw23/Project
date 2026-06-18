@@ -40,7 +40,8 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
-                                       IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES)
+                                       IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES,
+                                       IDX_TO_LABEL_BINARY, LABEL_TO_IDX_BINARY, NUM_CLASSES_BINARY)
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import LinearHead, MalignancyMLP
 from biomedclip.utils.misc import DEFAULT_OUT_DIR
@@ -101,6 +102,7 @@ def _load_vit(checkpoint: dict, device: torch.device) -> SharedViT:
 def build_v1_model(
     args: argparse.Namespace,
     device: torch.device,
+    num_classes: int = NUM_CLASSES,
 ) -> tuple[SharedViT, MalignancyMLP, object, object]:
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     vit  = _load_vit(ckpt, device)
@@ -110,16 +112,17 @@ def build_v1_model(
     preprocess_train = build_train_transform_lace(preprocess_val)
 
     if args.head == "linear":
-        mlp = LinearHead(embed_dim=768).to(device)
+        mlp = LinearHead(embed_dim=768, num_classes=num_classes).to(device)
     elif args.head == "mlp_no_meta":
         mlp = MalignancyMLP(
             embed_dim=768, hidden_dims=args.hidden_dims,
-            dropout=args.dropout, use_meta=False,
+            dropout=args.dropout, use_meta=False, num_classes=num_classes,
         ).to(device)
     else:
         mlp = MalignancyMLP(
             embed_dim=768, hidden_dims=args.hidden_dims,
             dropout=args.dropout, meta_embed_dim=args.meta_embed_dim,
+            num_classes=num_classes,
         ).to(device)
 
     print(f"Loaded v1 checkpoint (epoch {ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', float('nan')):.4f})")
@@ -129,6 +132,7 @@ def build_v1_model(
 def build_v2_model(
     args: argparse.Namespace,
     device: torch.device,
+    num_classes: int = NUM_CLASSES,
 ) -> tuple[LACEv2Classifier, _V2HeadWrapper, object, object]:
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
 
@@ -146,7 +150,7 @@ def build_v2_model(
         mask_module=mask_module,
         vit=vit,
         n_meta_dim=args.meta_embed_dim,
-        n_classes=NUM_CLASSES,
+        n_classes=num_classes,
         use_meta=use_meta,
         linear_head=linear_head,
     ).to(device)
@@ -318,12 +322,23 @@ def main(args: argparse.Namespace) -> None:
         if args.sweep:
             _apply_sweep_config(args)
 
+    # ── Label mapping ─────────────────────────────────────────────────────────
+    if args.binary:
+        label_to_idx = LABEL_TO_IDX_BINARY
+        idx_to_label = IDX_TO_LABEL_BINARY
+        num_classes  = NUM_CLASSES_BINARY
+        print("Mode: binary (benign vs malignant)")
+    else:
+        label_to_idx = LABEL_TO_IDX
+        idx_to_label = IDX_TO_LABEL
+        num_classes  = NUM_CLASSES
+
     # ── Build model ───────────────────────────────────────────────────────────
     if args.version == "v1":
-        vit, mlp, preprocess_train, preprocess_val = build_v1_model(args, device)
+        vit, mlp, preprocess_train, preprocess_val = build_v1_model(args, device, num_classes)
         trainable_model = mlp
     else:
-        classifier, head_wrapper, preprocess_train, preprocess_val = build_v2_model(args, device)
+        classifier, head_wrapper, preprocess_train, preprocess_val = build_v2_model(args, device, num_classes)
         trainable_model = head_wrapper
 
     # ── Load splits ───────────────────────────────────────────────────────────
@@ -339,11 +354,11 @@ def main(args: argparse.Namespace) -> None:
     print(f"Age stats (train): mean={age_mean:.1f}, std={age_std:.1f}")
 
     train_ds = DownstreamDataset(splits["train"], age_sex_lookup, age_mean, age_std,
-                                  preprocess_train, use_mask=args.use_mask)
+                                  preprocess_train, use_mask=args.use_mask, label_to_idx=label_to_idx)
     val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   use_mask=args.use_mask)
+                                  preprocess_val,   use_mask=args.use_mask, label_to_idx=label_to_idx)
     test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   use_mask=args.use_mask)
+                                  preprocess_val,   use_mask=args.use_mask, label_to_idx=label_to_idx)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
     use_pin       = device.type == "cuda"
@@ -370,15 +385,15 @@ def main(args: argparse.Namespace) -> None:
 
     # ── Class weights and loss ────────────────────────────────────────────────
     train_labels_all = torch.tensor(
-        [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
+        [label_to_idx[s["label"]] for s in train_ds.samples], dtype=torch.long
     )
-    label_counts  = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
+    label_counts  = torch.bincount(train_labels_all, minlength=num_classes).float()
     class_weights = compute_class_weights(
-        label_counts, num_classes=NUM_CLASSES, mode=args.class_weighting,
+        label_counts, num_classes=num_classes, mode=args.class_weighting,
         beta=args.cb_beta, device=device,
     )
-    criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
-    print(f"Class counts: { {IDX_TO_LABEL[i]: int(label_counts[i]) for i in range(NUM_CLASSES)} }")
+    criterion = build_classification_loss(args, label_counts, num_classes, class_weights, device)
+    print(f"Class counts: { {idx_to_label[i]: int(label_counts[i]) for i in range(num_classes)} }")
     print(f"Loss: {args.loss} | weighting: {args.class_weighting}")
 
     optimizer = torch.optim.AdamW(
@@ -445,7 +460,7 @@ def main(args: argparse.Namespace) -> None:
         torch.load(ckpt_path, map_location=device, weights_only=False)["model_state_dict"]
     )
     test_loss, test_acc, test_preds, test_labels = evaluate(trainable_model, test_loader, criterion, device)
-    label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
+    label_names = [idx_to_label[i] for i in range(num_classes)]
 
     print("\n" + "=" * 60)
     print("TEST RESULTS")
@@ -460,14 +475,14 @@ def main(args: argparse.Namespace) -> None:
     print()
     print(classification_report(
         test_labels, test_preds,
-        labels=list(range(NUM_CLASSES)),
+        labels=list(range(num_classes)),
         target_names=label_names,
         digits=3, zero_division=0,
     ))
     print("Confusion matrix (rows=true, cols=pred):")
     import pandas as pd
     print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=list(range(NUM_CLASSES))),
+        confusion_matrix(test_labels, test_preds, labels=list(range(num_classes))),
         index=label_names, columns=label_names,
     ).to_string())
 
@@ -477,7 +492,7 @@ def main(args: argparse.Namespace) -> None:
             test_labels, test_preds, average="macro", zero_division=0
         )
         per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=list(range(NUM_CLASSES)), zero_division=0
+            test_labels, test_preds, labels=list(range(num_classes)), zero_division=0
         )
         log_dict = {
             "test/loss": test_loss, "test/acc": test_acc,
@@ -541,6 +556,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--ldam_scale",      type=float, default=30.0)
 
     # ── Data ──────────────────────────────────────────────────────────────────
+    parser.add_argument("--binary", action="store_true",
+                        help="Binary mode: benign vs malignant only (intermediate cases skipped).")
     parser.add_argument("--use_mask", nargs="?", const=True, default=False,
                         type=lambda x: str(x).lower() in ("true", "1", "yes"),
                         help="Apply lesion mask cropping to input images (via DownstreamDataset).")

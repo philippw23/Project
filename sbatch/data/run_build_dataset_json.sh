@@ -17,4 +17,4 @@ source $home_dir/miniconda3/etc/profile.d/conda.sh
 conda activate $MY_CONDA_ENV
 
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
-$python_path $home_dir/Project/src/build_dataset_json.py
+$python_path $home_dir/Project/src/create_dataset.py
