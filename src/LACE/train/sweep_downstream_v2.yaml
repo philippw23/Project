@@ -10,6 +10,8 @@ metric:
 parameters:
   head:
     value: mlp_no_meta
+  downstream_visual_mode:
+    values: [cls, fg, cls_fg]
   lr:
     distribution: log_uniform_values
     min: 1e-5
@@ -35,19 +37,17 @@ parameters:
     distribution: uniform
     min: 2.5
     max: 3.25
-  use_mask:
-    value: true
 
 command:
   - ${env}
   - ${interpreter}
   - ${program}
   - --version
-  - v1
+  - v2
   - --checkpoint
-  - results/lace_pretrain/run_20260613_202920/best_retrieval_checkpoint.pt
+  - results/lace_v2_pretrain/run_20260627_092713/best_retrieval_checkpoint.pt
   - --splits
-  - data/internal_dataset/split_binary.json
+  - data/internal_dataset/split.json
   - --out_dir
   - results
   - --epochs

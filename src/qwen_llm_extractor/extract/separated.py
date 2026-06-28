@@ -99,7 +99,7 @@ def main(args: argparse.Namespace) -> None:
         patids       = patids[: args.max]
         print(f"Limited to {len(befunds)} reports.")
 
-    model, tokenizer = load_model(args.model, quantize=args.quantize)
+    model, tokenizer = load_model(args.model, quantize=args.quantize, quantize_8bit=args.quantize_8bit)
 
     results: list[dict] = []
     raw_responses: list[dict] = []
@@ -168,8 +168,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--quantize", action="store_true",
-        help="Load model in 4-bit (requires bitsandbytes + CUDA). "
-             "Reduces VRAM from ~15 GB to ~5 GB for 7B models.",
+        help="Load model in 4-bit NF4 (requires bitsandbytes + CUDA). ~8 GB VRAM for 14B.",
+    )
+    parser.add_argument(
+        "--quantize_8bit", action="store_true",
+        help="Load model in 8-bit (requires bitsandbytes + CUDA). ~14 GB VRAM for 14B; "
+             "better quality than 4-bit, fits on 2 GPUs without multi-node setup.",
     )
     parser.add_argument("--max", type=int, default=None, help="Max number of reports to process.")
     parser.add_argument("--max_new_tokens", type=int, default=512, help="Max tokens per report.")

@@ -23,12 +23,18 @@ echo Environment activated
 # Redirect HuggingFace cache to NFS home (compute nodes have no /home)
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
+export PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync
+
+MODEL=Qwen/Qwen2.5-14B-Instruct #Qwen2.5-32B-Instruct-AWQ
 
 # Run the extractor
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 $python_path $home_dir/Project/src/llm_extractor.py \
-    --model Qwen/Qwen2.5-7B-Instruct \
+    --model $MODEL \
     --input  $home_dir/Project/data/internal_dataset/text/translated_reports.json \
-    --output $home_dir/Project/data/internal_dataset/text/full_reports.json \
+    --output $home_dir/Project/data/internal_dataset/text/full_reports_14b_quant8.json \
     --english \
+    --batch_size 4 \
+    --quantize_8bit \
     #--max 15
+

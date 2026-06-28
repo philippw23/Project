@@ -14,7 +14,7 @@
 #run_bs128_lora11_20260516_125104
 #run_bs128_lora4_20260516_125103
 CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/lace_pretrain/run_20260530_104844/best_retrieval_checkpoint.pt"
-SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_binary.json"
 
 BATCH_SIZE=16
 LR=0.0002743494570757752
@@ -63,6 +63,7 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/biomedc
     --splits        $SPLITS \
     --out_dir       $home_dir/Project/results \
     --use_mask \
+    --binary true \
     --epochs        $EPOCHS \
     --batch_size    $BATCH_SIZE \
     --lr            $LR \

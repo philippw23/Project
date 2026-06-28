@@ -80,30 +80,32 @@ def rasterize_shapes(
     return np.array(mask)
 
 
-def mask_to_patch_labels(
-    mask_arr: np.ndarray,
-    threshold: float = 0.5,
-) -> torch.Tensor:
-    """Convert a (H, W) binary mask to a [196] patch-label tensor.
+def mask_to_patch_labels(mask_arr: np.ndarray) -> torch.Tensor:
+    """Convert a (H, W) binary mask to a [196] soft coverage-fraction tensor.
 
     Applies the same spatial transform as preprocess_val (resize shortest side
     to 224, then center crop 224×224) using NEAREST interpolation so patch
-    labels stay aligned with the ViT input grid.
-    Majority vote (threshold=0.25): 1 = lesion patch, 0 = background patch.
+    labels stay aligned with the ViT input grid. Each value is the fraction of
+    the 16×16 patch covered by the mask (0.0–1.0).
     """
     mask_pil = Image.fromarray((mask_arr > 0).astype(np.uint8) * 255, mode="L")
     mask_resized = TF.resize(mask_pil, 224, interpolation=InterpolationMode.NEAREST)
     mask_cropped = TF.center_crop(mask_resized, [224, 224])
     mask_224 = np.array(mask_cropped, dtype=np.float32) / 255.0
-    return patchify_mask_224(mask_224, threshold)
+    return patchify_mask_224(mask_224)
 
 
-def patchify_mask_224(mask_224: np.ndarray, threshold: float = 0.25) -> torch.Tensor:
-    """Majority-vote patchify a 224x224 binary mask into [196] patch labels."""
+def patchify_mask_224(mask_224: np.ndarray, min_coverage: float = 0.10) -> torch.Tensor:
+    """Patchify a 224x224 binary mask into [196] soft coverage fractions.
+
+    Each value is the fraction of the 16x16 patch covered by the mask (0.0–1.0).
+    Patches with coverage below min_coverage are zeroed out — they are boundary
+    slivers where the mask clips a corner and should be treated as background.
+    """
     patch_grid  = mask_224.reshape((GRID_SIZE, PATCH_SIZE, GRID_SIZE, PATCH_SIZE))
-    patch_means = patch_grid.mean(axis=(1, 3))
-    patch_labels = (patch_means > threshold).astype(np.float32)
-    return torch.from_numpy(patch_labels.reshape(-1))
+    patch_means = patch_grid.mean(axis=(1, 3)).reshape(-1).astype(np.float32)
+    patch_means[patch_means < min_coverage] = 0.0
+    return torch.from_numpy(patch_means)
 
 
 def synchronized_train_transform(

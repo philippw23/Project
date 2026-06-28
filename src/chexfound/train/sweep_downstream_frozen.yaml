@@ -32,6 +32,8 @@ parameters:
     values: [2.0, 3.0, 4.0]
   cb_beta:                   # only active for cb_focal
     values: [0.99, 0.999]
+  binary:
+    value: true
 
 command:
   - ${env}
@@ -42,7 +44,7 @@ command:
   - --chexfound_weights
   - src/chexfound/data/teacher_checkpoint.pth
   - --splits
-  - data/internal_dataset/split.json
+  - data/internal_dataset/split_binary.json
   - --out_dir
   - results
   - --use_mask

@@ -9,7 +9,7 @@
 
 TAU_S_IMG=0.07
 TAU_S_BEUR=0.04
-TAU_S_BEF=0.07
+TAU_S_BEF=0.2
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -31,7 +31,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 python $home_dir/Project/src/test_soft_target_viability.py \
     --splits      $home_dir/Project/data/internal_dataset/split.json \
     --out_dir     $home_dir/Project/results/soft_target_viability \
-    --same_image_boost 200 \
+    --same_image_boost 20 \
     --tau_s_img   $TAU_S_IMG \
     --tau_s_beur  $TAU_S_BEUR \
     --tau_s_bef   $TAU_S_BEF \

@@ -4,18 +4,20 @@ Centralises model loading so both extraction pipelines (joint and separated)
 share the same VRAM / dtype logic without duplication.
 """
 
+import os
 import torch
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_MODEL = "Qwen/Qwen2.5-14B-Instruct"
 
 
-def load_model(model_id: str, quantize: bool):
+def load_model(model_id: str, quantize: bool, quantize_8bit: bool = False):
     """Load a causal LM and its tokenizer from HuggingFace.
 
     Automatically selects the best precision for the available hardware:
-    - CUDA + quantize  → 4-bit NF4 via bitsandbytes (~5 GB VRAM for 7B models)
-    - CUDA, no quantize → float16 (~15 GB VRAM for 7B models)
-    - CPU only         → float32 (slow; quantize flag is silently ignored)
+    - CUDA + quantize_8bit → 8-bit via bitsandbytes (~14 GB VRAM for 14B models)
+    - CUDA + quantize      → 4-bit NF4 via bitsandbytes (~8 GB VRAM for 14B models)
+    - CUDA, no quantize    → float16 (~28 GB VRAM for 14B models)
+    - CPU only             → float32 (slow; quantize flag is silently ignored)
 
     Parameters
     ----------
@@ -36,20 +38,27 @@ def load_model(model_id: str, quantize: bool):
     print(f"\nLoading tokenizer: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    print(f"Visible GPUs: {n_gpus}  (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')})")
+    for i in range(n_gpus):
+        props = torch.cuda.get_device_properties(i)
+        print(f"  GPU {i}: {props.name}, {props.total_memory // 1024**3} GB")
     load_kwargs: dict = {"device_map": "auto"}
 
-    if quantize:
-        if not torch.cuda.is_available():
-            print("WARNING: --quantize requires CUDA. Falling back to CPU fp32.")
-            load_kwargs = {}
-        else:
-            print("Loading in 4-bit quantization (bitsandbytes)…")
-            load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,  # nested quantization, slightly lower VRAM
-                bnb_4bit_quant_type="nf4",       # NormalFloat4: optimal for normally-distributed weights
-            )
+    if not torch.cuda.is_available() and (quantize or quantize_8bit):
+        print("WARNING: --quantize requires CUDA. Falling back to CPU fp32.")
+        load_kwargs = {}
+    elif quantize_8bit:
+        print("Loading in 8-bit quantization (bitsandbytes)…")
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    elif quantize:
+        print("Loading in 4-bit quantization (bitsandbytes)…")
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
     elif torch.cuda.is_available():
         load_kwargs["dtype"] = torch.float16
     else:

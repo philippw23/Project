@@ -30,10 +30,10 @@ def evaluate_retrieval_lace(
     img_embs, txt_embs = [], []
 
     for batch in val_loader:
-        crop_img = batch["crop_image"].to(device)
+        img = batch.get("full_image", batch.get("crop_image")).to(device)
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
-            z_img = vit.forward_cls(crop_img)                        # [B, D]
+            z_img = vit.forward_cls(img)                        # [B, D]
 
             if text_mode == "mixed":
                 z_txt = text_enc.encode_beurteilung(

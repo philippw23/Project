@@ -90,6 +90,19 @@ def crop_around_mask(
     return crop
 
 
+def pad_to_square(arr: np.ndarray, pad_value: float = 0.0) -> np.ndarray:
+    """Pad a (H, W) or (H, W, C) array symmetrically to a square."""
+    H, W = arr.shape[:2]
+    if H == W:
+        return arr
+    side = max(H, W)
+    pad_h, pad_w = side - H, side - W
+    pt, pb = pad_h // 2, pad_h - pad_h // 2
+    pl, pr = pad_w // 2, pad_w - pad_w // 2
+    pad_width = ((pt, pb), (pl, pr)) if arr.ndim == 2 else ((pt, pb), (pl, pr), (0, 0))
+    return np.pad(arr, pad_width, constant_values=pad_value)
+
+
 def crop_around_mask_pair(
     image_arr: np.ndarray,
     mask: np.ndarray,

@@ -15,7 +15,7 @@ parameters:
   lora_alpha:
     values: [8.0, 16.0, 32.0]
   embed_dim:
-    values: [128, 256, 512]
+    values: [256, 512]
   lr:
     distribution: log_uniform_values
     min: 5e-6
@@ -25,15 +25,33 @@ parameters:
     min: 0.05
     max: 0.3
   n_mask_tokens:
-    values: [8, 16, 32]
-  tau_spatial:
-    values: [0.05, 0.1, 0.2]
-  lambda_seg:
+    values: [2, 4, 8]
+  n_mask_heads:
+    value: 8
+  lambda_dice:
     values: [0.5, 1.0, 2.0]
+  lambda_ortho:
+    values: [0.05, 0.1, 0.2]
   lambda_sim:
     values: [0.5, 1.0, 2.0]
+  learn_loss_weights:
+    value: false
+  t2i_mode:
+    values: ["image_image", "text_text", "infonce"]
+  tau_s_beur:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.07
+  tau_s_bef:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.07
   batch_size:
     values: [16, 32]
+  stage1_epochs:
+    values: [0, 5, 10]
+  gauss_sigma:
+    values: [0.0, 1.0, 3.0, 5.0]
 
 command:
   - ${env}
@@ -44,12 +62,8 @@ command:
   - lace-v2-pretrain
   - --wandb_entity
   - philipp-wiese
-  - --stage1_epochs
-  - "10"
-  - --stage2_epochs
-  - "15"
-  - --stage3_epochs
-  - "15"
+  - --epochs
+  - "40"
   - --patience
   - "20"
   - --seed

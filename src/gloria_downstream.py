@@ -540,7 +540,9 @@ def main(args: argparse.Namespace) -> None:
     head.load_state_dict(best_ckpt["head_state_dict"])
     test_loss, test_acc, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
 
-    label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
+    label_names    = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
+    present_labels = sorted(set(test_labels.tolist()) | set(test_preds.tolist()))
+    present_names  = [label_names[i] for i in present_labels]
     print("\n" + "=" * 60)
     print("TEST RESULTS")
     print("=" * 60)
@@ -554,13 +556,13 @@ def main(args: argparse.Namespace) -> None:
     print()
     print(classification_report(
         test_labels, test_preds,
-        labels=list(range(NUM_CLASSES)), target_names=label_names,
+        labels=present_labels, target_names=present_names,
         digits=3, zero_division=0,
     ))
     print("Confusion matrix (rows=true, cols=pred):")
     print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=list(range(NUM_CLASSES))),
-        index=label_names, columns=label_names,
+        confusion_matrix(test_labels, test_preds, labels=present_labels),
+        index=present_names, columns=present_names,
     ).to_string())
 
     if use_wandb:
@@ -569,7 +571,7 @@ def main(args: argparse.Namespace) -> None:
             test_labels, test_preds, average="macro", zero_division=0
         )
         per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=list(range(NUM_CLASSES)), zero_division=0
+            test_labels, test_preds, labels=present_labels, zero_division=0
         )
         log_dict = {
             "test/loss": test_loss, "test/acc": test_acc,
@@ -578,7 +580,7 @@ def main(args: argparse.Namespace) -> None:
             "test/precision_weighted": test_weighted_prec, "test/recall_weighted": test_weighted_rec,
             "test/f1_macro": test_f1,
         }
-        for i, name in enumerate(label_names):
+        for i, name in enumerate(present_names):
             log_dict[f"test/precision_{name}"] = per_class_prec[i]
             log_dict[f"test/recall_{name}"]    = per_class_rec[i]
             log_dict[f"test/f1_{name}"]        = per_class_f1[i]

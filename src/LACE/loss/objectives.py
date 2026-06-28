@@ -348,7 +348,97 @@ def gloria_local_loss(
     return l_i2t + λ_t2i * l_t2i, l_i2t, l_t2i
 
 
-def ortho_loss(
+def select_fg_token(mask_logits: torch.Tensor) -> torch.Tensor:
+    """Select the most spatially-concentrated mask token per sample (no GT needed).
+
+    Uses peak-to-mean ratio: a token focused on a small lesion area will have a
+    high max activation relative to its mean, whereas a token that fires uniformly
+    across background patches will have a ratio near 1.  Selects the token with
+    the highest ratio, consistently at both training time and inference.
+
+    Args:
+        mask_logits: [B, N, P]
+    Returns:
+        fg_idx: [B,] int64
+    """
+    with torch.no_grad():
+        acts = torch.sigmoid(mask_logits.float())           # [B, N, P]
+        peak = acts.amax(dim=-1)                            # [B, N]
+        mean = acts.mean(dim=-1)                            # [B, N]
+        concentration = peak / (mean + 1e-8)               # [B, N]
+        return concentration.argmax(dim=1)                  # [B,]
+
+
+def compute_l_dice_ce(
+    mask_logits: torch.Tensor,      # [B, N, P]  P=196 (14×14)
+    gt_patch_labels: torch.Tensor,  # [B, P]  float32, soft coverage fractions 0.0–1.0
+    hard_neg_k: int = 10,           # top-k background patches to penalise explicitly
+    hard_neg_weight: float = 0.5,   # weight of the hard-negative BCE term
+) -> torch.Tensor:
+    """Dice + global-BCE + hard-negative segmentation loss.
+
+    Token selection: argmax of per-token sigmoid overlap with gt_patch_labels
+    (detached). This gives stable gradient signal — the token that partially
+    covers the lesion consistently receives gradients to cover it better, rather
+    than the selection jumping between tokens across batches.
+
+    gt_patch_labels are soft coverage fractions (fraction of each 16×16 patch
+    covered by the segmentation mask). Samples with all-zero GT are excluded.
+
+    Loss structure (all terms on the GT-aligned fg token):
+      - Dice: ratio-based overlap, shapes the prediction globally.
+      - Global BCE: dense gradient over all 196 patches for stable learning.
+      - Hard-negative BCE: additionally penalises the top-hard_neg_k most-activated
+        background patches (GT == 0). Targets leakage onto adjacent bone that global
+        BCE alone cannot suppress because easy correct patches dilute the gradient.
+
+    Returns (total, dice_detached, bce_detached, hard_neg_detached). Returns 0.0 if B==0.
+    """
+    B, N, P = mask_logits.shape
+    if B == 0:
+        return (mask_logits.sum() * 0.0,) * 4
+
+    logits = mask_logits.float()
+    gt     = gt_patch_labels.float()
+
+    with torch.no_grad():
+        overlap = (torch.sigmoid(logits) * gt.unsqueeze(1)).sum(-1)  # [B, N]
+        fg_idx  = overlap.argmax(dim=1)                               # [B,]
+    fg_logits = logits[torch.arange(B, device=logits.device), fg_idx]  # [B, P]
+
+    nonempty = gt.sum(dim=-1) > 0
+    if nonempty.any():
+        fl = fg_logits[nonempty]   # [B_pos, P]
+        gp = gt[nonempty]          # [B_pos, P]
+        fp = torch.sigmoid(fl)
+
+        # Dice
+        inter = (fp * gp).sum(-1)
+        dice  = 1.0 - (2.0 * inter / (fp.sum(-1) + gp.sum(-1) + 1e-6)).mean()
+
+        # Global BCE — dense gradient over all patches for stable learning
+        bce = F.binary_cross_entropy_with_logits(fl, gp)
+
+        # Hard-negative mining — extra penalty on top-k most-activated background patches
+        hard_neg    = logits.sum() * 0.0
+        lesion_mask = gp > 0.0
+        if hard_neg_k > 0:
+            bg_logits = fl.masked_fill(lesion_mask, float("-inf"))
+            k = min(hard_neg_k, int((~lesion_mask).sum(dim=-1).min().item()))
+            if k > 0:
+                topk_logits, _ = bg_logits.topk(k, dim=-1)         # [B_pos, k]
+                hard_neg = F.binary_cross_entropy_with_logits(
+                    topk_logits, torch.zeros_like(topk_logits),
+                )
+    else:
+        dice     = logits.sum() * 0.0
+        bce      = logits.sum() * 0.0
+        hard_neg = logits.sum() * 0.0
+
+    total = dice + bce + hard_neg_weight * hard_neg
+    return total, dice.detach(), bce.detach(), hard_neg.detach()
+
+def ortho_loss_old(
     patch_tokens: torch.Tensor,
     patch_labels: torch.Tensor,
     min_lesion_patches: int = 1,
@@ -392,4 +482,39 @@ def ortho_loss(
 
     # +1 shifts range from [-1,1] to [0,2] so total loss stays non-negative.
     # Gradients are unchanged — 0 = maximally separated, 2 = identical.
+    return (F.cosine_similarity(v_lesion, v_bg, dim=-1) + 1.0).mean()
+
+
+def ortho_loss(
+    patch_tokens: torch.Tensor,
+    patch_labels: torch.Tensor,
+) -> torch.Tensor:
+    """Lesion-background orthogonality regularizer with soft patch weighting.
+
+    Each patch contributes to both embeddings proportionally to its coverage
+    fraction: a patch that is 20% lesion contributes 20% to the lesion
+    embedding and 80% to the background embedding. Samples where all weight
+    falls on one side are excluded.
+
+    Operates in the raw 768-dim ViT feature space (not the projected space).
+
+    Args:
+        patch_tokens:  [B, M, d_vit] raw patch token embeddings
+        patch_labels:  [B, M] float32, soft coverage fractions 0.0–1.0
+    """
+    w_les = patch_labels.unsqueeze(-1)          # [B, M, 1]
+    w_bg  = (1.0 - patch_labels).unsqueeze(-1)  # [B, M, 1]
+
+    sum_les = w_les.sum(dim=1)  # [B, 1]
+    sum_bg  = w_bg.sum(dim=1)   # [B, 1]
+
+    valid = (sum_les.squeeze(-1) > 0) & (sum_bg.squeeze(-1) > 0)
+    if not valid.any():
+        return patch_tokens.sum() * 0.0
+
+    pt       = patch_tokens[valid]
+    v_lesion = (pt * w_les[valid]).sum(dim=1) / sum_les[valid].clamp(min=1e-6)
+    v_bg     = (pt * w_bg[valid]).sum(dim=1)  / sum_bg[valid].clamp(min=1e-6)
+
+    # +1 shifts range from [-1,1] to [0,2] so loss stays non-negative.
     return (F.cosine_similarity(v_lesion, v_bg, dim=-1) + 1.0).mean()

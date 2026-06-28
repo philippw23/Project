@@ -28,6 +28,72 @@ from qwen_llm_extractor.prompts.joint import (
 from qwen_llm_extractor.utils.json_repair import _parse_response
 
 
+def query_llm_batch(
+    reports: list[str],
+    model,
+    tokenizer,
+    max_new_tokens: int = 512,
+    system_prompt: str = SYSTEM_PROMPT,
+    user_prompt_template: str = USER_PROMPT_TEMPLATE,
+) -> list[tuple[dict, str]]:
+    """Run a batch of reports through the LLM and return [(parsed_json, raw_text), ...].
+
+    Processes multiple reports in one model.generate call. For memory-bandwidth-bound
+    inference (batch size 1 reads all weights to produce one token), batching gives
+    close to N× throughput up to the compute ceiling.
+
+    Left-pads all sequences to the same length so the generated tokens start at a
+    uniform offset, making it trivial to slice them out of the combined output tensor.
+    """
+    pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+
+    # Tokenize each report separately (lengths differ), collect as 1-D tensors
+    per_report_ids: list[torch.Tensor] = []
+    for report in reports:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt_template.format(formatted_report=report)},
+        ]
+        chat_out = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt",
+        )
+        ids = chat_out["input_ids"] if hasattr(chat_out, "input_ids") else chat_out
+        per_report_ids.append(ids[0])  # (seq_len,)
+
+    # Left-pad to the longest prompt in the batch
+    max_len = max(t.shape[0] for t in per_report_ids)
+    batch_ids  = torch.full((len(reports), max_len), pad_id, dtype=torch.long)
+    attn_mask  = torch.zeros((len(reports), max_len), dtype=torch.long)
+    for i, ids in enumerate(per_report_ids):
+        batch_ids[i, max_len - ids.shape[0]:] = ids
+        attn_mask[i, max_len - ids.shape[0]:] = 1
+
+    device = next(model.parameters()).device
+    batch_ids = batch_ids.to(device)
+    attn_mask = attn_mask.to(device)
+
+    with torch.inference_mode():
+        output_ids = model.generate(
+            batch_ids,
+            attention_mask=attn_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    # output_ids shape: (batch, max_len + max_new_tokens)
+    # The first max_len columns are the padded prompt — slice them off uniformly.
+    results = []
+    for i in range(len(reports)):
+        new_tokens = output_ids[i][max_len:]
+        raw = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        results.append((_parse_response(raw), raw))
+    return results
+
+
 def query_llm(
     report: str,
     model,
@@ -36,60 +102,10 @@ def query_llm(
     system_prompt: str = SYSTEM_PROMPT,
     user_prompt_template: str = USER_PROMPT_TEMPLATE,
 ) -> tuple[dict, str]:
-    """Run one report through the LLM and return (parsed_json, raw_text).
-
-    Builds a two-message chat (system + user), tokenises it with the chat template,
-    runs greedy decoding, strips the prompt tokens from the output, and parses the
-    resulting text as JSON.
-
-    Parameters
-    ----------
-    report               : full radiology report text (befund + beurteilung concatenated)
-    model                : loaded HuggingFace CausalLM (already on the target device)
-    tokenizer            : matching AutoTokenizer
-    max_new_tokens       : upper bound on generated tokens (512 is enough for short phrase lists)
-    system_prompt        : system-role message; switch to English variant via caller
-    user_prompt_template : format string with a single ``{formatted_report}`` placeholder
-
-    Returns
-    -------
-    tuple[dict, str]
-        - parsed dict (may contain an ``"error"`` key if JSON parsing failed)
-        - raw decoded string before JSON extraction (useful for debugging)
-    """
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": user_prompt_template.format(formatted_report=report)},
-    ]
-
-    chat_out = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        return_tensors="pt",
-    )
-    # Qwen tokenizer returns a BatchEncoding dict; older/other tokenizers return a plain tensor
-    input_ids = (
-        chat_out["input_ids"] if hasattr(chat_out, "input_ids") else chat_out
-    ).to(model.device)
-    attention_mask = torch.ones_like(input_ids)
-
-    with torch.inference_mode():
-        output_ids = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            # Disable sampling params explicitly; some HF versions warn if left as defaults
-            temperature=None,
-            top_p=None,
-            top_k=None,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    # Strip the prompt tokens — output_ids includes the full input + generated tokens
-    new_tokens = output_ids[0][input_ids.shape[-1]:]
-    raw = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-    return _parse_response(raw), raw
+    """Single-report wrapper around query_llm_batch (kept for backward compat)."""
+    return query_llm_batch(
+        [report], model, tokenizer, max_new_tokens, system_prompt, user_prompt_template
+    )[0]
 
 
 def main(args: argparse.Namespace) -> None:
@@ -122,7 +138,9 @@ def main(args: argparse.Namespace) -> None:
         to_process = to_process[: args.max]
     print(f"Reports to process: {len(to_process)} / {len(source_reports)}\n")
 
-    model, tokenizer = load_model(args.model, quantize=args.quantize)
+    model, tokenizer = load_model(
+        args.model, quantize=args.quantize, quantize_8bit=args.quantize_8bit,
+    )
 
     system_prompt        = SYSTEM_PROMPT_ENGLISH        if args.english else SYSTEM_PROMPT
     user_prompt_template = USER_PROMPT_TEMPLATE_ENGLISH if args.english else USER_PROMPT_TEMPLATE
@@ -130,39 +148,45 @@ def main(args: argparse.Namespace) -> None:
     all_results: list[dict] = []
     all_patids:  list[str]  = []
 
-    for entry in tqdm(to_process, desc="LLM inference"):
-        key   = _entry_key(entry)
-        patid = str(entry.get("patid", ""))
+    batch_size = getattr(args, "batch_size", 1)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        parts = []
-        if entry.get(befund_key, "").strip():
-            parts.append(entry[befund_key].strip())
-        if entry.get(beur_key, "").strip():
-            parts.append(entry[beur_key].strip())
-        report_text = "\n\n".join(parts)
+    for batch_start in tqdm(range(0, len(to_process), batch_size), desc="LLM inference"):
+        batch = to_process[batch_start : batch_start + batch_size]
 
-        result, _ = query_llm(
-            report_text, model, tokenizer,
+        report_texts = []
+        for entry in batch:
+            parts = []
+            if entry.get(befund_key, "").strip():
+                parts.append(entry[befund_key].strip())
+            if entry.get(beur_key, "").strip():
+                parts.append(entry[beur_key].strip())
+            report_texts.append("\n\n".join(parts))
+
+        batch_results = query_llm_batch(
+            report_texts, model, tokenizer,
             max_new_tokens=args.max_new_tokens,
             system_prompt=system_prompt,
             user_prompt_template=user_prompt_template,
         )
-        result["patid"] = patid
 
-        if "error" in result:
-            tqdm.write(f"  [error] key={key} — {result['error'][:80]}")
+        for entry, (result, _) in zip(batch, batch_results):
+            key   = _entry_key(entry)
+            patid = str(entry.get("patid", ""))
+            result["patid"] = patid
 
-        # Merge phrase lists back into the source entry; keep source fields intact
-        merged = {
-            **entry,
-            "befund_phrases":      result.get("befund_phrases", []),
-            "beurteilung_phrases": result.get("beurteilung_phrases", []),
-        }
-        completed[key] = merged
-        all_results.append(result)
-        all_patids.append(patid)
+            if "error" in result:
+                tqdm.write(f"  [error] key={key} — {result['error'][:80]}")
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+            merged = {
+                **entry,
+                "befund_phrases":      result.get("befund_phrases", []),
+                "beurteilung_phrases": result.get("beurteilung_phrases", []),
+            }
+            completed[key] = merged
+            all_results.append(result)
+            all_patids.append(patid)
+
         with open(out_path, "w", encoding="utf-8") as fh:
             json.dump(list(completed.values()), fh, ensure_ascii=False, indent=2)
 
@@ -200,11 +224,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--quantize", action="store_true",
-        help="Load model in 4-bit (requires bitsandbytes + CUDA). "
-             "Reduces VRAM from ~15 GB to ~5 GB for 7B models.",
+        help="Load model in 4-bit NF4 (requires bitsandbytes + CUDA). ~8 GB VRAM for 14B.",
+    )
+    parser.add_argument(
+        "--quantize_8bit", action="store_true",
+        help="Load model in 8-bit (requires bitsandbytes + CUDA). ~14 GB VRAM for 14B; "
+             "better quality than 4-bit, fits on 2 GPUs without multi-node setup.",
     )
     parser.add_argument("--max", type=int, default=None, help="Max number of reports to process.")
     parser.add_argument("--max_new_tokens", type=int, default=512, help="Max tokens per report.")
+    parser.add_argument(
+        "--batch_size", type=int, default=4,
+        help="Reports per model.generate call. Higher = better GPU utilisation but more VRAM. "
+             "Recommended: 4 for 2× A4000 in 8-bit.",
+    )
     args = parser.parse_args()
     if args.output is None:
         args.output = str(Path(args.input).parent / "full_reports.json")

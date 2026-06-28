@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from LACE.data.splits import build_pretrain_datasets_lace
+from LACE.data.datasets import InternalTripleDataset
 from LACE.data.transforms import build_train_transform_lace
 from LACE.loss.objectives import phrase_soft_targets
 from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
@@ -146,20 +146,20 @@ def main(args: argparse.Namespace) -> None:
     preprocess_train = build_train_transform_lace(vit.preprocess_val)
     tokenizer        = text_enc.tokenizer
 
-    # ── Train dataset ─────────────────────────────────────────────────────────
+    # ── Dataset ───────────────────────────────────────────────────────────────
     splits_path = Path(args.splits)
     if splits_path.exists():
         with open(splits_path, encoding="utf-8") as fh:
-            pretrain_samples = json.load(fh)["train"]
-        print(f"Loaded {len(pretrain_samples)} train samples from {splits_path}")
+            split_data = json.load(fh)
+        samples = split_data[args.split]
+        print(f"Loaded {len(samples)} {args.split} samples from {splits_path}")
     else:
         with open(args.dataset, encoding="utf-8") as fh:
-            pretrain_samples = json.load(fh)
-        print(f"Splits not found — using all {len(pretrain_samples)} samples from dataset")
+            samples = json.load(fh)
+        print(f"Splits not found — using all {len(samples)} samples from dataset")
 
-    train_ds, _ = build_pretrain_datasets_lace(
-        pretrain_samples, preprocess_train, vit.preprocess_val,
-        tokenizer, args.seed,
+    train_ds = InternalTripleDataset(
+        samples, preprocess_train, tokenizer,
         text_mode="phrase",
         max_bef_phrases=16,
         max_beur_phrases=16,
@@ -172,12 +172,12 @@ def main(args: argparse.Namespace) -> None:
         num_workers=0, generator=g,
     )
     batch = next(iter(loader))
-    B = batch["full_image"].shape[0]
+    B = batch["global_crop"].shape[0]
     print(f"First batch: {B} samples")
 
     # ── Encode ────────────────────────────────────────────────────────────────
     with torch.no_grad():
-        full_embs = vit.forward_cls(batch["full_image"].to(device)).cpu()
+        full_embs = vit.forward_cls(batch["global_crop"].to(device)).cpu()
         crop_embs = vit.forward_cls(batch["crop_image"].to(device)).cpu()
 
         beur_pmask = batch["beur_phrase_mask"]
@@ -282,6 +282,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--splits",      default=str(DEFAULT_SPLITS),
                         help="Path to split.json (default: data/internal_dataset/split.json)")
+    parser.add_argument("--split",       default="train", choices=["train", "val", "test"],
+                        help="Which split to analyse (default: train)")
     parser.add_argument("--dataset",     default=str(DEFAULT_DATASET_JSON),
                         help="Fallback dataset path if splits not found")
     parser.add_argument("--out_dir",     default=str(ROOT_DIR / "results" / "soft_target_viability"))

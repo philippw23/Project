@@ -48,7 +48,7 @@ from biomedclip.utils.misc import DEFAULT_OUT_DIR
 from LACE.data.transforms import build_train_transform_lace
 from LACE.models.downstream import LACEv2Classifier
 from LACE.models.encoders import SharedViT
-from LACE.models.mask_tokens import MaskTokenModule
+from LACE.models.mask_tokens import MaskTokenDecoder, MaskPredictionHead
 
 
 class _V2HeadWrapper(nn.Module):
@@ -140,19 +140,34 @@ def build_v2_model(
     preprocess_val   = vit.preprocess_val
     preprocess_train = build_train_transform_lace(preprocess_val)
 
-    n_mask_tokens = ckpt.get("n_mask_tokens", 16)
-    mask_module   = MaskTokenModule(n_tokens=n_mask_tokens)
-    mask_module.load_state_dict(ckpt["mask_module_state"])
+    n_mask_tokens = ckpt.get("n_mask_tokens", 4)
+    mask_decoder = MaskTokenDecoder(
+        n_tokens=n_mask_tokens,
+        n_heads=ckpt.get("n_mask_heads", 8),
+        sigma=ckpt.get("gauss_sigma", 1.5),
+    )
+    mask_decoder.load_state_dict(ckpt["mask_decoder_state"])
+    mask_decoder.to(device)
 
-    use_meta    = args.head == "mlp"
-    linear_head = args.head == "linear"
+    mask_head = MaskPredictionHead()
+    mask_head.load_state_dict(ckpt["mask_head_state"])
+    mask_head.to(device)
+
+    use_meta     = args.head == "mlp"
+    linear_head  = args.head == "linear"
+    visual_mode  = getattr(args, "downstream_visual_mode", "cls_fg")
+    sim_attn_tau = getattr(args, "sim_attn_tau", 0.07)
+
     classifier = LACEv2Classifier(
-        mask_module=mask_module,
         vit=vit,
+        mask_decoder=mask_decoder,
+        mask_head=mask_head,
         n_meta_dim=args.meta_embed_dim,
         n_classes=num_classes,
         use_meta=use_meta,
         linear_head=linear_head,
+        visual_mode=visual_mode,
+        sim_attn_tau=sim_attn_tau,
     ).to(device)
 
     head_wrapper = _V2HeadWrapper(classifier)
@@ -160,7 +175,7 @@ def build_v2_model(
     print(
         f"Loaded v2 checkpoint (epoch {ckpt.get('epoch', '?')}, "
         f"val_loss={ckpt.get('val_loss', float('nan')):.4f}, "
-        f"n_mask_tokens={n_mask_tokens})"
+        f"n_mask_tokens={n_mask_tokens}, visual_mode={visual_mode})"
     )
     return classifier, head_wrapper, preprocess_train, preprocess_val
 
@@ -187,19 +202,17 @@ def extract_v1_embeddings(
 
 @torch.no_grad()
 def extract_v2_representations(
-    vit: SharedViT,
-    mask_module: MaskTokenModule,
+    classifier: LACEv2Classifier,
     loader: DataLoader,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Extract 768-dim lesion representations (mean-pooled mask features) for v2."""
-    vit.eval()
-    mask_module.eval()
+    """Extract visual representations for v2 using the classifier's _get_visual."""
+    classifier.eval()
     all_repr, all_age, all_sex, all_lbl = [], [], [], []
     for batch in loader:
-        _, patch_feat = vit.forward_all(batch["image"].to(device))  # [B, 196, 768]
-        _, _, mask_feats = mask_module(patch_feat)                   # [B, N, 768]
-        all_repr.append(mask_feats.mean(dim=1).cpu())                # [B, 768]
+        images = batch["image"].to(device)
+        repr_  = classifier._get_visual(images)
+        all_repr.append(repr_.cpu())
         all_age.append(batch["age"])
         all_sex.append(batch["sex"])
         all_lbl.append(batch["label"])
@@ -247,7 +260,8 @@ def train_one_epoch_v2(
 ) -> float:
     classifier.train()
     classifier.vit.eval()
-    classifier.mask_module.eval()
+    classifier.mask_decoder.eval()
+    classifier.mask_head.eval()
     total_loss = 0.0
     for batch in loader:
         images = batch["image"].to(device)
@@ -373,10 +387,11 @@ def main(args: argparse.Namespace) -> None:
         val_emb,  val_age,  val_sex,  val_lbl  = extract_v1_embeddings(vit, val_loader_raw,  device)
         test_emb, test_age, test_sex, test_lbl = extract_v1_embeddings(vit, test_loader_raw, device)
     else:
+        visual_mode = getattr(args, "downstream_visual_mode", "cls_fg")
         val_emb,  val_age,  val_sex,  val_lbl  = extract_v2_representations(
-            classifier.vit, classifier.mask_module, val_loader_raw,  device)
+            classifier, val_loader_raw,  device)
         test_emb, test_age, test_sex, test_lbl = extract_v2_representations(
-            classifier.vit, classifier.mask_module, test_loader_raw, device)
+            classifier, test_loader_raw, device)
 
     val_loader  = DataLoader(EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl),
                              batch_size=args.batch_size, shuffle=False)
@@ -460,7 +475,9 @@ def main(args: argparse.Namespace) -> None:
         torch.load(ckpt_path, map_location=device, weights_only=False)["model_state_dict"]
     )
     test_loss, test_acc, test_preds, test_labels = evaluate(trainable_model, test_loader, criterion, device)
-    label_names = [idx_to_label[i] for i in range(num_classes)]
+    label_names    = [idx_to_label[i] for i in range(num_classes)]
+    present_labels = sorted(set(test_labels.tolist()) | set(test_preds.tolist()))
+    present_names  = [label_names[i] for i in present_labels]
 
     print("\n" + "=" * 60)
     print("TEST RESULTS")
@@ -475,15 +492,15 @@ def main(args: argparse.Namespace) -> None:
     print()
     print(classification_report(
         test_labels, test_preds,
-        labels=list(range(num_classes)),
-        target_names=label_names,
+        labels=present_labels,
+        target_names=present_names,
         digits=3, zero_division=0,
     ))
     print("Confusion matrix (rows=true, cols=pred):")
     import pandas as pd
     print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=list(range(num_classes))),
-        index=label_names, columns=label_names,
+        confusion_matrix(test_labels, test_preds, labels=present_labels),
+        index=present_names, columns=present_names,
     ).to_string())
 
     if use_wandb:
@@ -492,7 +509,7 @@ def main(args: argparse.Namespace) -> None:
             test_labels, test_preds, average="macro", zero_division=0
         )
         per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=list(range(num_classes)), zero_division=0
+            test_labels, test_preds, labels=present_labels, zero_division=0
         )
         log_dict = {
             "test/loss": test_loss, "test/acc": test_acc,
@@ -503,7 +520,7 @@ def main(args: argparse.Namespace) -> None:
             "test/recall_weighted":    test_weighted_rec,
             "test/f1_macro":           test_f1,
         }
-        for i, name in enumerate(label_names):
+        for i, name in enumerate(present_names):
             log_dict[f"test/precision_{name}"] = per_class_prec[i]
             log_dict[f"test/recall_{name}"]    = per_class_rec[i]
             log_dict[f"test/f1_{name}"]        = per_class_f1[i]
@@ -522,7 +539,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
 
     parser.add_argument("--version",    required=True, choices=["v1", "v2"],
-                        help="LACE version: v1 uses ViT CLS token, v2 uses MaskTokenModule lesion repr.")
+                        help="LACE version: v1 uses ViT CLS token, v2 uses MaskTokenDecoder.")
+    parser.add_argument("--downstream_visual_mode", default="cls_fg",
+                        choices=["cls", "fg", "cls_fg"],
+                        help="v2 visual representation: cls [B,512], fg [B,512], cls_fg [B,1024].")
     parser.add_argument("--checkpoint", required=True,
                         help="Path to a LACE pretrain checkpoint (.pt).")
     parser.add_argument("--splits",     required=True,

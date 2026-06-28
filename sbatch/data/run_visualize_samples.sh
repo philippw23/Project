@@ -19,12 +19,14 @@ export PYTHONPATH=$home_dir/Project/src
 export MPLCONFIGDIR=$home_dir/.config/matplotlib
 echo Environment activated
 
-GLOBAL_CONTEXT_FRACTION=0.3
-CONTEXT_FRACTION=0.05
+GLOBAL_CONTEXT_FRACTION=0.15
+CONTEXT_FRACTION=0.15
 
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/visualize_samples.py \
     --samples 10 \
     --global_context_fraction $GLOBAL_CONTEXT_FRACTION \
     --context_fraction $CONTEXT_FRACTION \
+    --images 1.2.840.113654.2.70.1.284903771772721556681548306585553485272
+
     #--btxrd \
     #--seed 42

@@ -15,20 +15,27 @@ from LACE.data.transforms import (
     mask_to_patch_labels,
     synchronized_train_transform,
 )
-from biomedclip.data.transforms import crop_around_mask_pair
+from biomedclip.data.transforms import crop_around_mask_pair, pad_to_square
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
+
 class InternalDatasetV2(Dataset):
-    """LACE v2 internal dataset — full image only, no crop.
+    """LACE v2 internal dataset.
 
-    patch_labels are computed from the full-image mask (not a crop) so they
-    align with the 196 ViT patch positions used by MaskTokenModule.
+    context_fraction controls lesion cropping for images with a valid mask:
+      -1.0  → full image, no crop
+       0.0  → tight bbox crop around lesion, no padding
+      >0.0  → crop with context margin of that fraction
+    Images without a mask always use the full image. patch_labels are always
+    computed from the (possibly cropped) mask so they stay aligned with the
+    196 ViT patch positions used by MaskTokenModule.
 
-    text_mode controls text encoding — same options as InternalTripleDataset:
+    text_mode controls text encoding:
       "full"   — tokenize full befund/beurteilung strings
       "phrase" — tokenize each phrase separately; returns per-phrase embeddings
+      "mixed"  — full beurteilung text for L_ITA + befund phrases for L_sim
     """
 
     def __init__(
@@ -41,14 +48,18 @@ class InternalDatasetV2(Dataset):
         max_bef_phrases: int = 16,
         max_beur_phrases: int = 16,
         phrase_tok_len: int = 32,
+        max_beur_text_len: int = 256,
+        context_fraction: float = 0.15,
     ) -> None:
-        self.preprocess       = preprocess
-        self.tokenizer        = tokenizer
-        self.max_text_len     = max_text_len
-        self.text_mode        = text_mode
-        self.max_bef_phrases  = max_bef_phrases
-        self.max_beur_phrases = max_beur_phrases
-        self.phrase_tok_len   = phrase_tok_len
+        self.preprocess        = preprocess
+        self.tokenizer         = tokenizer
+        self.max_text_len      = max_text_len
+        self.text_mode         = text_mode
+        self.max_bef_phrases   = max_bef_phrases
+        self.max_beur_phrases  = max_beur_phrases
+        self.phrase_tok_len    = phrase_tok_len
+        self.max_beur_text_len = max_beur_text_len
+        self.context_fraction  = context_fraction
 
         if text_mode == "phrase":
             self.samples = [
@@ -58,6 +69,14 @@ class InternalDatasetV2(Dataset):
             dropped = len(samples) - len(self.samples)
             if dropped:
                 print(f"InternalDatasetV2: dropped {dropped} samples missing phrase lists.")
+        elif text_mode == "mixed":
+            self.samples = [
+                s for s in samples
+                if s.get("beurteilung") or s.get("befund_phrases")
+            ]
+            dropped = len(samples) - len(self.samples)
+            if dropped:
+                print(f"InternalDatasetV2: dropped {dropped} samples missing all text.")
         else:
             self.samples = samples
 
@@ -105,17 +124,26 @@ class InternalDatasetV2(Dataset):
         beur_phrases = s.get("beurteilung_phrases") or []
         bef_phrases  = s.get("befund_phrases") or []
 
-        image      = Image.open(image_path).convert("RGB")
-        full_image = self.preprocess(image)
-
+        image    = Image.open(image_path).convert("RGB")
         has_mask = mask_path.exists()
         if has_mask:
             mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
             has_mask = bool(np.any(mask_arr > 0))
+            if has_mask and self.context_fraction >= 0:
+                img_arr, crop_mask = crop_around_mask_pair(
+                    np.array(image), mask_arr,
+                    context_fraction=self.context_fraction,
+                )
+                image    = Image.fromarray(img_arr)
+                mask_arr = crop_mask
+            else:
+                image = Image.fromarray(pad_to_square(np.array(image)))
             patch_labels = mask_to_patch_labels(mask_arr) if has_mask else \
                 torch.zeros(196, dtype=torch.float32)
         else:
+            image = Image.fromarray(pad_to_square(np.array(image)))
             patch_labels = torch.zeros(196, dtype=torch.float32)
+        full_image = self.preprocess(image)
 
         if self.text_mode == "full":
             b_enc = self._tok(beurteilung, self.max_text_len)
@@ -126,6 +154,24 @@ class InternalDatasetV2(Dataset):
                 "befund_ids":       f_enc["input_ids"].squeeze(0),
                 "befund_mask":      f_enc["attention_mask"].squeeze(0),
                 "has_befund":       torch.tensor(bool(befund), dtype=torch.bool),
+            }
+        elif self.text_mode == "mixed":
+            # Full beurteilung for L_ITA; befund phrases for L_sim
+            b_enc = self._tok(beurteilung, self.max_beur_text_len)
+            bef_ids, bef_pattn, bef_pmask = self._encode_phrase_list(
+                bef_phrases, self.max_bef_phrases,
+            )
+            concat_full = " ".join(filter(None, [befund, beurteilung]))
+            concat_enc = self._tok(concat_full, self.max_beur_text_len)
+            text_fields = {
+                "beurteilung_ids":  b_enc["input_ids"].squeeze(0),
+                "beurteilung_mask": b_enc["attention_mask"].squeeze(0),
+                "bef_phrase_ids":   bef_ids,
+                "bef_phrase_attn":  bef_pattn,
+                "bef_phrase_mask":  bef_pmask,
+                "has_befund":       torch.tensor(bool(bef_phrases), dtype=torch.bool),
+                "concat_full_ids":  concat_enc["input_ids"].squeeze(0),
+                "concat_full_mask": concat_enc["attention_mask"].squeeze(0),
             }
         else:  # phrase
             beur_ids, beur_pattn, beur_pmask = self._encode_phrase_list(
@@ -290,9 +336,13 @@ class InternalTripleDataset(Dataset):
             mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
             if np.any(mask_arr > 0):
                 img_arr = np.array(image)
-                img_crop_arr, crop_mask = crop_around_mask_pair(img_arr, mask_arr, context_fraction=self.context_fraction)
+                if self.context_fraction >= 0:
+                    img_crop_arr, crop_mask = crop_around_mask_pair(img_arr, mask_arr, context_fraction=self.context_fraction)
+                    crop_pil  = Image.fromarray(img_crop_arr)
+                else:
+                    crop_pil  = Image.fromarray(pad_to_square(img_arr))
+                    crop_mask = mask_arr  # full image → mask unchanged
                 global_arr, global_mask = crop_around_mask_pair(img_arr, mask_arr, context_fraction=self.global_context_fraction)
-                crop_pil     = Image.fromarray(img_crop_arr)
                 img_pil      = Image.fromarray(global_arr)
                 has_mask     = True
 

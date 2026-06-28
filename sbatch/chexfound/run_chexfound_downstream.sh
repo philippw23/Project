@@ -15,13 +15,17 @@ CHECKPOINT="none"
 CHEXFOUND_WEIGHTS="/mnt/nfs/homedirs/philippw/Project/src/chexfound/data/teacher_checkpoint.pth"
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_binary.json"
 HEAD="mlp_no_meta"   # linear | mlp | mlp_no_meta
-BATCH_SIZE=64
-LR=1e-3
+BATCH_SIZE=16
+LR=0.0002402131717649611
 DROPOUT=0.3
-HIDDEN_DIMS="256 128"
+HIDDEN_DIMS="64"
 META_EMBED_DIM=16
 WEIGHT_DECAY=0.01
 EPOCHS=50
+LOSS="focal"  # ce | wce | ce_smooth | focal | cb_focal | ldam | balanced_softmax
+FOCAL_GAMMA=4.0
+CLASS_WEIGHTING="inverse"  # none | inverse | sqrt | effective
+CB_BETA=0.99  # only active for cb_focal
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -45,7 +49,7 @@ export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfound_downstream.py \
-    --binary \
+    --binary true \
     --checkpoint    $CHECKPOINT \
     --chexfound_weights $CHEXFOUND_WEIGHTS \
     --splits        $SPLITS \
@@ -59,8 +63,10 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfou
     --hidden_dims   $HIDDEN_DIMS \
     --meta_embed_dim $META_EMBED_DIM \
     --weight_decay  $WEIGHT_DECAY \
-    --loss          ce \
-    --class_weighting sqrt \
+    --loss          $LOSS \
+    --class_weighting $CLASS_WEIGHTING \
+    --focal_gamma $FOCAL_GAMMA \
+    --cb_beta $CB_BETA \
     --seed 42 \
     --wandb \
     --wandb_project chexfound-downstream \

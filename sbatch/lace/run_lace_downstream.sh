@@ -28,7 +28,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # ── Hyperparameter ────────────────────────────────────────────────────────────
 VERSION=v1       # v1: ViT CLS token → MalignancyMLP | v2: ViT + MaskTokenModule → LACEv2Classifier (requires v2 pretrain checkpoint)
 HEAD=mlp_no_meta   # Head mode 
-CHECKPOINT=$home_dir/Project/results/lace_pretrain/run_20260613_202920/best_retrieval_checkpoint.pt  # path to pretrained checkpoint (set to "" to train from scratch)
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260627_095913/best_checkpoint.pt #results/lace_v2_pretrain/run_20260626_135657/best_checkpoint.pt  # path to pretrained checkpoint (set to "" to train from scratch)
 #results/lace_pretrain/run_20260606_145451/best_retrieval_checkpoint.pt  # path to pretrained checkpoint (set to "" to train from scratch)
 # run_20260530_104844
 EPOCHS=50
@@ -47,8 +47,7 @@ python $home_dir/Project/src/lace_downstream.py \
     --version    $VERSION \
     --head       $HEAD \
     --checkpoint $CHECKPOINT \
-    --binary \
-    --splits     $home_dir/Project/data/internal_dataset/split_binary.json \
+    --splits     $home_dir/Project/data/internal_dataset/split.json \
     --out_dir    $home_dir/Project/results \
     --epochs     $EPOCHS \
     --patience   $PATIENCE \
