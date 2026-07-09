@@ -81,5 +81,6 @@ def evaluate_retrieval_lace(
         "retrieval/t2i_r5":          float(t2i_r5),
         "retrieval/t2i_median_rank": float(t2i_med),
         "retrieval/mean_r1":         float((i2t_r1 + t2i_r1) / 2),
+        "retrieval/mean_r5":         float((i2t_r5 + t2i_r5) / 2),
         "retrieval/n_pairs":         float(N),
     }

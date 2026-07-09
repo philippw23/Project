@@ -8,12 +8,15 @@ with pretrained projections, epoch-0 state) and produces similarity heatmaps for
   2. Crop ↔ crop
   3. Beurteilung phrase ↔ phrase  (grouped by source image)
   4. Befund phrase ↔ phrase       (grouped by source image)
-  5. Beurteilung full text ↔ full text  (mean-pooled phrases, one vec per image)
-  6. Befund full text ↔ full text       (mean-pooled phrases, one vec per image)
+  5. Joint beur+bef phrase ↔ phrase  (grouped by source image, section split marked)
+  6. Beurteilung full text ↔ full text  (mean-pooled phrases, one vec per image)
+  7. Befund full text ↔ full text       (mean-pooled phrases, one vec per image)
 
 The image heatmaps show whether image embeddings are peaked enough to serve
 as soft-target anchors for a symmetric loss alongside the existing text-text targets.
-Heatmaps 5 & 6 show whether the full-section representations are discriminative
+Heatmap 5 reveals cross-section soft-target structure: whether beur and bef phrases
+from the same case are soft positives for each other in the joint embedding space.
+Heatmaps 6 & 7 show whether the full-section representations are discriminative
 across images (B×B, one entry per batch sample).
 """
 from __future__ import annotations
@@ -232,14 +235,17 @@ def main(args: argparse.Namespace) -> None:
     beur_valid = beur_embs[beur_pmask]
     bef_valid  = bef_embs[bef_pmask]
 
-    img_idx  = torch.arange(B).unsqueeze(1).expand(-1, beur_pmask.shape[1])
-    beur_src = img_idx[beur_pmask]
-    img_idx  = torch.arange(B).unsqueeze(1).expand(-1, bef_pmask.shape[1])
-    bef_src  = img_idx[bef_pmask]
+    beur_src = torch.arange(B).unsqueeze(1).expand_as(beur_pmask)[beur_pmask]
+    bef_src  = torch.arange(B).unsqueeze(1).expand_as(bef_pmask)[bef_pmask]
 
-    tau_img  = args.tau_s_img
-    tau_beur = args.tau_s_beur
-    tau_bef  = args.tau_s_bef
+    # ── Joint phrase pool (beur + bef concatenated) ───────────────────────────
+    joint_valid = torch.cat([beur_valid, bef_valid], dim=0)  # [N_beur+N_bef, D]
+    joint_src   = torch.cat([beur_src,   bef_src],   dim=0)  # source image idx preserved
+
+    tau_img   = args.tau_s_img
+    tau_beur  = args.tau_s_beur
+    tau_bef   = args.tau_s_bef
+    tau_joint = args.tau_s_joint
 
     # ── Entropy stats ─────────────────────────────────────────────────────────
     print("\nEntropy:")
@@ -247,6 +253,7 @@ def main(args: argparse.Namespace) -> None:
     print_entropy((crop_embs      @ crop_embs.T).numpy(),      tau_img,  "Crop image")
     print_entropy((beur_valid     @ beur_valid.T).numpy(),     tau_beur, "Beurteilung phrases")
     print_entropy((bef_valid      @ bef_valid.T).numpy(),      tau_bef,  "Befund phrases")
+    print_entropy((joint_valid    @ joint_valid.T).numpy(),    tau_joint,"Joint beur+bef phrases")
     print_entropy((beur_full_embs @ beur_full_embs.T).numpy(), tau_beur, "Beurteilung full text")
     print_entropy((bef_full_embs  @ bef_full_embs.T).numpy(),  tau_bef,  "Befund full text")
 
@@ -255,6 +262,12 @@ def main(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     boost = args.same_image_boost
+
+    # Group boundaries for the joint heatmap: per-image lines + beur/bef section split.
+    # The section boundary is always captured because bef indices restart from 0
+    # while beur ends at B-1, so _phrase_group_boundaries always fires there.
+    joint_bounds = _phrase_group_boundaries(joint_src.numpy())
+
     specs = [
         (full_embs,      "Full image",            "full_image_heatmap.png",    tau_img,  None, None),
         (crop_embs,      "Crop image",            "crop_image_heatmap.png",    tau_img,  None, None),
@@ -262,6 +275,8 @@ def main(args: argparse.Namespace) -> None:
          _phrase_group_boundaries(beur_src.numpy()), beur_src),
         (bef_valid,      "Befund phrases",        "bef_phrase_heatmap.png",    tau_bef,
          _phrase_group_boundaries(bef_src.numpy()),  bef_src),
+        (joint_valid,    "Joint beur+bef phrases","joint_phrase_heatmap.png",  tau_joint,
+         joint_bounds,                               joint_src),
         (beur_full_embs, "Beurteilung full text", "beur_fulltext_heatmap.png", tau_beur, None, None),
         (bef_full_embs,  "Befund full text",      "bef_fulltext_heatmap.png",  tau_bef,  None, None),
     ]
@@ -294,6 +309,8 @@ if __name__ == "__main__":
                         help="Soft-target temperature for Beurteilung phrases (default: 0.015)")
     parser.add_argument("--tau_s_bef",  type=float, default=0.07,
                         help="Soft-target temperature for Befund phrases (default: 0.07)")
+    parser.add_argument("--tau_s_joint", type=float, default=0.03,
+                        help="Soft-target temperature for joint beur+bef heatmap (default: 0.03)")
     parser.add_argument("--lora_layers", type=int,   default=4)
     parser.add_argument("--lora_r",      type=int,   default=8)
     parser.add_argument("--lora_alpha",  type=float, default=16.0)

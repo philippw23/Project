@@ -28,10 +28,10 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # ── Hyperparameter ────────────────────────────────────────────────────────────
 VERSION=v1       # v1: ViT CLS token → MalignancyMLP | v2: ViT + MaskTokenModule → LACEv2Classifier (requires v2 pretrain checkpoint)
 HEAD=mlp_no_meta   # Head mode 
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260627_095913/best_checkpoint.pt #results/lace_v2_pretrain/run_20260626_135657/best_checkpoint.pt  # path to pretrained checkpoint (set to "" to train from scratch)
+CHECKPOINT=$home_dir/Project/results/lace_pretrain/run_20260606_145451/best_retrieval_checkpoint.pt #results/lace_v2_pretrain/run_20260626_135657/best_checkpoint.pt  # path to pretrained checkpoint (set to "" to train from scratch)
 #results/lace_pretrain/run_20260606_145451/best_retrieval_checkpoint.pt  # path to pretrained checkpoint (set to "" to train from scratch)
 # run_20260530_104844
-EPOCHS=50
+EPOCHS=150
 PATIENCE=10
 BATCH_SIZE=16
 LR=0.00009447014464909024
@@ -39,7 +39,8 @@ META_EMBED_DIM=32
 HIDDEN_DIMS="128 64"
 LOSS=focal
 FOCAL_GAMMA=3.05351237670772
-CLASS_WEIGHTING=inverse
+CLASS_WEIGHTING=effective
+USE_MASK=true    # apply lesion-mask cropping to input images (else the full image is just resized to 224)
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ python $home_dir/Project/src/lace_downstream.py \
     --loss       $LOSS \
     --focal_gamma $FOCAL_GAMMA \
     --class_weighting $CLASS_WEIGHTING \
+    --use_mask   $USE_MASK \
     --seed       $SEED \
     --wandb \
     --wandb_project lace-downstream \

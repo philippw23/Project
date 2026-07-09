@@ -64,7 +64,7 @@ def build_encoder(args: argparse.Namespace, device: torch.device) -> tuple[nn.Mo
     )
     from chexfound.models.encoders import CheXFoundViT, load_continued_pretrain_weights
 
-    preprocess_val   = build_preprocess_val_chexfound()
+    preprocess_val   = build_preprocess_val_chexfound(image_size=args.image_size)
     preprocess_train = build_train_transform_chexfound(preprocess_val)
 
     checkpoint = None if args.checkpoint.lower() == "none" else args.checkpoint
@@ -171,6 +171,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Original CheXFound .pth checkpoint (frozen baseline mode only).")
 
     # ── Data ──────────────────────────────────────────────────────────────────
+    parser.add_argument("--image_size", type=int, default=512,
+                        help="Input image resolution. 512 = native CheXFound resolution; "
+                             "224 = same as BiomedCLIP (uses pos-embedding interpolation).")
     parser.add_argument("--binary", type=lambda x: str(x).lower() in ("true", "1", "yes"),
                         default=False,
                         help="Binary mode: benign vs malignant only (intermediate cases skipped).")

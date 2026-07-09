@@ -39,7 +39,8 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_SPLITS
-from biomedclip.data.transforms import build_train_transform
+from biomedclip.data.transforms import build_train_transform, build_preprocess_val
+from LACE.models.encoders import enable_dynamic_img_size
 from biomedclip.data.datasets import (
     DownstreamDataset, EmbeddingDataset,
     LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
@@ -229,6 +230,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Binary classification (benign vs malignant). "
                              "Use with split_binary.json — intermediate cases must already be excluded.")
 
+    # ── Image resolution ─────────────────────────────────────────────────────
+    parser.add_argument("--image_size", type=int, default=224,
+                        help="Input resolution (default 224). BiomedCLIP ViT-B/16 supports "
+                             "arbitrary sizes via pos-embedding interpolation.")
+
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)
     parser.add_argument("--wandb",         action="store_true")
@@ -280,6 +286,9 @@ def main(args: argparse.Namespace) -> None:
     # ── Load BiomedCLIP and build encoder ─────────────────────────────────────
     print(f"Loading model: {MODEL_TAG}")
     model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
+    preprocess_val = build_preprocess_val(preprocess_val, args.image_size)
+    if args.image_size != 224:
+        print(f"Image size: {args.image_size}×{args.image_size} (pos-embedding interpolated)")
 
     if args.freezed_biomedclip:
         print("Using vanilla BiomedCLIP encoder (no checkpoint, no LoRA).")
@@ -300,6 +309,8 @@ def main(args: argparse.Namespace) -> None:
 
     # Always use pre-projection 768-dim ViT CLS token.
     encoder = model.visual.trunk.to(device)
+    if args.image_size != 224:
+        enable_dynamic_img_size(encoder)
     for p in encoder.parameters():
         p.requires_grad_(False)
     encoder.eval()

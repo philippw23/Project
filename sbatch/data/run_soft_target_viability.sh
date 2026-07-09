@@ -7,9 +7,10 @@
 #SBATCH --time=00:30:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_soft_target_viability.out"
 
-TAU_S_IMG=0.07
-TAU_S_BEUR=0.04
-TAU_S_BEF=0.2
+TAU_S_IMG=0.03
+TAU_S_BEUR=0.03
+TAU_S_BEF=0.03
+TAU_S_JOINT=0.07
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -29,10 +30,11 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/test_soft_target_viability.py \
-    --splits      $home_dir/Project/data/internal_dataset/split.json \
+    --splits      $home_dir/Project/data/internal_dataset/split_new.json \
     --out_dir     $home_dir/Project/results/soft_target_viability \
     --same_image_boost 20 \
     --tau_s_img   $TAU_S_IMG \
     --tau_s_beur  $TAU_S_BEUR \
     --tau_s_bef   $TAU_S_BEF \
+    --tau_s_joint $TAU_S_JOINT \
     --batch_size  128

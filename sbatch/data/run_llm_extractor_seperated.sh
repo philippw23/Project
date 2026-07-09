@@ -25,8 +25,15 @@ export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 
 # Run the separated extractor
+# Two-stage per-section pipeline (atomic extraction → importance ranking).
+# Input is English-only: the loader reads befund_en / beurteilung_en.
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 $python_path $home_dir/Project/src/llm_extractor_seperated.py \
-    --model Qwen/Qwen2.5-7B-Instruct \
+    --model Qwen/Qwen2.5-14B-Instruct \
     --reports $home_dir/Project/data/internal_dataset/text/translated_reports.json \
-    --out_dir $home_dir/Project/results
+    --out_dir $home_dir/Project/results \
+    --output $home_dir/Project/data/internal_dataset/test/full_report_test_15.json \
+    --two_stage \
+    --batch_size 4 \
+    --quantize_8bit \
+    --max 15

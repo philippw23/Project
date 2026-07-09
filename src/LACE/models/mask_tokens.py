@@ -157,8 +157,9 @@ class MaskTokenDecoder(nn.Module):
         )  # [B, H, N, P]
 
         if self.gauss_kernel is not None:
-            # Smooth each head's N attention maps over the 14×14 patch grid.
-            w = weights.reshape(B * H * N, 1, 14, 14)
+            # Smooth each head's N attention maps over the patch grid.
+            grid = int(P ** 0.5)
+            w = weights.reshape(B * H * N, 1, grid, grid)
             w = F.conv2d(w, self.gauss_kernel, padding=self.gauss_pad)
             w = w.reshape(B * H, N, P)
             w = w / (w.sum(dim=-1, keepdim=True) + 1e-8)  # renormalize to sum=1

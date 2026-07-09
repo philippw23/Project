@@ -39,5 +39,40 @@ def inject_lora_vit(
         block.mlp.fc2   = LoRALinear(block.mlp.fc2,    r, alpha)
 
 
+def unfreeze_last_n_vit(vit_trunk: nn.Module, n: int) -> None:
+    """Freeze all ViT trunk params; then fully unfreeze the last n blocks.
+
+    Full fine-tuning alternative to inject_lora_vit: instead of adding low-rank
+    adapters, the original weights of the last n transformer blocks (plus the
+    final norm) are made trainable. Higher capacity than LoRA at the cost of
+    many more trainable params and higher overfitting risk on small data.
+
+    Operates on model.visual.trunk (timm VisionTransformer) directly.
+    """
+    for p in vit_trunk.parameters():
+        p.requires_grad_(False)
+
+    blocks = vit_trunk.blocks
+    n_blocks = len(blocks)
+    effective = min(n, n_blocks)
+    if effective < n:
+        warnings.warn(
+            f"unfreeze_layers={n} exceeds total ViT blocks ({n_blocks}). "
+            f"Unfreezing all {n_blocks} blocks.",
+            stacklevel=2,
+        )
+
+    for i in range(n_blocks - effective, n_blocks):
+        for p in blocks[i].parameters():
+            p.requires_grad_(True)
+
+    # The final norm sits after the last block and shapes the CLS token that
+    # downstream reads; unfreezing it is cheap and consistent with tuning the
+    # top blocks.
+    if hasattr(vit_trunk, "norm"):
+        for p in vit_trunk.norm.parameters():
+            p.requires_grad_(True)
+
+
 def count_trainable_params(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters() if p.requires_grad)

@@ -17,6 +17,19 @@ from LACE.data.transforms import (
 )
 from biomedclip.data.transforms import crop_around_mask_pair, pad_to_square
 
+
+# Malignancy GT label → int, shared by the downstream and k-NN proxy metric.
+LABEL_TO_INT = {"benign": 0, "intermediate": 1, "malignant": 2}
+
+
+def _image_size_from_preprocess(preprocess, default: int = 224) -> int:
+    """Extract the crop size from a torchvision Compose preprocessing pipeline."""
+    for t in getattr(preprocess, "transforms", []):
+        if isinstance(t, (transforms.CenterCrop, transforms.RandomResizedCrop)):
+            s = t.size
+            return s if isinstance(s, int) else s[0]
+    return default
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
@@ -52,6 +65,8 @@ class InternalDatasetV2(Dataset):
         context_fraction: float = 0.15,
     ) -> None:
         self.preprocess        = preprocess
+        self.image_size        = _image_size_from_preprocess(preprocess)
+        self.n_patches         = (self.image_size // 16) ** 2
         self.tokenizer         = tokenizer
         self.max_text_len      = max_text_len
         self.text_mode         = text_mode
@@ -62,21 +77,21 @@ class InternalDatasetV2(Dataset):
         self.context_fraction  = context_fraction
 
         if text_mode == "phrase":
+            # phrase mode uses befund phrases (L_sim) AND beurteilung phrases (L_ITA).
             self.samples = [
                 s for s in samples
                 if s.get("befund_phrases") and s.get("beurteilung_phrases")
             ]
             dropped = len(samples) - len(self.samples)
             if dropped:
-                print(f"InternalDatasetV2: dropped {dropped} samples missing phrase lists.")
+                print(f"InternalDatasetV2: dropped {dropped} samples missing befund/beurteilung phrases.")
         elif text_mode == "mixed":
-            self.samples = [
-                s for s in samples
-                if s.get("beurteilung") or s.get("befund_phrases")
-            ]
+            # mixed mode uses befund phrases (L_sim) + full beurteilung text (L_ITA),
+            # so beurteilung_phrases are not required — only befund_phrases.
+            self.samples = [s for s in samples if s.get("befund_phrases")]
             dropped = len(samples) - len(self.samples)
             if dropped:
-                print(f"InternalDatasetV2: dropped {dropped} samples missing all text.")
+                print(f"InternalDatasetV2: dropped {dropped} samples missing befund phrases.")
         else:
             self.samples = samples
 
@@ -138,11 +153,11 @@ class InternalDatasetV2(Dataset):
                 mask_arr = crop_mask
             else:
                 image = Image.fromarray(pad_to_square(np.array(image)))
-            patch_labels = mask_to_patch_labels(mask_arr) if has_mask else \
-                torch.zeros(196, dtype=torch.float32)
+            patch_labels = mask_to_patch_labels(mask_arr, self.image_size) if has_mask else \
+                torch.zeros(self.n_patches, dtype=torch.float32)
         else:
             image = Image.fromarray(pad_to_square(np.array(image)))
-            patch_labels = torch.zeros(196, dtype=torch.float32)
+            patch_labels = torch.zeros(self.n_patches, dtype=torch.float32)
         full_image = self.preprocess(image)
 
         if self.text_mode == "full":
@@ -198,6 +213,7 @@ class InternalDatasetV2(Dataset):
             "full_image":   full_image,
             "patch_labels": patch_labels,
             "has_mask":     torch.tensor(has_mask, dtype=torch.bool),
+            "label":        torch.tensor(LABEL_TO_INT[s["label"]], dtype=torch.long),
             **text_fields,
         }
 
@@ -237,6 +253,8 @@ class InternalTripleDataset(Dataset):
     ) -> None:
         self.preprocess              = preprocess
         self.is_train                = is_train
+        self.image_size              = _image_size_from_preprocess(preprocess)
+        self.n_patches               = (self.image_size // 16) ** 2
         # Normalize stats reused by the synchronized train transform.
         self._norm = next(
             (t for t in getattr(preprocess, "transforms", [])
@@ -255,21 +273,21 @@ class InternalTripleDataset(Dataset):
         self.descriptor_vectors      = descriptor_vectors or {}
 
         if text_mode == "phrase":
+            # phrase mode uses befund phrases (L_sim) AND beurteilung phrases (L_ITA).
             self.samples = [
                 s for s in samples
                 if s.get("befund_phrases") and s.get("beurteilung_phrases")
             ]
             dropped = len(samples) - len(self.samples)
             if dropped:
-                print(f"InternalTripleDataset: dropped {dropped} samples missing phrase lists.")
+                print(f"InternalTripleDataset: dropped {dropped} samples missing befund/beurteilung phrases.")
         elif text_mode == "mixed":
-            self.samples = [
-                s for s in samples
-                if s.get("beurteilung") or s.get("befund_phrases")
-            ]
+            # mixed mode uses befund phrases (L_sim) + full beurteilung text (L_ITA),
+            # so beurteilung_phrases are not required — only befund_phrases.
+            self.samples = [s for s in samples if s.get("befund_phrases")]
             dropped = len(samples) - len(self.samples)
             if dropped:
-                print(f"InternalTripleDataset: dropped {dropped} samples missing all text.")
+                print(f"InternalTripleDataset: dropped {dropped} samples missing befund phrases.")
         else:
             self.samples = samples
 
@@ -356,20 +374,22 @@ class InternalTripleDataset(Dataset):
             # to its augmented image (photometric aug is image-only).
             full_image, patch_labels = synchronized_train_transform(
                 img_pil,  _mask_pil(global_mask, img_pil),  self._norm.mean, self._norm.std,
+                size=self.image_size,
             )
             crop_image, crop_patch_labels = synchronized_train_transform(
                 crop_pil, _mask_pil(crop_mask, crop_pil),   self._norm.mean, self._norm.std,
+                size=self.image_size,
             )
         else:
             full_image = self.preprocess(img_pil)
             crop_image = self.preprocess(crop_pil)
             patch_labels = (
-                mask_to_patch_labels(global_mask) if has_mask
-                else torch.zeros(196, dtype=torch.float32)
+                mask_to_patch_labels(global_mask, self.image_size) if has_mask
+                else torch.zeros(self.n_patches, dtype=torch.float32)
             )
             crop_patch_labels = (
-                mask_to_patch_labels(crop_mask) if has_mask
-                else torch.zeros(196, dtype=torch.float32)
+                mask_to_patch_labels(crop_mask, self.image_size) if has_mask
+                else torch.zeros(self.n_patches, dtype=torch.float32)
             )
 
         if self.text_mode == "full":
@@ -460,6 +480,7 @@ class BTXRDOrthoDataset(Dataset):
         preprocess,
     ) -> None:
         self.preprocess = preprocess
+        self.image_size = _image_size_from_preprocess(preprocess)
         self.samples: list[tuple[Path, Path]] = []
 
         for annot_path in sorted(btxrd_annot_dir.glob("*.json")):
@@ -495,7 +516,7 @@ class BTXRDOrthoDataset(Dataset):
         padded[pad_top:pad_top + img_h, pad_left:pad_left + img_w] = mask_arr
         mask_arr = padded
 
-        patch_labels = mask_to_patch_labels(mask_arr)
+        patch_labels = mask_to_patch_labels(mask_arr, self.image_size)
 
         return {
             "image":        self.preprocess(image),

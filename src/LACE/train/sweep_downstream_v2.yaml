@@ -12,6 +12,8 @@ parameters:
     value: mlp_no_meta
   downstream_visual_mode:
     values: [cls, fg, cls_fg]
+  image_size:
+    values: [224, 512]
   lr:
     distribution: log_uniform_values
     min: 1e-5
@@ -45,9 +47,11 @@ command:
   - --version
   - v2
   - --checkpoint
-  - results/lace_v2_pretrain/run_20260627_092713/best_retrieval_checkpoint.pt
+  - results/lace_v2_pretrain/run_20260708_153804/best_retrieval_checkpoint.pt
   - --splits
-  - data/internal_dataset/split.json
+  - data/internal_dataset/test/split_binary_backup.json
+  - --binary
+  - --use_mask
   - --out_dir
   - results
   - --epochs

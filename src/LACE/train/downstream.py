@@ -42,6 +42,7 @@ except ImportError:
 from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
                                        IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES,
                                        IDX_TO_LABEL_BINARY, LABEL_TO_IDX_BINARY, NUM_CLASSES_BINARY)
+from biomedclip.data.transforms import build_preprocess_val
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import LinearHead, MalignancyMLP
 from biomedclip.utils.misc import DEFAULT_OUT_DIR
@@ -92,6 +93,7 @@ def _load_vit(checkpoint: dict, device: torch.device) -> SharedViT:
         r=lora_cfg["lora_r"],
         alpha=lora_cfg["lora_alpha"],
         embed_dim=lora_cfg.get("embed_dim", 512),
+        unfreeze_layers=lora_cfg.get("unfreeze_layers", 0),
     )
     vit.load_state_dict(checkpoint["vit_state"])
     for p in vit.parameters():
@@ -108,7 +110,7 @@ def build_v1_model(
     vit  = _load_vit(ckpt, device)
     vit.eval()
 
-    preprocess_val   = vit.preprocess_val
+    preprocess_val   = build_preprocess_val(vit.preprocess_val, getattr(args, "image_size", 224))
     preprocess_train = build_train_transform_lace(preprocess_val)
 
     if args.head == "linear":
@@ -137,7 +139,7 @@ def build_v2_model(
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
 
     vit = _load_vit(ckpt, device)
-    preprocess_val   = vit.preprocess_val
+    preprocess_val   = build_preprocess_val(vit.preprocess_val, getattr(args, "image_size", 224))
     preprocess_train = build_train_transform_lace(preprocess_val)
 
     n_mask_tokens = ckpt.get("n_mask_tokens", 4)
@@ -217,6 +219,105 @@ def extract_v2_representations(
         all_sex.append(batch["sex"])
         all_lbl.append(batch["label"])
     return torch.cat(all_repr), torch.cat(all_age), torch.cat(all_sex), torch.cat(all_lbl)
+
+
+def _precompute_repr_loader(
+    samples: list[dict],
+    age_mean: float,
+    age_std: float,
+    preprocess_val,
+    args: argparse.Namespace,
+    extractor,
+    device: torch.device,
+    label_to_idx: dict[str, int],
+) -> tuple[DataLoader, int]:
+    """Build a DownstreamDataset for `samples`, extract frozen representations,
+    and wrap them in an EmbeddingDataset DataLoader.
+
+    age/sex are read from each sample dict; ages are normalised with the given
+    (train-derived) `age_mean`/`age_std` so external sets like BTXRD use the same
+    statistics as the fold's training data. `extractor(raw_loader)` returns
+    (repr, age, sex, lbl).
+    """
+    lookup = {Path(s["image"]).stem: (s["age"], s["sex"]) for s in samples}
+    ds = DownstreamDataset(
+        samples, lookup, age_mean, age_std,
+        preprocess_val, use_mask=args.use_mask, label_to_idx=label_to_idx,
+    )
+    raw_loader = DataLoader(
+        ds, shuffle=False, batch_size=args.batch_size,
+        num_workers=4, pin_memory=(device.type == "cuda"),
+    )
+    emb, age, sex, lbl = extractor(raw_loader)
+    loader = DataLoader(
+        EmbeddingDataset(emb, age, sex, lbl),
+        batch_size=args.batch_size, shuffle=False,
+    )
+    return loader, len(ds)
+
+
+def _report_eval(
+    name: str,
+    preds: np.ndarray,
+    labels: np.ndarray,
+    loss: float,
+    idx_to_label: dict[int, str],
+    num_classes: int,
+    prefix: str,
+) -> dict:
+    """Print a results block for an evaluated set and return a flat metrics dict
+    keyed by `prefix` (e.g. 'test' or 'btxrd')."""
+    import pandas as pd
+
+    label_names   = [idx_to_label[i] for i in range(num_classes)]
+    present       = sorted(set(labels.tolist()) | set(preds.tolist()))
+    present_names = [label_names[i] for i in present]
+
+    acc = float((preds == labels).mean())
+    bal = balanced_accuracy_score(labels, preds)
+    f1m = f1_score(labels, preds, average="macro")
+    wprec, wrec, _, _ = precision_recall_fscore_support(
+        labels, preds, average="weighted", zero_division=0
+    )
+
+    print("\n" + "=" * 60)
+    print(f"{name} RESULTS")
+    print("=" * 60)
+    print(f"Loss: {loss:.4f}  |  Accuracy: {acc:.3f}")
+    print(f"Balanced accuracy: {bal:.3f}")
+    print(f"Macro F1: {f1m:.3f}")
+    print(f"Weighted Precision: {wprec:.3f}  |  Weighted Recall: {wrec:.3f}")
+    print()
+    print(classification_report(
+        labels, preds, labels=present, target_names=present_names,
+        digits=3, zero_division=0,
+    ))
+    print("Confusion matrix (rows=true, cols=pred):")
+    print(pd.DataFrame(
+        confusion_matrix(labels, preds, labels=present),
+        index=present_names, columns=present_names,
+    ).to_string())
+
+    prec, rec, _, _ = precision_recall_fscore_support(
+        labels, preds, average="macro", zero_division=0
+    )
+    pc_prec, pc_rec, pc_f1, _ = precision_recall_fscore_support(
+        labels, preds, labels=present, zero_division=0
+    )
+    metrics = {
+        f"{prefix}/loss": loss, f"{prefix}/acc": acc,
+        f"{prefix}/balanced_acc":  bal,
+        f"{prefix}/precision_macro":    prec,
+        f"{prefix}/recall_macro":       rec,
+        f"{prefix}/precision_weighted": wprec,
+        f"{prefix}/recall_weighted":    wrec,
+        f"{prefix}/f1_macro":           f1m,
+    }
+    for i, nm in enumerate(present_names):
+        metrics[f"{prefix}/precision_{nm}"] = pc_prec[i]
+        metrics[f"{prefix}/recall_{nm}"]    = pc_rec[i]
+        metrics[f"{prefix}/f1_{nm}"]        = pc_f1[i]
+    return metrics
 
 
 # ── Training / evaluation ─────────────────────────────────────────────────────
@@ -574,6 +675,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--cb_beta",         type=float, default=0.99)
     parser.add_argument("--ldam_max_margin", type=float, default=0.5)
     parser.add_argument("--ldam_scale",      type=float, default=30.0)
+
+    # ── Image resolution ─────────────────────────────────────────────────────
+    parser.add_argument("--image_size", type=int, default=224,
+                        help="Input resolution (default 224). ViT-B/16 supports arbitrary "
+                             "sizes via pos-embedding interpolation.")
 
     # ── Data ──────────────────────────────────────────────────────────────────
     parser.add_argument("--binary", action="store_true",

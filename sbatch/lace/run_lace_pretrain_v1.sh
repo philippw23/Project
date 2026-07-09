@@ -24,28 +24,29 @@ WARMUP_EPOCHS=5
 LR=5e-5
 SCHEDULER=cosine
 WEIGHT_DECAY=0.001846597080866615
+
 LAMBDA_ITA=1.0
-LAMBDA_SIM=1.0
-LAMBDA_ORTHO=1.0
+LAMBDA_SIM=0.8
+LAMBDA_ORTHO=0.8
 
 TAU_S_BEUR=0.04
-TAU_S_BEF=0.04
+TAU_S_BEF=0.07
 TAU_S_IMG_FULL=0.04
-TAU2=0.03         # attention softmax temperature for GLoRIA-style patch attention
+TAU2=0.07         # attention softmax temperature for GLoRIA-style patch attention
 LAMBDA_T2I=1.0     # weight for T2I hard InfoNCE in L_sim
 
-SAME_IMAGE_BOOST=20.0   # logit boost for same-image phrase pairs in I2T soft target (0.0 = original behaviour)
+SAME_IMAGE_BOOST=10.0   # logit boost for same-image phrase pairs in I2T soft target (0.0 = original behaviour)
 REWEIGHT_BY_N_PHRASES=true  # weight each phrase by 1/n_phrases_i so all images contribute equally
-T2I_MODE=text_text   # image_image | text_text | descriptor | infonce
-GLOBAL_CONTEXT_FRACTION=0.15  # context fraction for the global crop used as full_image
+T2I_MODE=descriptor   # image_image | text_text | descriptor | infonce
+GLOBAL_CONTEXT_FRACTION=0.4  # context fraction for the global crop used as full_image
 CONTEXT_FRACTION=0.15        # context fraction for the tight tumor crop used as crop_image
 
 LEARN_LOSS_WEIGHTS=true   # set to true to make λ_ita/λ_sim/λ_ortho learnable
 WARM_START_PROJECTIONS=true  # init projection heads from pretrained BiomedCLIP weights
-USE_BTXRD=false               # set to false to disable BTXRD ortho dataset
+USE_BTXRD=true               # set to false to disable BTXRD ortho dataset
 
 LOSSES="ita sim ortho"       # active loss terms: any subset of ita sim ortho
-SIM_LESION_ONLY=true         # restrict L_sim phrase-patch attention to lesion patches
+SIM_LESION_ONLY=false         # restrict L_sim phrase-patch attention to lesion patches
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 

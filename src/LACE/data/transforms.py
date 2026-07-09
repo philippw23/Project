@@ -11,8 +11,6 @@ import torch
 from biomedclip.data.transforms import build_train_transform, _compute_crop_1d
 
 PATCH_SIZE = 16
-GRID_SIZE  = 14   # 224 / 16
-N_PATCHES  = GRID_SIZE * GRID_SIZE   # 196
 RESAMPLE_BICUBIC = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
 
 
@@ -80,29 +78,29 @@ def rasterize_shapes(
     return np.array(mask)
 
 
-def mask_to_patch_labels(mask_arr: np.ndarray) -> torch.Tensor:
-    """Convert a (H, W) binary mask to a [196] soft coverage-fraction tensor.
+def mask_to_patch_labels(mask_arr: np.ndarray, image_size: int = 224) -> torch.Tensor:
+    """Convert a (H, W) binary mask to a [P] soft coverage-fraction tensor.
 
-    Applies the same spatial transform as preprocess_val (resize shortest side
-    to 224, then center crop 224×224) using NEAREST interpolation so patch
-    labels stay aligned with the ViT input grid. Each value is the fraction of
-    the 16×16 patch covered by the mask (0.0–1.0).
+    Resizes and center-crops the mask to image_size×image_size using NEAREST
+    interpolation so patch labels stay aligned with the ViT input grid.
+    P = (image_size // 16) ** 2  (e.g. 196 at 224px, 1024 at 512px).
     """
     mask_pil = Image.fromarray((mask_arr > 0).astype(np.uint8) * 255, mode="L")
-    mask_resized = TF.resize(mask_pil, 224, interpolation=InterpolationMode.NEAREST)
-    mask_cropped = TF.center_crop(mask_resized, [224, 224])
-    mask_224 = np.array(mask_cropped, dtype=np.float32) / 255.0
-    return patchify_mask_224(mask_224)
+    mask_resized = TF.resize(mask_pil, image_size, interpolation=InterpolationMode.NEAREST)
+    mask_cropped = TF.center_crop(mask_resized, [image_size, image_size])
+    mask_img = np.array(mask_cropped, dtype=np.float32) / 255.0
+    return patchify_mask_224(mask_img, image_size=image_size)
 
 
-def patchify_mask_224(mask_224: np.ndarray, min_coverage: float = 0.10) -> torch.Tensor:
-    """Patchify a 224x224 binary mask into [196] soft coverage fractions.
+def patchify_mask_224(mask_224: np.ndarray, min_coverage: float = 0.10, image_size: int = 224) -> torch.Tensor:
+    """Patchify a binary mask into [P] soft coverage fractions.
 
-    Each value is the fraction of the 16x16 patch covered by the mask (0.0–1.0).
-    Patches with coverage below min_coverage are zeroed out — they are boundary
-    slivers where the mask clips a corner and should be treated as background.
+    Works at any resolution; image_size must match the spatial size of mask_224.
+    P = (image_size // 16) ** 2  (e.g. 196 at 224px, 1024 at 512px).
+    Patches with coverage below min_coverage are zeroed out.
     """
-    patch_grid  = mask_224.reshape((GRID_SIZE, PATCH_SIZE, GRID_SIZE, PATCH_SIZE))
+    grid_size   = image_size // PATCH_SIZE
+    patch_grid  = mask_224.reshape((grid_size, PATCH_SIZE, grid_size, PATCH_SIZE))
     patch_means = patch_grid.mean(axis=(1, 3)).reshape(-1).astype(np.float32)
     patch_means[patch_means < min_coverage] = 0.0
     return torch.from_numpy(patch_means)
@@ -151,8 +149,8 @@ def synchronized_train_transform(
     img_t = TF.to_tensor(img)
     img_t = TF.normalize(img_t, mean=list(mean), std=list(std))
 
-    mask_224 = (np.array(msk, dtype=np.float32) > 127.0).astype(np.float32)
-    patch_labels = patchify_mask_224(mask_224, threshold)
+    mask_img = (np.array(msk, dtype=np.float32) > 127.0).astype(np.float32)
+    patch_labels = patchify_mask_224(mask_img, threshold, image_size=size)
     return img_t, patch_labels
 
 

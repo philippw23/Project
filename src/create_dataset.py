@@ -41,6 +41,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Directory containing image PNGs (default: %(default)s)",
     )
     parser.add_argument(
+        "--reports_path",
+        default=str(FULL_REPORTS_PATH),
+        help="Path to full_reports.json (default: %(default)s)",
+    )
+    parser.add_argument(
         "--output_path",
         default=str(DEFAULT_OUTPUT_PATH),
         help="Path to write the dataset JSON (default: %(default)s)",
@@ -50,6 +55,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(args: argparse.Namespace) -> None:
     images_dir = Path(args.images_dir)
+    reports_path = Path(args.reports_path)
     output_path = Path(args.output_path)
 
     df = pd.read_excel(
@@ -71,7 +77,7 @@ def main(args: argparse.Namespace) -> None:
     df["anonym_patid"] = df["anonym_patid"].fillna("").str.strip()
     df["anonym_patid"] = df["anonym_patid"].apply(lambda x: _normalise_id(x) if x else "")
 
-    with open(FULL_REPORTS_PATH, encoding="utf-8") as fh:
+    with open(reports_path, encoding="utf-8") as fh:
         raw_reports = json.load(fh)
 
     accnr_lookup: dict[str, dict] = {}

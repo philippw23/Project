@@ -115,10 +115,11 @@ def make_classification_eval_transform(
 
 # ── Local downstream helpers (kept for chexfound_downstream.py) ──────────────
 
-def build_preprocess_val_chexfound() -> transforms.Compose:
+def build_preprocess_val_chexfound(image_size: int = 512) -> transforms.Compose:
+    resize_size = int(image_size * 256 / 224)  # maintain the same resize→crop ratio
     return transforms.Compose([
-        transforms.Resize(512, interpolation=InterpolationMode.BICUBIC),
-        transforms.CenterCrop(512),
+        transforms.Resize(resize_size, interpolation=InterpolationMode.BICUBIC),
+        transforms.CenterCrop(image_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
     ])
@@ -126,8 +127,10 @@ def build_preprocess_val_chexfound() -> transforms.Compose:
 
 def build_train_transform_chexfound(preprocess_val: transforms.Compose) -> transforms.Compose:
     norm = next(t for t in preprocess_val.transforms if isinstance(t, transforms.Normalize))
+    crop = next(t for t in preprocess_val.transforms if isinstance(t, transforms.CenterCrop))
+    image_size = crop.size[0] if isinstance(crop.size, (list, tuple)) else crop.size
     return transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.8, 1.0)),
+        transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
         transforms.RandomRotation(degrees=10),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.3),
         transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 1.0)),

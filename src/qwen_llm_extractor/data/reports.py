@@ -63,7 +63,8 @@ def load_reports_separated(source: str) -> tuple[list[str], list[str], list[str]
 
     Unlike ``load_reports_joint``, the two sections are NOT concatenated — they
     are returned as separate lists so each can be passed to its own LLM prompt.
-    Only German fields (``befund`` / ``beurteilung``) are supported.
+    Reads the translated English fields (``befund_en`` / ``beurteilung_en``);
+    the separated pipeline operates on English input only.
 
     Parameters
     ----------
@@ -86,8 +87,8 @@ def load_reports_separated(source: str) -> tuple[list[str], list[str], list[str]
 
     befunds, beurteilungs, patids = [], [], []
     for entry in data:
-        befund      = (entry.get("befund") or "").strip()
-        beurteilung = (entry.get("beurteilung") or "").strip()
+        befund      = (entry.get("befund_en") or "").strip()
+        beurteilung = (entry.get("beurteilung_en") or "").strip()
         if befund or beurteilung:
             befunds.append(befund)
             beurteilungs.append(beurteilung)

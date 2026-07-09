@@ -77,7 +77,25 @@ python src/llm_extractor_seperated.py \
 sbatch sbatch/run_medbert_extractor.sh
 ```
 
-### 3 — BiomedCLIP pretraining
+### 3 — Dataset assembly & split creation
+
+Two scripts turn the raw metadata, reports, images, and masks into a fixed patient-level split that is reused by pretraining and every baseline, which keeps comparisons fair.
+
+**Step 1 — assemble `dataset_full.json`:**
+```bash
+python src/create_dataset.py
+```
+Matches each `metadata.xlsx` row (sheet `internal_data_matched`) to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`.
+
+**Step 2 — create `split.json`:**
+```bash
+python src/create_split.py            # add --binary for benign-vs-malignant only
+```
+Filters to entries with a report, a label, and a non-empty segmentation mask; normalises sex (m/f → 1/0, unknown → 0.5) and imputes unknown age with the training-set mean. Splits at the **patient level** (no train/val/test leakage), **stratified by each patient's majority label**, into train / val / test (default 0.8 / 0.1 / 0.1, `seed=42`). Writes `data/internal_dataset/split.json` (or `split_binary.json`) as `{train, val, test}`, each holding the full sample dicts (including extracted phrases).
+
+> **Note:** `split.json` embeds the phrases copied from `dataset_full.json`. After changing phrase extraction (Stage 2), re-run **both** `create_dataset.py` and `create_split.py` for the change to take effect — editing prompts alone does not update existing splits.
+
+### 4 — BiomedCLIP pretraining
 
 Fine-tunes the ViT image encoder of BiomedCLIP with LoRA using contrastive (CLIP-style) loss on (image, report) pairs. The PubMedBERT text encoder is kept frozen.
 
@@ -111,7 +129,7 @@ wandb sweep src/biomedclip/train/sweep_pretrain.yaml
 sbatch sbatch/run_sweep_pretrain.sh
 ```
 
-### 4 — Downstream malignancy classification
+### 5 — Downstream malignancy classification
 
 Loads the frozen pretrained image encoder, appends clinical metadata (age, sex), and trains a small MLP for 3-class malignancy prediction.
 
@@ -134,7 +152,7 @@ wandb sweep src/biomedclip/eval/sweep_downstream.yaml
 sbatch sbatch/run_sweep_downstream.sh
 ```
 
-### 5 — YOLO baseline
+### 6 — YOLO baseline
 
 Object-detection baseline (YOLOv5l6u) trained directly on the bone-tumor X-rays with CLAHE-enhanced images.
 

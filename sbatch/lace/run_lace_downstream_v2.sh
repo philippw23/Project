@@ -26,12 +26,14 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # ── Model ─────────────────────────────────────────────────────────────────────
-VERSION=v1              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
-VISUAL_MODE=cls      # cls [B,512] | fg [B,512] | cls_fg [B,1024]
-CHECKPOINT=$home_dir/Project/results/lace_pretrain/run_20260614_025925/best_retrieval_checkpoint.pt
-# # results/lace_v2_pretrain/run_20260624_121345/best_checkpoint.pt
-SPLITS=$home_dir/Project/data/internal_dataset/split.json
-BINARY=false            # true = benign vs malignant only (intermediate skipped)
+IMAGE_SIZE=224          # 224 = default | 512 = CheXFound-equivalent resolution
+USE_MASK=true           # apply lesion-mask cropping to input images (else the full image is just resized)
+VERSION=v2              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
+VISUAL_MODE=cls_fg      # cls [B,512] | fg [B,512] | cls_fg [B,1024]
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260708_153804/best_retrieval_checkpoint.pt 
+# # results/lace_v2_pretrain/run_20260624_121345/best_checkpoint.pt  run_20260702_130249 run_20260707_164235 
+SPLITS=$home_dir/Project/data/internal_dataset/test/split_binary_backup.json
+BINARY=true            # true = benign vs malignant only (intermediate skipped)
 # # ── Training ──────────────────────────────────────────────────────────────────
 EPOCHS=50
 PATIENCE=10
@@ -41,7 +43,7 @@ WEIGHT_DECAY=0.01
 DROPOUT=0.3
 HEAD=mlp_no_meta                # linear | mlp (with age/sex meta) | mlp_no_meta
 META_EMBED_DIM=32
-HIDDEN_DIMS="128 64"                 # only used for mlp heads
+HIDDEN_DIMS="64"                 # only used for mlp heads
 
 # # ── Loss ──────────────────────────────────────────────────────────────────────
 LOSS=focal
@@ -52,6 +54,7 @@ SEED=42
 
 python $home_dir/Project/src/lace_downstream.py \
     --version                $VERSION \
+    --image_size             $IMAGE_SIZE \
     --downstream_visual_mode $VISUAL_MODE \
     --checkpoint             $CHECKPOINT \
     --splits                 $SPLITS \
@@ -68,6 +71,7 @@ python $home_dir/Project/src/lace_downstream.py \
     --loss                   $LOSS \
     --focal_gamma            $FOCAL_GAMMA \
     --class_weighting        $CLASS_WEIGHTING \
+    --use_mask               $USE_MASK \
     $( [ "$BINARY" = "true" ] && echo "--binary" ) \
     --seed                   $SEED \
     --wandb \

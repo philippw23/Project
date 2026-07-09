@@ -5,6 +5,7 @@ import math
 import numpy as np
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 
 
 def _compute_crop_1d(
@@ -201,11 +202,34 @@ class SquarePad:
         return result
 
 
+def build_preprocess_val(reference_preprocess, image_size: int) -> transforms.Compose:
+    """Build a val/test pipeline at an arbitrary resolution.
+
+    Derives the resize→crop ratio from reference_preprocess so the overshoot
+    convention (e.g. 256→224 for BiomedCLIP) scales correctly to any target size.
+    """
+    if image_size == 224:
+        return reference_preprocess
+    resize_t = next(t for t in reference_preprocess.transforms if isinstance(t, transforms.Resize))
+    crop_t   = next(t for t in reference_preprocess.transforms if isinstance(t, transforms.CenterCrop))
+    norm_t   = next(t for t in reference_preprocess.transforms if isinstance(t, transforms.Normalize))
+    ref_resize = resize_t.size if isinstance(resize_t.size, int) else resize_t.size[0]
+    ref_crop   = crop_t.size   if isinstance(crop_t.size,   int) else crop_t.size[0]
+    new_resize = int(image_size * ref_resize / ref_crop)
+    return transforms.Compose([
+        transforms.Resize(new_resize, interpolation=InterpolationMode.BICUBIC),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        norm_t,
+    ])
+
+
 def build_train_transform(preprocess_val) -> transforms.Compose:
     """Build a custom training augmentation pipeline.
 
     Normalization mean/std are taken from preprocess_val so they always match
-    the model, regardless of which checkpoint is loaded.
+    the model, regardless of which checkpoint is loaded. Crop size is read
+    dynamically from preprocess_val so it scales correctly with --image_size.
 
     Augmentations chosen for bone-tumour X-rays:
       - RandomResizedCrop: simulates varying patient positioning and zoom
@@ -216,9 +240,11 @@ def build_train_transform(preprocess_val) -> transforms.Compose:
     is clinically meaningful in radiographs.
     """
     norm = next(t for t in preprocess_val.transforms if isinstance(t, transforms.Normalize))
+    crop = next(t for t in preprocess_val.transforms if isinstance(t, transforms.CenterCrop))
+    image_size = crop.size if isinstance(crop.size, int) else crop.size[0]
 
     return transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+        transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
         transforms.RandomRotation(degrees=10),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.3),
         transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
