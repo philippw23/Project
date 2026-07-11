@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -417,7 +418,7 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -472,32 +473,44 @@ def main(args: argparse.Namespace) -> None:
                                   preprocess_train, use_mask=args.use_mask, label_to_idx=label_to_idx)
     val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
                                   preprocess_val,   use_mask=args.use_mask, label_to_idx=label_to_idx)
-    test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   use_mask=args.use_mask, label_to_idx=label_to_idx)
-    print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
+    print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}")
 
     use_pin       = device.type == "cuda"
     loader_kwargs = {"batch_size": args.batch_size, "num_workers": 4, "pin_memory": use_pin}
     train_loader    = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
     val_loader_raw  = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
-    test_loader_raw = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
-    # ── Pre-compute val/test representations ──────────────────────────────────
-    print("Pre-computing val/test representations...")
+    # extractor closure over the frozen backbone (v1 ViT CLS or v2 classifier)
     if args.version == "v1":
-        val_emb,  val_age,  val_sex,  val_lbl  = extract_v1_embeddings(vit, val_loader_raw,  device)
-        test_emb, test_age, test_sex, test_lbl = extract_v1_embeddings(vit, test_loader_raw, device)
+        extractor = lambda ldr: extract_v1_embeddings(vit, ldr, device)
     else:
-        visual_mode = getattr(args, "downstream_visual_mode", "cls_fg")
-        val_emb,  val_age,  val_sex,  val_lbl  = extract_v2_representations(
-            classifier, val_loader_raw,  device)
-        test_emb, test_age, test_sex, test_lbl = extract_v2_representations(
-            classifier, test_loader_raw, device)
+        extractor = lambda ldr: extract_v2_representations(classifier, ldr, device)
 
-    val_loader  = DataLoader(EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl),
-                             batch_size=args.batch_size, shuffle=False)
-    test_loader = DataLoader(EmbeddingDataset(test_emb, test_age, test_sex, test_lbl),
-                             batch_size=args.batch_size, shuffle=False)
+    # ── Pre-compute val (always) + test/BTXRD (only when requested) reprs ──────
+    print("Pre-computing val representations...")
+    val_emb, val_age, val_sex, val_lbl = extractor(val_loader_raw)
+    val_loader = DataLoader(EmbeddingDataset(val_emb, val_age, val_sex, val_lbl),
+                            batch_size=args.batch_size, shuffle=False)
+
+    # Test/BTXRD are held out during sweeps: only built when --eval_test is set.
+    test_loader = None
+    btxrd_loader = None
+    if args.eval_test:
+        print("Pre-computing test representations...")
+        test_loader, n_test = _precompute_repr_loader(
+            splits["test"], age_mean, age_std, preprocess_val,
+            args, extractor, device, label_to_idx,
+        )
+        print(f"Test samples: {n_test}")
+        if args.btxrd_manifest:
+            print(f"Pre-computing BTXRD representations from {args.btxrd_manifest}...")
+            with open(args.btxrd_manifest, encoding="utf-8") as fh:
+                btxrd_samples = json.load(fh)
+            btxrd_loader, n_btxrd = _precompute_repr_loader(
+                btxrd_samples, age_mean, age_std, preprocess_val,
+                args, extractor, device, label_to_idx,
+            )
+            print(f"BTXRD samples: {n_btxrd}")
 
     # ── Class weights and loss ────────────────────────────────────────────────
     train_labels_all = torch.tensor(
@@ -518,12 +531,22 @@ def main(args: argparse.Namespace) -> None:
 
     out_dir = Path(args.out_dir) / f"lace_{args.version}_downstream"
     out_dir.mkdir(parents=True, exist_ok=True)
-    run_id    = (wandb.run.id if use_wandb and wandb.run else None) or "local"
-    ckpt_path = out_dir / f"best_{run_id}.pt"
+    # Identifiable, non-clobbering checkpoint name: timestamp (+ wandb id when
+    # present). --run_name overrides for a fixed, human-chosen name.
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    wandb_id  = wandb.run.id if use_wandb and wandb.run else None
+    tag       = args.run_name or (f"{run_stamp}_{wandb_id}" if wandb_id else run_stamp)
+    ckpt_path = out_dir / f"best_{tag}.pt"
+    print(f"Head checkpoint → {ckpt_path}")
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    best_val_loss    = float("inf")
-    patience_counter = 0
+    # Checkpoint + early stopping stay on val_loss (smooth, and its confounds —
+    # focal_gamma/class_weighting/label_smoothing/batch_size — are fixed within a
+    # run). val/f1_macro is logged for cross-run selection but does not drive
+    # checkpointing (it is discrete/noisy on a small val set).
+    best_val_loss     = float("inf")
+    best_val_f1_macro = 0.0
+    patience_counter  = 0
     print(f"\nTraining for {args.epochs} epochs (patience={args.patience})\n")
 
     for epoch in range(1, args.epochs + 1):
@@ -534,16 +557,18 @@ def main(args: argparse.Namespace) -> None:
 
         val_loss, val_acc, val_preds, val_labels = evaluate(trainable_model, val_loader, criterion, device)
         val_bal_acc       = balanced_accuracy_score(val_labels, val_preds)
+        val_f1_macro      = f1_score(val_labels, val_preds, average="macro")
         val_weighted_prec, val_weighted_rec, _, _ = precision_recall_fscore_support(
             val_labels, val_preds, average="weighted", zero_division=0
         )
         val_combined_acc = 0.5 * val_acc + 0.5 * val_bal_acc
+        best_val_f1_macro = max(best_val_f1_macro, val_f1_macro)
 
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
             f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
             f"val_acc={val_acc:.3f} | val_bal_acc={val_bal_acc:.3f} | "
-            f"val_combined_acc={val_combined_acc:.3f}"
+            f"val_f1_macro={val_f1_macro:.3f} | val_combined_acc={val_combined_acc:.3f}"
         )
         if use_wandb:
             wandb.log({
@@ -551,10 +576,13 @@ def main(args: argparse.Namespace) -> None:
                 "val/loss": val_loss,
                 "val/acc": val_acc,
                 "val/balanced_acc":        val_bal_acc,
+                "val/f1_macro":            val_f1_macro,
                 "val/precision_weighted":  val_weighted_prec,
                 "val/recall_weighted":     val_weighted_rec,
                 "val/combined_acc":        val_combined_acc,
             }, step=epoch)
+            # summary metric the sweep ranks configs by (best epoch's macro-F1)
+            wandb.run.summary["val/best_f1_macro"] = best_val_f1_macro
 
         if val_loss < best_val_loss:
             best_val_loss    = val_loss
@@ -563,7 +591,15 @@ def main(args: argparse.Namespace) -> None:
                 "epoch": epoch,
                 "version": args.version,
                 "val_loss": val_loss,
+                "run_stamp": run_stamp,
+                "wandb_id": wandb_id,
                 "model_state_dict": trainable_model.state_dict(),
+                # everything needed to rebuild + evaluate this head standalone
+                # (see lace_downstream_eval.py): architecture/loss hyperparameters,
+                # the backbone checkpoint path, and the train age-normalization.
+                "args": vars(args),
+                "age_mean": age_mean,
+                "age_std":  age_std,
             }, ckpt_path)
         else:
             patience_counter += 1
@@ -571,65 +607,53 @@ def main(args: argparse.Namespace) -> None:
                 print(f"Early stopping at epoch {epoch} (no improvement for {args.patience} epochs).")
                 break
 
-    # ── Test evaluation ───────────────────────────────────────────────────────
+    # ── Restore best-val-loss checkpoint ──────────────────────────────────────
     trainable_model.load_state_dict(
         torch.load(ckpt_path, map_location=device, weights_only=False)["model_state_dict"]
     )
-    test_loss, test_acc, test_preds, test_labels = evaluate(trainable_model, test_loader, criterion, device)
-    label_names    = [idx_to_label[i] for i in range(num_classes)]
-    present_labels = sorted(set(test_labels.tolist()) | set(test_preds.tolist()))
-    present_names  = [label_names[i] for i in present_labels]
 
-    print("\n" + "=" * 60)
-    print("TEST RESULTS")
-    print("=" * 60)
-    print(f"Loss: {test_loss:.4f}  |  Accuracy: {test_acc:.3f}")
-    print(f"Balanced accuracy: {balanced_accuracy_score(test_labels, test_preds):.3f}")
-    print(f"Macro F1: {f1_score(test_labels, test_preds, average='macro'):.3f}")
-    test_weighted_prec, test_weighted_rec, _, _ = precision_recall_fscore_support(
-        test_labels, test_preds, average="weighted", zero_division=0
-    )
-    print(f"Weighted Precision: {test_weighted_prec:.3f}  |  Weighted Recall: {test_weighted_rec:.3f}")
-    print()
-    print(classification_report(
-        test_labels, test_preds,
-        labels=present_labels,
-        target_names=present_names,
-        digits=3, zero_division=0,
-    ))
-    print("Confusion matrix (rows=true, cols=pred):")
-    import pandas as pd
-    print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=present_labels),
-        index=present_names, columns=present_names,
-    ).to_string())
+    # Metrics returned to callers (e.g. the k-fold CV orchestrator).
+    results: dict = {
+        "val/best_loss":     best_val_loss,
+        "val/best_f1_macro": best_val_f1_macro,
+    }
+
+    # ── Held-out evaluation (only when --eval_test) ───────────────────────────
+    log_dict: dict = {}
+    if args.eval_test and test_loader is not None:
+        test_loss, _, test_preds, test_labels = evaluate(
+            trainable_model, test_loader, criterion, device
+        )
+        test_metrics = _report_eval(
+            "TEST", test_preds, test_labels, test_loss,
+            idx_to_label, num_classes, prefix="test",
+        )
+        results.update(test_metrics)
+        log_dict.update(test_metrics)
+        # raw per-sample predictions for pooled out-of-fold CV scoring
+        # (consumed by lace_downstream_cv.py; ignored by single-run callers)
+        results["test/_preds"]  = test_preds.tolist()
+        results["test/_labels"] = test_labels.tolist()
+
+    if args.eval_test and btxrd_loader is not None:
+        btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(
+            trainable_model, btxrd_loader, criterion, device
+        )
+        btxrd_metrics = _report_eval(
+            "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
+            idx_to_label, num_classes, prefix="btxrd",
+        )
+        results.update(btxrd_metrics)
+        log_dict.update(btxrd_metrics)
 
     if use_wandb:
-        test_bal_acc = balanced_accuracy_score(test_labels, test_preds)
-        test_prec, test_rec, test_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, average="macro", zero_division=0
-        )
-        per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=present_labels, zero_division=0
-        )
-        log_dict = {
-            "test/loss": test_loss, "test/acc": test_acc,
-            "test/balanced_acc": test_bal_acc,
-            "test/precision_macro":    test_prec,
-            "test/recall_macro":       test_rec,
-            "test/precision_weighted": test_weighted_prec,
-            "test/recall_weighted":    test_weighted_rec,
-            "test/f1_macro":           test_f1,
-        }
-        for i, name in enumerate(present_names):
-            log_dict[f"test/precision_{name}"] = per_class_prec[i]
-            log_dict[f"test/recall_{name}"]    = per_class_rec[i]
-            log_dict[f"test/f1_{name}"]        = per_class_f1[i]
-        wandb.log(log_dict)
+        if log_dict:
+            wandb.log(log_dict)
         wandb.finish()
 
-    print(f"\nBest val loss: {best_val_loss:.4f}")
-    print(f"Checkpoints saved to: {out_dir}")
+    print(f"\nBest val loss: {best_val_loss:.4f} | best val macro-F1: {best_val_f1_macro:.4f}")
+    print(f"Head checkpoint saved to: {ckpt_path}")
+    return results
 
 
 # ── Argparse ─────────────────────────────────────────────────────────────────
@@ -649,6 +673,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--splits",     required=True,
                         help="Path to splits.json produced by LACE pretraining.")
     parser.add_argument("--out_dir",    default=str(DEFAULT_OUT_DIR))
+    parser.add_argument("--run_name",   default=None,
+                        help="Override the head-checkpoint name (best_<run_name>.pt). "
+                             "Default is a timestamp (+ wandb id), so runs never clobber each other.")
 
     # ── Training ──────────────────────────────────────────────────────────────
     parser.add_argument("--epochs",         type=int,   default=50)
@@ -680,6 +707,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--image_size", type=int, default=224,
                         help="Input resolution (default 224). ViT-B/16 supports arbitrary "
                              "sizes via pos-embedding interpolation.")
+
+    # ── Held-out evaluation ────────────────────────────────────────────────────
+    parser.add_argument("--eval_test", action="store_true",
+                        help="Evaluate the split's held-out test set after training. "
+                             "Off by default so hyperparameter sweeps never touch test/BTXRD.")
+    parser.add_argument("--btxrd_manifest", default=None,
+                        help="Optional path to a BTXRD downstream manifest JSON (built by "
+                             "build_btxrd_downstream.py). When set together with --eval_test, "
+                             "BTXRD is evaluated as an external test set using the train age stats.")
 
     # ── Data ──────────────────────────────────────────────────────────────────
     parser.add_argument("--binary", action="store_true",

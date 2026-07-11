@@ -1,7 +1,10 @@
 # Downstream Evaluation Plan: Sweep Metric + K-Fold CV + BTXRD External Test
 
-Status: **plan / not yet implemented**. This file records the methodology decisions
-(agreed during design) and the concrete implementation steps.
+Status: **implemented** (2026-07-09). This file records the methodology decisions
+(agreed during design) and the concrete implementation steps. Verified: BTXRD
+manifest builds (1867 samples, masks aligned), 5 CV folds generate with no
+patient leakage, downstream imports + per-fold arg wiring work. Not yet run:
+full SLURM training (needs GPU + pretrain checkpoint).
 
 ---
 
@@ -36,20 +39,31 @@ Status: **plan / not yet implemented**. This file records the methodology decisi
   unbiased estimate of generalization** for the chosen config. The sweep's
   select-the-max optimism inflates only the internal-val estimate, not BTXRD.
 
-### 1.3 Final evaluation = 5-fold CV on internal + fixed external BTXRD test
+### 1.3 Final evaluation = 10-fold CV on internal + fixed external BTXRD test
 - **BTXRD is excluded from LACE pretraining** (user will enforce) → clean
   external held-out test, no representation leakage.
 - Take the winning hyperparameters from the sweep and **hold them fixed** across
-  all 5 folds (no per-fold re-sweeping — may revisit later as nested CV).
-- 5-fold CV over the **internal** dataset. Each fold file has its own
-  `train` / `val` / `test`:
-  - `val` drives within-fold early stopping + checkpoint (`val_loss`).
-  - `test` = the held-out internal fold.
-- For **each** of the 5 fold-models, evaluate on **both** its internal `test`
+  all 10 folds (no per-fold re-sweeping — may revisit later as nested CV).
+- **10-fold** (not 5): test fold = 1/k, so 10 folds give test ≈ 0.1, val ≈ 0.1,
+  train ≈ 0.8 — preserving the current split ratio (user's priority: keep train
+  large). 5-fold would have forced test = 0.2 / train = 0.7. Each fold file has
+  its own `train` / `val` / `test`; `val` drives within-fold early stopping +
+  checkpoint (`val_loss`); `test` = the held-out internal fold. The 10 test folds
+  **tile the whole dataset** (verified: 921 samples, each tested exactly once).
+- For **each** of the 10 fold-models, evaluate on **both** its internal `test`
   split **and** the single frozen **BTXRD** manifest.
-- **Report mean ± std across the 5 folds** for internal-test and for BTXRD
-  (choice **A**). Do **not** pick a single fold. (Ensemble option B not pursued.)
-- Metric reported: macro-F1 (plus the usual balanced acc / per-class P/R/F1).
+- **Internal reporting — PRIMARY = pooled out-of-fold (OOF) macro-F1**:
+  concatenate all 10 folds' test predictions into one 921-length vector (each
+  sample predicted once, by a model that never trained on it) → a single
+  macro-F1 over all 921. This is more stable than averaging 10 small-fold F1s
+  (macro-F1 is nonlinear) and is *not* contamination (OOF ⇒ no train/test
+  overlap per prediction). SECONDARY = per-fold macro-F1 **mean ± std** as a
+  stability indicator.
+- **BTXRD reporting** = **mean ± std** over the 10 fold-heads (each scores all of
+  BTXRD). Ensemble (soft-voting) considered but **not pursued for now**.
+- Residual caveat (accepted): hyperparameters were tuned on `split_binary.json`'s
+  val, now pooled into CV → mild flat-CV optimism, equal for pooled and per-fold.
+  Full fix = nested CV (deferred).
 
 ---
 
@@ -100,6 +114,15 @@ Status: **plan / not yet implemented**. This file records the methodology decisi
   `train`/`val`/`test` in the existing sample-dict schema. Reuse the label
   filtering + patient-grouping conventions from `build_stratified_splits`
   (avoid patient leakage across folds if `patid` grouping is used there).
+
+### 2.4b Pooled OOF wiring (added after 10-fold decision)
+- `downstream.main` returns the internal-test `preds`/`labels` (`test/_preds`,
+  `test/_labels`) alongside scalar metrics so folds can be pooled.
+- `lace_downstream_cv.py` peels those off each fold, concatenates them, and
+  computes the **pooled** `test_pooled/*` metrics (primary) via `_report_eval`;
+  per-fold scalars still aggregate to mean ± std (secondary); BTXRD stays
+  mean ± std. All three written to `cv_results.json`
+  (`pooled_oof_internal`, `per_fold`, `aggregate`).
 
 ### 2.5 `src/lace_downstream_cv.py` (new — the k-CV orchestrator)
 - Args: `--checkpoint`, `--cv_dir` (or explicit `--splits` list of 5),

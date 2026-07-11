@@ -26,29 +26,29 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # ── Model ─────────────────────────────────────────────────────────────────────
+# Reproduction of sweep run: cls_fg / run_20260707_164235 / split_binary.json
 IMAGE_SIZE=224          # 224 = default | 512 = CheXFound-equivalent resolution
 USE_MASK=true           # apply lesion-mask cropping to input images (else the full image is just resized)
 VERSION=v2              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
 VISUAL_MODE=cls_fg      # cls [B,512] | fg [B,512] | cls_fg [B,1024]
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260708_153804/best_retrieval_checkpoint.pt 
-# # results/lace_v2_pretrain/run_20260624_121345/best_checkpoint.pt  run_20260702_130249 run_20260707_164235 
-SPLITS=$home_dir/Project/data/internal_dataset/test/split_binary_backup.json
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260707_164235/best_retrieval_checkpoint.pt
+SPLITS=$home_dir/Project/data/internal_dataset/split_binary.json
 BINARY=true            # true = benign vs malignant only (intermediate skipped)
 # # ── Training ──────────────────────────────────────────────────────────────────
-EPOCHS=50
+EPOCHS=100
 PATIENCE=10
-BATCH_SIZE=16
-LR=0.00009447014464909024
-WEIGHT_DECAY=0.01
+BATCH_SIZE=32
+LR=1.381703730306111e-05
+WEIGHT_DECAY=0.3
 DROPOUT=0.3
 HEAD=mlp_no_meta                # linear | mlp (with age/sex meta) | mlp_no_meta
 META_EMBED_DIM=32
-HIDDEN_DIMS="64"                 # only used for mlp heads
+HIDDEN_DIMS="256 128"            # only used for mlp heads
 
 # # ── Loss ──────────────────────────────────────────────────────────────────────
 LOSS=focal
-CLASS_WEIGHTING=inverse    # none | inverse | sqrt | effective
-FOCAL_GAMMA=3.05351237670772
+CLASS_WEIGHTING=effective  # none | inverse | sqrt | effective
+FOCAL_GAMMA=3.113830210900318
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -76,4 +76,5 @@ python $home_dir/Project/src/lace_downstream.py \
     --seed                   $SEED \
     --wandb \
     --wandb_project lace-downstream \
-    --wandb_entity  philipp-wiese
+    --wandb_entity  philipp-wiese \
+    --eval_test 

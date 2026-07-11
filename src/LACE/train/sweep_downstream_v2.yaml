@@ -4,8 +4,8 @@ entity: philipp-wiese
 method: bayes
 run_cap: 30
 metric:
-  name: val/loss
-  goal: minimize
+  name: val/best_f1_macro
+  goal: maximize
 
 parameters:
   head:

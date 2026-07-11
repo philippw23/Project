@@ -32,7 +32,7 @@ TWO_STAGE=false    # true = two-stage (atomic extract → classify+rank); false 
 if [ "$TWO_STAGE" = "true" ]; then
     OUTPUT=$home_dir/Project/data/internal_dataset/text/full_reports_two_stage.json
 else
-    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_14B_260708_1029.json
+    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_14B_260710_1406.json
 fi
 
 # Run the extractor

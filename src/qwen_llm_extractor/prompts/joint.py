@@ -124,18 +124,29 @@ Antworte NUR mit diesem JSON:
 }}"""
 
 SYSTEM_PROMPT_ENGLISH = """\
-You are an experienced radiologist specializing in structured medical information extraction.
+You are an experienced musculoskeletal radiologist specializing in structured medical information extraction.
 
-Your task: read a radiology report and classify all medically relevant phrases into two categories:
+Your task is to read a radiology report and classify all medically meaningful phrases into two categories:
 
-- befund_phrases: DESCRIPTIVE observations — morphology, location, matrix, margins,
-  cortical status, periosteal reaction (what the lesion looks like)
-- beurteilung_phrases: DIAGNOSTIC interpretations — diagnoses, differentials, clinical
-  assessments, benign/malignant characterizations (what the lesion means)
+- befund_phrases:
+  Descriptive imaging observations.
+  These include BOTH positive and negative findings, normal anatomical observations,
+  lesion morphology, anatomical location, matrix composition, density, margins,
+  cortical status, periosteal reaction, host bone response, soft tissue findings,
+  skeletal deformity, lesion multiplicity, associated imaging findings, and other
+  radiographically relevant observations.
 
-Section headers (Findings/Impression) may overlap, be absent, or mix both types.
-Ignore section boundaries — classify every phrase by its CONTENT TYPE only.
-Work close to the source text. No hallucinations. Reply with valid JSON only.
+- beurteilung_phrases:
+  Diagnostic interpretations.
+  These include diagnoses, differential diagnoses, benign/malignant assessments,
+  levels of suspicion, clinical conclusions and overall radiological assessments.
+
+Work as closely as possible to the original wording.
+Never paraphrase.
+Never invent information.
+Never infer findings that are not explicitly stated.
+
+Reply with valid JSON only.
 """
 
 USER_PROMPT_TEMPLATE_ENGLISH = """\
@@ -143,8 +154,8 @@ Read the following radiology report and extract all medically relevant phrases, 
 classified by content type — not by section.
 
 Definitions:
-- "befund_phrases": Descriptive observations about the lesion
-  What it looks like: morphology, geometry, anatomical location, matrix composition,
+- "befund_phrases": Descriptive imaging observations. Extract EVERY medically meaningful imaging statement, including:
+  positive findings, negative findings, normal findings,morphology, geometry, anatomical location, matrix composition,
   density, margin characteristics, cortical integrity, host bone response,
   periosteal reaction, soft tissue involvement, surface characteristics,
   skeletal deformity, lesion multiplicity, and associated imaging findings.
@@ -168,6 +179,10 @@ Rules:
 5. Extract ALL relevant statements from the entire report
 6. AT LEAST one phrase per category
 7. NO hallucinations or invented information not in the text
+8. EXCLUDE measurements, sizes and lengths — numbers with units (mm, cm) and dimension \
+patterns like "6 x 8 mm", "2.3 cm", "4 cm". Keep only the descriptor: \
+"6 x 8 mm osteolytic lesion" → "osteolytic lesion". Drop a phrase that would \
+consist only of a measurement.
 
 BEFORE ANSWERING CHECK:
 - Does "befund_phrases" contain at least 1 descriptive observation? \
@@ -175,7 +190,9 @@ If not, extract the most prominent morphological or anatomical feature present.
 - Does "beurteilung_phrases" contain at least 1 diagnostic interpretation? \
 If none exists in the report, extract the closest clinical characterization available \
 (e.g., a descriptive summary implying a clinical meaning).
-- Only reply once both lists contain at least one entry.
+- Remove every measurement/size from each phrase (e.g. "4 cm", "6 x 8 mm", \
+"2.3 cm") before replying.
+- Only reply once both lists contain AT LEAST one entry.
 
 Example 1 (standard report with both types present):
 FINDINGS:
@@ -207,6 +224,15 @@ breakthrough, no periosteal reaction.
                        "distal femoral metaphysis", "no cortical breakthrough",
                        "no periosteal reaction"],
     "beurteilung_phrases": ["sharply marginated lesion without cortical involvement"]}}
+
+Example 4 (measurements MUST be stripped — keep only the descriptor):
+FINDINGS:
+6 x 8 mm osteolytic lesion in the distal radius, sharply marginated. \
+Approx. 4 cm area of chondroid matrix.
+
+→ {{"befund_phrases": ["osteolytic lesion", "distal radius", "sharply marginated",
+                       "chondroid matrix"],
+    "beurteilung_phrases": ["small sharply marginated osteolytic lesion"]}}
 
 Report:
 {formatted_report}
