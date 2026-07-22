@@ -15,12 +15,12 @@ LORA_LAYERS=6
 LORA_R=8
 LORA_ALPHA=32
 EMBED_DIM=512
-UNFREEZE_LAYERS=4          # 0 = use LoRA | >0 = full fine-tune last N ViT blocks (overrides LoRA, biomedclip only)
+UNFREEZE_LAYERS=6          # 0 = use LoRA | >0 = full fine-tune last N ViT blocks (overrides LoRA, biomedclip only)
 N_MASK_TOKENS=1
 N_MASK_HEADS=16
 GAUSS_SIGMA=4.5
-MASK_HEAD_TAU=0.03
-SIM_ATTN_TAU=0.05
+MASK_HEAD_TAU=0.03 # shared soft-assignment temp for mask heads; sweep {0.01, 0.03, 0.05}
+SIM_ATTN_TAU=0.05 # shared soft-assignment temp for similarity attention; sweep {0.01, 0.05, 0.1}
 WARM_START_PROJECTIONS=true
 
 # ── Evidence prototype space (LGDEA) — used when "evid" is in LOSSES ──────────
@@ -44,7 +44,7 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # Standard is 0.15
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
-STAGE1_EPOCHS=0           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 10
+STAGE1_EPOCHS=18           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 10
 EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 16
 PATIENCE=20
 
@@ -68,11 +68,11 @@ LAMBDA_REC=1.0
 LAMBDA_EVID=1.0
 
 # ── Soft-target / t2i ────────────────────────────────────────────────────────
-TAU_S_BEUR=0.03
-TAU_S_BEF=0.03
-TAU_S_IMG_FULL=0.03
+TAU_S_BEUR=0.0325
+TAU_S_BEF=0.038
+TAU_S_IMG_FULL=0.028
 LAMBDA_T2I=0.5
-SAME_IMAGE_BOOST=10.0
+SAME_IMAGE_BOOST=20.0
 REWEIGHT_BY_N_PHRASES=true
 T2I_MODE=image_image  #image_image | "text_text" | "descriptor" | "infonce"
 
@@ -99,7 +99,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/lace_pretrain_v2.py \
     --image_encoder     $IMAGE_ENCODER \
-    --splits            $home_dir/Project/data/internal_dataset/test/split_binary_backup.json \
+    --splits            $home_dir/Project/data/internal_dataset/split_binary_final.json \
     --btxrd_images      $home_dir/Project/data/BTXRD/images \
     --btxrd_annots      $home_dir/Project/data/BTXRD/Annotations \
     --out_dir           $home_dir/Project/results \

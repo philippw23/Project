@@ -30,7 +30,7 @@ def evaluate_retrieval_lace(
     img_embs, txt_embs = [], []
 
     for batch in val_loader:
-        img = batch.get("full_image", batch.get("crop_image")).to(device)
+        img = batch.get("input_image", batch.get("crop_image")).to(device)
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             z_img = vit.forward_cls(img)                        # [B, D]

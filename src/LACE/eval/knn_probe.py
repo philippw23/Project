@@ -19,7 +19,7 @@ def _embed_cls(vit: SharedViT, loader: DataLoader, device: torch.device):
     """
     embs, labels = [], []
     for batch in loader:
-        img = batch.get("full_image", batch.get("crop_image")).to(device)
+        img = batch.get("input_image", batch.get("crop_image")).to(device)
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             z = vit.forward_cls(img)                     # [B, D]
         embs.append(z.float().cpu())

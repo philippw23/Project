@@ -18,5 +18,5 @@ conda activate $MY_CONDA_ENV
 
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 $python_path $home_dir/Project/src/create_dataset.py \
-    --reports_path $home_dir/Project/data/internal_dataset/text/full_reports_backup.json \
-    --output_path $home_dir/Project/data/internal_dataset/dataset_full_backup.json
+    --reports_path $home_dir/Project/data/internal_dataset/test/full_reports_14B_260714_1053.json \
+    --output_path $home_dir/Project/data/internal_dataset/dataset_full_14B_260714_1053.json

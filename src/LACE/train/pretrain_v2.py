@@ -105,9 +105,12 @@ _DEFAULT_LOSS_STAGES = {
     "evid":  {2},
 }
 
+# Losses active by default (when --loss_stages is not given), each using its
+# _DEFAULT_LOSS_STAGES assignment; rec/evid stay off.
+_DEFAULT_ACTIVE_LOSSES = ("ita", "sim", "ortho", "dice")
+
 
 def build_loss_stage_map(
-    losses: list[str] | None,
     loss_stages: list[str] | None,
 ) -> dict[str, set[int]]:
     """Map each stageable loss to the set of curriculum stages it is active in.
@@ -115,11 +118,11 @@ def build_loss_stage_map(
     Keys: ita, sim, ortho, dice, rec (=L_rec), evid (=L_evid_p). An empty set
     disables the loss in every stage.
 
-    If ``loss_stages`` is given it is authoritative — each token is "NAME:STAGES"
+    ``loss_stages`` assigns each loss explicitly — each token is "NAME:STAGES"
     (or NAME=STAGES) where STAGES is a comma/space list drawn from {1, 2}, or
-    0/none to disable; unlisted losses are off. Otherwise the map is derived from
-    ``losses`` using the default 2-stage curriculum, where the 'evid' selector
-    expands to both 'rec' and 'evid'.
+    0/none to disable; unlisted losses are off. When ``loss_stages`` is not
+    given, the default 2-stage curriculum is used (ita/sim in stage 2,
+    ortho/dice in stages 1+2, rec/evid off).
     """
     m: dict[str, set[int]] = {k: set() for k in _STAGEABLE_LOSSES}
     if loss_stages:
@@ -145,13 +148,8 @@ def build_loss_stage_map(
             m[name] = s
         return m
 
-    sel = set(losses or [])
-    for k in ("ita", "sim", "ortho", "dice"):
-        if k in sel:
-            m[k] = set(_DEFAULT_LOSS_STAGES[k])
-    if "evid" in sel:
-        m["rec"]  = set(_DEFAULT_LOSS_STAGES["rec"])
-        m["evid"] = set(_DEFAULT_LOSS_STAGES["evid"])
+    for k in _DEFAULT_ACTIVE_LOSSES:
+        m[k] = set(_DEFAULT_LOSS_STAGES[k])
     return m
 
 
@@ -269,7 +267,7 @@ def train_one_epoch(
     zero = torch.zeros(1, device=device)[0]
 
     for batch in pbar:
-        img      = batch["full_image"].to(device)    # [B, 3, 224, 224]
+        img      = batch["input_image"].to(device)    # [B, 3, 224, 224]
         plabels  = batch["patch_labels"].to(device)  # [B, 196]  float32, soft coverage
         has_mask = batch["has_mask"].to(device)      # [B,]  bool
         has_bef  = batch["has_befund"].to(device)    # [B,]  bool
@@ -485,7 +483,7 @@ def evaluate(
     zero = torch.zeros(1, device=device)[0]
 
     for batch in val_loader:
-        img      = batch["full_image"].to(device)
+        img      = batch["input_image"].to(device)
         plabels  = batch["patch_labels"].to(device)
         has_mask = batch["has_mask"].to(device)
         has_bef  = batch["has_befund"].to(device)
@@ -690,7 +688,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     parser.add_argument("--splits", default=str(DEFAULT_SPLITS),
                         help="Path to split.json. Pass '' to generate from --dataset.")
-    parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON))
+    #parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON))
     parser.add_argument("--btxrd_images", default=str(DEFAULT_BTXRD_IMAGES))
     parser.add_argument("--btxrd_annots", default=str(DEFAULT_BTXRD_ANNOTS))
     parser.add_argument("--out_dir", default=str(DEFAULT_OUT_DIR))
@@ -732,8 +730,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "average of projected patches.")
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    parser.add_argument("--batch_size",       type=int, default=32)
-    parser.add_argument("--btxrd_batch_size", type=int, default=16)
+    parser.add_argument("--batch_size",       type=int, default=128)
+    parser.add_argument("--btxrd_batch_size", type=int, default=128)
     parser.add_argument("--max_text_len",      type=int, default=128)
     parser.add_argument("--max_beur_text_len", type=int, default=256,
                         help="Tokenisation length for full beurteilung text (mixed mode).")
@@ -771,19 +769,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--lambda_evid",  type=float, default=1.0)
     parser.add_argument("--learn_loss_weights", action="store_true", default=False,
                         help="Make all log-lambda weights learnable parameters.")
-    parser.add_argument("--losses", nargs="+",
-                        default=["ita", "sim", "ortho", "dice"],
-                        choices=["ita", "sim", "ortho", "dice", "evid"],
-                        help="Which loss terms to include, using the DEFAULT curriculum "
-                             "(dice/ortho/rec in stages 1+2; ita/sim/evid_p in stage 2). "
-                             "The 'evid' selector expands to both L_rec and L_evid_p. "
-                             "Ignored when --loss_stages is given.")
     parser.add_argument("--loss_stages", nargs="+", default=None,
-                        help="Per-loss stage assignment, authoritative over --losses when set. "
-                             "Tokens are NAME:STAGES (or NAME=STAGES) where NAME is one of "
-                             "ita, sim, ortho, dice, rec (=L_rec), evid (=L_evid_p), and STAGES "
-                             "is a comma/space list from {1,2} or 0/none to disable. Unlisted "
-                             "losses are off. Example: "
+                        help="Per-loss stage assignment. Tokens are NAME:STAGES (or "
+                             "NAME=STAGES) where NAME is one of ita, sim, ortho, dice, "
+                             "rec (=L_rec), evid (=L_evid_p), and STAGES is a comma/space "
+                             "list from {1,2} or 0/none to disable. Unlisted losses are off. "
+                             "When omitted, the default curriculum is used (ita/sim in "
+                             "stage 2, ortho/dice in stages 1+2, rec/evid off). Example: "
                              "--loss_stages dice:1,2 ortho:1,2 rec:1 ita:2 evid:2")
 
     # ── Evidence prototype space (LGDEA-style) ─────────────────────────────────
@@ -1063,7 +1055,7 @@ def main(args: argparse.Namespace) -> None:
     if args.wandb and not WANDB_AVAILABLE:
         warnings.warn("--wandb set but wandb is not installed. Skipping.")
     if use_wandb:
-        wandb.init(
+        run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.wandb_run,
@@ -1077,7 +1069,7 @@ def main(args: argparse.Namespace) -> None:
     val_loss          = float("inf")
     stage1_end        = args.stage1_epochs   # 0 means skip directly to stage 2
 
-    loss_stage_map = build_loss_stage_map(args.losses, args.loss_stages)
+    loss_stage_map = build_loss_stage_map(args.loss_stages)
     active_losses  = {k for k, v in loss_stage_map.items() if v}
     stage_desc = ", ".join(
         f"{k}:{sorted(loss_stage_map[k]) or 'off'}" for k in _STAGEABLE_LOSSES

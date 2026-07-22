@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=lace_downstream_eval
+#SBATCH --job-name=gloria_downstream_eval
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=01:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_lace_downstream_eval.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_gloria_downstream_eval.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -25,15 +25,15 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # All architecture/loss hyperparameters + the backbone path + train age-stats are
-# read from the head checkpoint itself — only the checkpoint and the test split are
-# needed. Optional: --btxrd_manifest to also score BTXRD; --checkpoint to override
-# the backbone path if the pretrain checkpoint has moved. best_20260715_065428_quk9bzds
-HEAD_CHECKPOINT=$home_dir/Project/results/lace_v2_downstream/best_20260721_180534_xji0luc2.pt   # <-- set this
-SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json
+# read from the head checkpoint itself. Optional: --btxrd_manifest to also score
+# BTXRD (requires the head to have been trained with --binary); --checkpoint to
+# override the GLoRIA backbone path if the pretrain checkpoint has moved.
+HEAD_CHECKPOINT=$home_dir/Project/results/gloria_downstream/run_.../best_head.pt   # <-- set this
+SPLITS=$home_dir/Project/data/internal_dataset/split_binary.json
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # ─────────────────────────────────────────────────────────────────────────────
 
-python $home_dir/Project/src/lace_downstream_eval.py \
+python $home_dir/Project/src/gloria_downstream_eval.py \
     --head_checkpoint $HEAD_CHECKPOINT \
     --splits          $SPLITS \
     --btxrd_manifest  $BTXRD_MANIFEST

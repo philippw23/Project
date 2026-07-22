@@ -116,9 +116,13 @@ def make_classification_eval_transform(
 # ── Local downstream helpers (kept for chexfound_downstream.py) ──────────────
 
 def build_preprocess_val_chexfound(image_size: int = 512) -> transforms.Compose:
-    resize_size = int(image_size * 256 / 224)  # maintain the same resize→crop ratio
+    # No resize→crop overshoot: resize the short edge to image_size and take the
+    # centre square. The upstream 256/224 overshoot suits DINOv2's wide
+    # RandomResizedCrop scale=(0.08, 1.0); build_train_transform_chexfound below
+    # uses scale=(0.8, 1.0), so an overshoot would only add a train/test scale
+    # mismatch. Keep resize == crop.
     return transforms.Compose([
-        transforms.Resize(resize_size, interpolation=InterpolationMode.BICUBIC),
+        transforms.Resize(image_size, interpolation=InterpolationMode.BICUBIC),
         transforms.CenterCrop(image_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),

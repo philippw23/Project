@@ -1,6 +1,8 @@
 # Lesion-Grounded Vision-Language Classification of Bone Tumor Malignancy
 
-Domain-adapts [BiomedCLIP](https://huggingface.co/microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224) on a bone-tumor X-ray dataset via contrastive pretraining with LoRA, then trains a downstream MLP classifier for 3-class malignancy prediction (benign / intermediate / malignant).
+Domain-adapts vision-language and vision-only models to a private bone-tumor X-ray dataset, then trains a downstream MLP classifier for malignancy prediction (3-class benign / intermediate / malignant, or binary benign / malignant against the external [BTXRD](data/BTXRD) test set).
+
+Implements **LACE** (Lesion-Aligned Contrastive Embedding) — a novel curriculum-learning pretraining approach developed in this project — alongside baselines built on [BiomedCLIP](https://huggingface.co/microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224), **CheXFound** (DINO+iBOT), **GLoRIA**, a frozen **ImageNet** encoder, an image encoder trained **from scratch**, and **YOLO** repurposed as a classifier.
 
 ---
 
@@ -8,41 +10,69 @@ Domain-adapts [BiomedCLIP](https://huggingface.co/microsoft/BiomedCLIP-PubMedBER
 
 ```
 src/
-├── biomedclip/              # Core training package
-│   ├── data/                #   Dataset, splits, image transforms
-│   ├── distributed/         #   Multi-GPU (DDP) helpers
-│   ├── eval/                #   Retrieval metrics (R@1, R@5, …)
-│   ├── loss/                #   Contrastive + classification losses
-│   ├── models/              #   LoRA injection, MLP classifier head
-│   ├── train/               #   pretrain.py, downstream.py, sweep YAMLs
-│   └── utils/               #   Checkpointing, architecture printing
-├── biomedclip_pretrain.py   # Entry point → biomedclip.train.pretrain
-├── biomedclip_downstream.py # Entry point → biomedclip.train.downstream
+├── LACE/                     # Curriculum-learning pretraining (novel contribution)
+│   ├── data/                 #   Datasets, splits, transforms
+│   ├── eval/                 #   kNN probe, retrieval metrics
+│   ├── loss/                 #   L_ITA, L_sim, L_ortho, L_dice, L_evid_p, L_rec
+│   ├── models/                #   SharedViT, text encoder, LoRA, mask decoder, prototypes
+│   ├── train/                #   pretrain.py (v1), pretrain_v2.py, downstream.py, sweep YAMLs
+│   └── ARCHITECTURE.md       #   Design writeup (v1 objective, model, losses)
+├── lace_pretrain.py / lace_pretrain_v2.py     # Entry points
+├── lace_downstream.py                         # Downstream head training
+├── lace_downstream_cv.py                      # 10-fold CV + BTXRD eval orchestrator
+├── lace_downstream_eval.py                    # Score a saved head, no training
 │
-├── qwen_llm_extractor/      # LLM phrase-extraction package
-│   ├── data/                #   Report loading (joint / separated)
-│   ├── eval/                #   Phrase statistics, medbert comparison
-│   ├── extract/             #   joint.py, separated.py (pipelines)
-│   ├── models/              #   HuggingFace model loader
-│   ├── prompts/             #   Prompt templates (joint / separated)
-│   └── utils/               #   JSON repair utilities
-├── llm_extractor.py         # Entry point → qwen_llm_extractor.extract.joint
-├── llm_extractor_seperated.py # Entry point → qwen_llm_extractor.extract.separated
+├── biomedclip/                # BiomedCLIP contrastive pretraining package
+│   ├── data/ distributed/ eval/ loss/ models/ train/ utils/
+├── biomedclip_pretrain.py / biomedclip_downstream.py / biomedclip_downstream_eval.py
+├── biomedclip_zeroshot.py / biomedclip_img_text_downstream.py
 │
-├── medbert_extractor.py     # KeyBERT / MedBERT baseline phrase extractor
-├── preprocess_crop_images.py  # Mask-guided image cropping
-├── preprocess_reports.py    # Report cleaning and translation pipeline
-├── translate_reports.py     # German → English report translation
-├── build_dataset_json.py    # Assemble dataset JSON from raw sources
-└── visualize_samples.py     # Sample visualisation
+├── chexfound/                 # CheXFound DINO+iBOT continued pretraining
+├── chexfound_downstream.py / chexfound_downstream_eval.py
+│
+├── gloria/                    # GLoRIA (separate old env — see Requirements)
+├── gloria_downstream.py / gloria_pretrain.py / gloria_downstream_eval.py
+│
+├── imagenet_img/               # Frozen ImageNet ViT-B/16 linear probe
+├── imagenet_img_downstream.py / imagenet_img_downstream_eval.py
+│
+├── scratch_img/                # Image encoder trained from scratch (resnet18 | vit_tiny)
+├── scratch_img_downstream.py / scratch_img_downstream_eval.py
+├── scratch_img_text/           # + from-scratch text encoder, contrastive auxiliary loss
+│
+├── yolo/                       # YOLO-as-classifier baseline
+│   ├── data/ (bbox_from_mask, prepare_yolo_dataset) models/ train/ (train.py, downstream.py) utils/
+│
+├── qwen_llm_extractor/         # LLM phrase-extraction package (Qwen2.5-7B-Instruct)
+│   ├── data/ eval/ extract/ models/ prompts/ utils/
+├── llm_extractor.py            # Entry point → joint extraction
+├── llm_extractor_seperated.py  # Entry point → separated (befund / beurteilung) extraction
+│
+├── preprocess_images.py        # Square-pad images/masks (internal + BTXRD)
+├── preprocess_reports.py / translate_reports.py   # Report cleaning & translation
+├── create_dataset.py           # Assemble dataset_full.json
+├── create_split.py             # Patient-level stratified train/val/test split
+├── create_cv_splits.py         # Derive patient-grouped 10-fold CV pool from split.json
+├── create_split_clahe.py       # Split variant for CLAHE-enhanced YOLO images
+├── build_dataset_json.py       # Alternate dataset-assembly entry point
+├── build_btxrd_downstream.py   # Convert BTXRD into the internal sample-dict manifest format
+├── check_dataset.py            # Reports what images/masks/metadata are missing
+└── visualize_samples.py        # Sample visualisation
 
-sbatch/                      # SLURM job scripts
+sbatch/                         # SLURM job scripts, mirrors src/ (biomedclip/, lace/, chexfound/,
+                                 # gloria/, imagenet_img/, scratch/, yolo/, data/, utils/)
 data/
-├── images/                  # X-ray images
-├── segmentations/           # Bone-tumor segmentation masks
-└── text/                    # translated_reports.json, sanitized_reports.json
-results/                     # Checkpoints, CSVs, W&B artefacts
+├── internal_dataset/
+│   ├── images/ segmentations/ metadata.xlsx
+│   ├── text/                 # full_reports.json and translation/extraction variants
+│   ├── dataset_full.json     # assembled dataset
+│   ├── split.json            # canonical train/val/test manifest (split_binary.json for binary)
+│   └── cv/                   # 10-fold CV split pool
+└── BTXRD/                     # external test set (images, annotations, downstream manifest)
+results/                       # Checkpoints, CSVs, W&B artefacts (.gitignore'd)
 ```
+
+> Several dated/backup files alongside the canonical ones above (e.g. `dataset_full_14B_*.json`, `split_final.json`, `full_reports_new.json`) are scratch snapshots, not defaults — check [src/biomedclip/utils/misc.py](src/biomedclip/utils/misc.py) for the paths actually used by default.
 
 ---
 
@@ -51,30 +81,25 @@ results/                     # Checkpoints, CSVs, W&B artefacts
 ### 1 — Data preprocessing
 
 ```bash
-# Crop images around segmentation masks
-sbatch sbatch/run_check_dataset.sh
-python src/preprocess_crop_images.py
+# Check for missing images / masks / metadata
+sbatch sbatch/data/run_check_dataset.sh
+
+# Square-pad images and masks to preprocessed_images/
+sbatch sbatch/data/run_preprocess_images.sh
 
 # Translate German reports to English
-sbatch sbatch/run_translate_reports.sh
+sbatch sbatch/data/run_translate_reports.sh
 ```
 
 ### 2 — Phrase extraction (optional, for evidence-phrase experiments)
 
-**LLM-based extraction** using Qwen2.5-7B-Instruct:
+LLM-based extraction using Qwen2.5-7B-Instruct:
 ```bash
 # Joint extraction (befund + beurteilung in one prompt)
-sbatch sbatch/run_llm_extractor.sh
+sbatch sbatch/data/run_llm_extractor.sh
 
 # Separated extraction (separate prompts per section)
-python src/llm_extractor_seperated.py \
-    --reports data/text/sanitized_reports.json \
-    --out_dir results/
-```
-
-**KeyBERT / MedBERT baseline**:
-```bash
-sbatch sbatch/run_medbert_extractor.sh
+sbatch sbatch/data/run_llm_extractor_seperated.sh
 ```
 
 ### 3 — Dataset assembly & split creation
@@ -85,81 +110,101 @@ Two scripts turn the raw metadata, reports, images, and masks into a fixed patie
 ```bash
 python src/create_dataset.py
 ```
-Matches each `metadata.xlsx` row (sheet `internal_data_matched`) to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`.
+Matches each `metadata.xlsx` row to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`.
 
 **Step 2 — create `split.json`:**
 ```bash
-python src/create_split.py            # add --binary for benign-vs-malignant only
+sbatch sbatch/data/run_create_split.sh          # add --binary for benign-vs-malignant only
 ```
-Filters to entries with a report, a label, and a non-empty segmentation mask; normalises sex (m/f → 1/0, unknown → 0.5) and imputes unknown age with the training-set mean. Splits at the **patient level** (no train/val/test leakage), **stratified by each patient's majority label**, into train / val / test (default 0.8 / 0.1 / 0.1, `seed=42`). Writes `data/internal_dataset/split.json` (or `split_binary.json`) as `{train, val, test}`, each holding the full sample dicts (including extracted phrases).
+Filters to entries with a report, a label, and a non-empty segmentation mask; normalises sex (m/f → 1/0, unknown → 0.5) and imputes unknown age with the training-set mean. Splits at the **patient level** (no train/val/test leakage), **stratified by each patient's majority label**, into train / val / test (default 0.8 / 0.1 / 0.1, `seed=42`). Writes `data/internal_dataset/split.json` (or `split_binary.json`).
 
-> **Note:** `split.json` embeds the phrases copied from `dataset_full.json`. After changing phrase extraction (Stage 2), re-run **both** `create_dataset.py` and `create_split.py` for the change to take effect — editing prompts alone does not update existing splits.
+**Step 3 — (optional) create a 10-fold CV pool:**
+```bash
+sbatch sbatch/data/run_create_cv_splits.sh
+```
+Divides the existing `train` split into 8 stratified, patient-grouped parts and rotates the given `val`/`test` in as parts 9/10, writing 10 fold files to `data/internal_dataset/cv/` for cross-validated downstream evaluation.
 
-### 4 — BiomedCLIP pretraining
+> **Note:** `split.json` embeds the phrases copied from `dataset_full.json`. After changing phrase extraction, re-run **both** `create_dataset.py` and the split step for the change to take effect — editing prompts alone does not update existing splits.
 
-Fine-tunes the ViT image encoder of BiomedCLIP with LoRA using contrastive (CLIP-style) loss on (image, report) pairs. The PubMedBERT text encoder is kept frozen.
+### 4 — Pretraining
+
+Every approach fine-tunes an image encoder via a self-/weakly-supervised objective on (image, report) pairs or images alone, then freezes it for the downstream classifier.
 
 ```bash
-# Single GPU
-sbatch sbatch/run_biomedclip_pretrain.sh
+# LACE (novel curriculum approach) — v1 or v2
+sbatch sbatch/lace/run_lace_pretrain_v2.sh
 
-# Multi-GPU — edit run_biomedclip_pretrain.sh to enable torchrun block
+# BiomedCLIP contrastive (LoRA) pretraining
+sbatch sbatch/biomedclip/run_biomedclip_pretrain.sh
+
+# CheXFound continued DINO+iBOT pretraining
+sbatch sbatch/chexfound/run_chexfound_pretrain.sh
+
+# GLoRIA pretraining (own environment — see Requirements)
+sbatch sbatch/gloria/run_gloria_pretrain.sh
 ```
 
-Key arguments:
+BiomedCLIP key arguments:
 
 | Argument | Default | Description |
 |---|---|---|
 | `--lora_layers` | 4 | Number of ViT blocks to inject LoRA into (from last) |
 | `--lora_r` | 8 | LoRA rank |
-| `--lora_alpha` | 64 | LoRA scaling factor |
+| `--lora_alpha` | 16 | LoRA scaling factor |
 | `--use_mask` | off | Crop input images to segmentation mask |
-| `--epochs` | 100 | Training epochs |
-| `--lr` | 5e-5 | Learning rate |
-| `--distributed` | off | Enable multi-GPU DDP via torchrun |
+| `--epochs` | 50 | Training epochs |
+| `--lr` | 1e-4 | Learning rate |
+| `--batch_size` | 32 | Per-GPU batch size |
 
-Outputs written to `results/biomedclip_pretrain/<run>/`:
-- `best_r1_checkpoint.pt` — best checkpoint by image→text R@1
-- `splits.json` — train/val/test patient split
+LACE v2 additionally exposes `--loss_stages` to assign each loss (`ita`, `sim`, `ortho`, `dice`, `rec`, `evid`) to specific curriculum stages or disable it — see [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md) for the full objective.
 
-**Hyperparameter sweep** (W&B Bayes, optimises `retrieval/mean_r1`):
+Outputs are written to `results/<approach>_pretrain/<run>/`, typically including the best checkpoint by retrieval R@1 and the `splits.json` used.
+
+**Hyperparameter sweeps** (W&B Bayes):
 ```bash
-wandb sweep src/biomedclip/train/sweep_pretrain.yaml
-# Set SWEEP_ID in run_sweep_pretrain.sh, then:
+wandb sweep src/LACE/train/sweep_pretrain_v2.yaml     # or biomedclip/train/sweep_pretrain_lora.yaml, etc.
+# Set SWEEP_ID in the matching sbatch/run_sweep_pretrain.sh, then:
 sbatch sbatch/run_sweep_pretrain.sh
 ```
 
 ### 5 — Downstream malignancy classification
 
-Loads the frozen pretrained image encoder, appends clinical metadata (age, sex), and trains a small MLP for 3-class malignancy prediction.
+Every approach follows the same pattern: `<name>_downstream.py` loads the frozen pretrained (or, for the from-scratch/YOLO baselines, jointly-trained) encoder, appends clinical metadata (age, sex), and trains a small MLP for malignancy prediction; `<name>_downstream_eval.py` loads a saved head checkpoint and re-scores it (against a split and/or the BTXRD manifest) with no training.
 
 ```bash
-sbatch sbatch/run_biomedclip_downstream.sh
+sbatch sbatch/lace/run_lace_downstream_v2.sh
+sbatch sbatch/biomedclip/run_biomedclip_downstream.sh
+sbatch sbatch/chexfound/run_chexfound_downstream.sh
+sbatch sbatch/gloria/run_gloria_downstream.sh
+sbatch sbatch/imagenet_img/run_imagenet_img.sh
+sbatch sbatch/scratch/run_scratch_img.sh
+sbatch sbatch/scratch/run_scratch_img_text.sh
 ```
 
-Key arguments:
+Key arguments (vary slightly per approach):
 
 | Argument | Description |
 |---|---|
 | `--checkpoint` | Path to pretrain checkpoint |
-| `--splits` | Path to splits.json from pretraining |
+| `--splits` | Path to the split manifest to train/evaluate on |
 | `--use_mask` | Use mask-cropped images (should match pretraining) |
+| `--binary` | Benign-vs-malignant only (required to also score against BTXRD) |
 | `--epochs` | Fine-tuning epochs |
 
-**Hyperparameter sweep**:
+**10-fold cross-validation** (fixed hyperparameters, reports mean ± std across folds and the external BTXRD test set):
 ```bash
-wandb sweep src/biomedclip/eval/sweep_downstream.yaml
+sbatch sbatch/lace/run_lace_downstream_cv.sh
+```
+
+**Hyperparameter sweeps**:
+```bash
+wandb sweep src/LACE/train/sweep_downstream_v2.yaml
 sbatch sbatch/run_sweep_downstream.sh
 ```
 
 ### 6 — YOLO baseline
 
-Object-detection baseline (YOLOv5l6u) trained directly on the bone-tumor X-rays with CLAHE-enhanced images.
-
-**Prerequisites:**
-```bash
-pip install opencv-python-headless
-```
+Object-detection model repurposed as a classifier, trained directly on the bone-tumor X-rays with CLAHE-enhanced images (detection classes = malignancy classes: benign=0, intermediate=1, malignant=2).
 
 **Step 1 — CLAHE preprocessing** (creates `data/internal_dataset/images_clahe/`):
 ```bash
@@ -176,42 +221,55 @@ python src/create_split_clahe.py
 sbatch sbatch/yolo/run_prepare_yolo_dataset.sh
 ```
 
-**Step 4 — Train:**
+**Step 4 — Train** (pure detection-as-classification), or **train the backbone + MLP + bbox multi-task head**:
 ```bash
 sbatch sbatch/yolo/run_yolo_train.sh
+sbatch sbatch/yolo/run_yolo_downstream.sh
 ```
 
 ---
 
 ## Model
 
-**Base model**: `microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224`  
-**Image encoder**: ViT-B/16 — LoRA injected into last N transformer blocks  
-**Text encoder**: PubMedBERT — frozen  
-**Classifier head**: MLP on `[image_embedding(512) | age(1) | sex(1)]` → 3 classes
+**LACE** (novel): shared ViT (BiomedCLIP trunk + LoRA) and PubMedBERT text encoder, jointly optimizing global image-text alignment, local lesion-phrase alignment, and (v2) lesion segmentation + prototype/evidential losses in a staged curriculum.
+
+**BiomedCLIP baseline**: `microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224`, ViT-B/16 image encoder with LoRA injected into the last N transformer blocks, PubMedBERT text encoder frozen.
+
+**Downstream head** (shared across approaches): MLP on `[image_embedding | age | sex]` → malignancy classes.
 
 ---
 
 ## Requirements
 
+There is no single top-level `requirements.txt`; install the key packages manually into your environment:
+
 ```bash
-pip install -r requirements.txt
+pip install torch transformers open_clip_torch accelerate bitsandbytes "xformers==0.0.28.post3" ultralytics scikit-learn wandb
 ```
 
-Key dependencies: `torch`, `open_clip_torch`, `transformers`, `accelerate`, `bitsandbytes`, `keybert`, `scikit-learn`, `wandb`
+GLoRIA has its own older, self-contained environment (pytorch-lightning 1.1.4, torch 1.7.1):
+```bash
+conda env create -f src/gloria/environment.yml
+pip install -e src/gloria/
+```
 
 ---
 
 ## Data
 
-Expected layout under `data/`:
+Expected layout under `data/internal_dataset/`:
 
 ```
-data/
-├── metadata.xlsx            # Patient metadata (patid, age, sex, malignancy label)
-├── images/                  # One image per study
-├── segmentations/           # Corresponding segmentation masks
+data/internal_dataset/
+├── metadata.xlsx             # Patient metadata (patid, age, sex, malignancy label)
+├── images/                   # One image per study
+├── segmentations/            # Corresponding segmentation masks
+├── dataset_full.json         # Assembled dataset (see create_dataset.py)
+├── split.json                # Canonical train/val/test manifest
+├── cv/                       # 10-fold CV split pool
 └── text/
-    ├── sanitized_reports.json     # Cleaned German reports
-    └── translated_reports.json   # English translations
+    ├── sanitized_reports.json   # Cleaned German reports
+    └── full_reports.json       # English translations + extracted phrases
 ```
+
+`data/BTXRD/` holds the external test set (images, annotations, `btxrd_downstream_binary.json`), used only for binary benign/malignant evaluation.

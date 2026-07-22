@@ -171,9 +171,24 @@ Definitions:
   Examples: "suspected enchondroma", "compatible with osteosarcoma", "consistent with benign process"
   "highly suspicious for malignancy"
 
+Note: Descriptive morphological findings (margin, matrix, periosteal reaction,
+  cortical status) do NOT count as an explicit impression, even when
+  diagnostically suggestive. An explicit impression requires a stated
+  diagnosis, differential diagnosis, or diagnostic conclusion (e.g.,
+  "suspected X", "consistent with X", "DDx X", "malignant/benign features").
+
 Rules:
 1. Classify by content type
 2. Use original phrasing from the text (no paraphrasing or interpretation)
+   for befund_phrases, and for beurteilung_phrases when the text contains
+   explicit impression/summary-style statements (e.g., overall assessment,
+   diagnosis, malignancy characterization) — extract these verbatim.
+
+   If the text contains only descriptive findings with no impression-style
+   statement, synthesize a concise beurteilung_phrase by paraphrasing the
+   most diagnostically salient finding(s), condensing their clinical
+   meaning into a single impression-style phrase. Do not paraphrase
+   befund_phrases under any circumstance.
 3. Preserve anatomical details
 4. Concise phrases (2–8 words), one concept per phrase
 5. Extract ALL relevant statements from the entire report
@@ -183,6 +198,15 @@ Rules:
 patterns like "6 x 8 mm", "2.3 cm", "4 cm". Keep only the descriptor: \
 "6 x 8 mm osteolytic lesion" → "osteolytic lesion". Drop a phrase that would \
 consist only of a measurement.
+9.Fracture-related phrases: EXCLUDE all fracture phrases by default
+  (e.g., "no fracture", "no fracture detected", "no evidence of fracture").
+  EXCEPTION — retain only "pathological fracture" and "insufficiency
+  fracture" when they describe a PRESENT finding.
+  If a fracture phrase is negated (e.g., "no pathological fracture",
+  "no insufficiency fracture"), exclude it entirely — do not truncate
+  the negation and keep the remainder. Negation status is evaluated on
+  the phrase as it appears in the text, not on a substring match against
+  the retained terms.
 
 BEFORE ANSWERING CHECK:
 - Does "befund_phrases" contain at least 1 descriptive observation? \
@@ -195,9 +219,8 @@ If none exists in the report, extract the closest clinical characterization avai
 - Only reply once both lists contain AT LEAST one entry.
 
 Example 1 (standard report with both types present):
-FINDINGS:
+
 Proximal tibial metaphysis approx. 4 cm osteolytic lesion with chondroid matrix.
-IMPRESSION:
 Suspected enchondroma. DDx low-grade chondrosarcoma.
 
 → {{"befund_phrases": ["osteolytic lesion", "chondroid matrix",
@@ -205,9 +228,8 @@ Suspected enchondroma. DDx low-grade chondrosarcoma.
     "beurteilung_phrases": ["suspected enchondroma", "DDx low-grade chondrosarcoma"]}}
 
 Example 2 (impression mixes descriptive and diagnostic content):
-FINDINGS:
+
 Rounded osteolysis with sclerotic rim in the proximal phalanx shaft of finger III left.
-IMPRESSION:
 Rim-sclerotic osteolysis in the proximal phalanx shaft, consistent with enchondroma.
 
 → {{"befund_phrases": ["rounded osteolysis", "sclerotic rim",
@@ -216,7 +238,7 @@ Rim-sclerotic osteolysis in the proximal phalanx shaft, consistent with enchondr
     "beurteilung_phrases": ["consistent with enchondroma"]}}
 
 Example 3 (no explicit impression, all content is findings):
-FINDINGS:
+
 Distal femoral metaphysis small osteolytic lesion, sharply marginated, no cortical \
 breakthrough, no periosteal reaction.
 
@@ -226,13 +248,13 @@ breakthrough, no periosteal reaction.
     "beurteilung_phrases": ["sharply marginated lesion without cortical involvement"]}}
 
 Example 4 (measurements MUST be stripped — keep only the descriptor):
-FINDINGS:
+
 6 x 8 mm osteolytic lesion in the distal radius, sharply marginated. \
 Approx. 4 cm area of chondroid matrix.
 
 → {{"befund_phrases": ["osteolytic lesion", "distal radius", "sharply marginated",
                        "chondroid matrix"],
-    "beurteilung_phrases": ["small sharply marginated osteolytic lesion"]}}
+    "beurteilung_phrases": ["sharply marginated osteolytic lesion"]}}
 
 Report:
 {formatted_report}

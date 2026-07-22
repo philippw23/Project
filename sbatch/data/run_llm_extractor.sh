@@ -29,11 +29,14 @@ MODEL=Qwen/Qwen2.5-14B-Instruct #Qwen2.5-14B-Instruct Qwen2.5-32B-Instruct-AWQ
 
 TWO_STAGE=false    # true = two-stage (atomic extract → classify+rank); false = one-shot joint
 # Use a distinct output per methodology so results are not mixed/overwritten.
+TIMESTAMP=$(date +%y%m%d_%H%M)
+MODEL_SIZE=$(echo "$MODEL" | grep -oE '[0-9]+B')
 if [ "$TWO_STAGE" = "true" ]; then
-    OUTPUT=$home_dir/Project/data/internal_dataset/text/full_reports_two_stage.json
+    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_two_stage_${MODEL_SIZE}_${TIMESTAMP}.json
 else
-    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_14B_260710_1406.json
+    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_${MODEL_SIZE}_${TIMESTAMP}.json
 fi
+echo "Writing output to $OUTPUT"
 
 # Run the extractor
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python

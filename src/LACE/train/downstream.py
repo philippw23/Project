@@ -46,6 +46,7 @@ from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
 from biomedclip.data.transforms import build_preprocess_val
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import LinearHead, MalignancyMLP
+from biomedclip.utils.downstream_eval import require_binary_for_btxrd
 from biomedclip.utils.misc import DEFAULT_OUT_DIR
 from LACE.data.transforms import build_train_transform_lace
 from LACE.models.downstream import LACEv2Classifier
@@ -89,16 +90,24 @@ def _load_vit(checkpoint: dict, device: torch.device) -> SharedViT:
     lora_cfg = checkpoint.get("lora_config", {})
     if not lora_cfg:
         raise RuntimeError("Checkpoint has no 'lora_config'. Was it produced by LACE pretraining?")
+    # lora_cfg describes how the ViT was built during *pretraining*; it must be
+    # replayed here so load_state_dict matches, but it says nothing about what
+    # trains downstream. Stay quiet until after the freeze, then report the truth.
     vit = SharedViT(
         lora_layers=lora_cfg["lora_layers"],
         r=lora_cfg["lora_r"],
         alpha=lora_cfg["lora_alpha"],
         embed_dim=lora_cfg.get("embed_dim", 512),
         unfreeze_layers=lora_cfg.get("unfreeze_layers", 0),
+        verbose=False,
     )
     vit.load_state_dict(checkpoint["vit_state"])
     for p in vit.parameters():
         p.requires_grad_(False)
+    print(
+        f"SharedViT: loaded pretrained weights — {vit.adapter_mode} — "
+        f"now frozen for downstream | {vit.param_summary()}"
+    )
     return vit.to(device)
 
 
@@ -439,6 +448,7 @@ def main(args: argparse.Namespace) -> dict:
             _apply_sweep_config(args)
 
     # ── Label mapping ─────────────────────────────────────────────────────────
+    require_binary_for_btxrd(args.binary, args.btxrd_manifest)
     if args.binary:
         label_to_idx = LABEL_TO_IDX_BINARY
         idx_to_label = IDX_TO_LABEL_BINARY

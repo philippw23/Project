@@ -49,6 +49,9 @@ from biomedclip.data.datasets import (
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.lora import inject_lora, unfreeze_or_inject_downstream_lora
 from biomedclip.models.classifier import LinearHead, MalignancyMLP, extract_embeddings
+from biomedclip.utils.downstream_eval import (
+    require_binary_for_btxrd, load_btxrd_samples, build_downstream_loader, report_eval,
+)
 DEFAULT_CHECKPOINT = ROOT_DIR / "results" / "biomedclip_pretrain" / "best_r1_checkpoint.pt"
 
 EMBED_DIM = 768  # always pre-projection ViT CLS token
@@ -230,6 +233,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Binary classification (benign vs malignant). "
                              "Use with split_binary.json — intermediate cases must already be excluded.")
 
+    # ── Held-out test / external BTXRD evaluation ─────────────────────────────
+    parser.add_argument("--eval_test", action="store_true",
+                        help="Evaluate the split's held-out test set after training. Off by "
+                             "default so hyperparameter sweeps never touch test/BTXRD.")
+    parser.add_argument("--btxrd_manifest", default=None,
+                        help="Path to a BTXRD downstream manifest (built by "
+                             "build_btxrd_downstream.py) to also score as an external test set. "
+                             "Requires --eval_test and --binary.")
+
     # ── Image resolution ─────────────────────────────────────────────────────
     parser.add_argument("--image_size", type=int, default=224,
                         help="Input resolution (default 224). BiomedCLIP ViT-B/16 supports "
@@ -330,6 +342,7 @@ def main(args: argparse.Namespace) -> None:
     preprocess_train = build_train_transform(preprocess_val)
 
     # ── Label mapping ─────────────────────────────────────────────────────────
+    require_binary_for_btxrd(args.binary, args.btxrd_manifest)
     if args.binary:
         label_to_idx = LABEL_TO_IDX_BINARY
         idx_to_label = IDX_TO_LABEL_BINARY
@@ -389,15 +402,17 @@ def main(args: argparse.Namespace) -> None:
         val_loader = val_loader_raw
         embed_dim  = EMBED_DIM
     else:
-        print("Pre-computing val/test embeddings...")
+        print("Pre-computing val embeddings...")
         val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader_raw,  device)
-        test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
         embed_dim = val_emb.shape[1]
         print(f"Embedding dim: {embed_dim}")
         val_emb_ds  = EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl)
-        test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
         val_loader  = DataLoader(val_emb_ds,  batch_size=args.batch_size, shuffle=False)
-        test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
+        if args.eval_test:
+            print("Pre-computing test embeddings...")
+            test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
+            test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
+            test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
 
     # ── Head, loss, optimiser ─────────────────────────────────────────────────
     head      = build_head(args, embed_dim, device, num_classes=num_classes)
@@ -462,6 +477,10 @@ def main(args: argparse.Namespace) -> None:
                 "val_loss": val_loss,
                 "val_bal_acc": val_bal_acc,
                 "head": args.head,
+                "args": vars(args),
+                "age_mean": age_mean,
+                "age_std": age_std,
+                "embed_dim": embed_dim,
             }
             if finetune:
                 save_dict["encoder_lora_state_dict"] = {
@@ -475,64 +494,47 @@ def main(args: argparse.Namespace) -> None:
                 print(f"Early stopping at epoch {epoch} (no improvement for {args.patience} epochs).")
                 break
 
-    # ── Test evaluation ───────────────────────────────────────────────────────
+    # ── Restore best head (and encoder for fine-tuning) ───────────────────────
     best_ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     head.load_state_dict(best_ckpt["head_state_dict"])
     if finetune:
         enc_state = encoder.state_dict()
         enc_state.update(best_ckpt["encoder_lora_state_dict"])
         encoder.load_state_dict(enc_state)
-        print("Pre-computing test embeddings from best checkpoint...")
-        test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
-        test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
-        test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
-    test_loss, test_acc, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
 
-    label_names    = [idx_to_label[i] for i in range(num_classes)]
-    present_labels = sorted(set(test_labels.tolist()) | set(test_preds.tolist()))
-    present_names  = [label_names[i] for i in present_labels]
-    print("\n" + "=" * 60)
-    print("TEST RESULTS")
-    print("=" * 60)
-    print(f"Loss: {test_loss:.4f}  |  Accuracy: {test_acc:.3f}")
-    print(f"Balanced accuracy: {balanced_accuracy_score(test_labels, test_preds):.3f}")
-    print(f"Macro F1: {f1_score(test_labels, test_preds, average='macro'):.3f}")
-    test_weighted_prec, test_weighted_rec, _, _ = precision_recall_fscore_support(
-        test_labels, test_preds, average="weighted", zero_division=0
-    )
-    print(f"Weighted Precision: {test_weighted_prec:.3f}  |  Weighted Recall: {test_weighted_rec:.3f}")
-    print()
-    print(classification_report(
-        test_labels, test_preds,
-        labels=present_labels, target_names=present_names,
-        digits=3, zero_division=0,
-    ))
-    print("Confusion matrix (rows=true, cols=pred):")
-    print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=present_labels),
-        index=present_names, columns=present_names,
-    ).to_string())
+    # ── Held-out test / external BTXRD evaluation (opt-in via --eval_test) ─────
+    eval_metrics: dict = {}
+    if args.eval_test:
+        if finetune:
+            print("Pre-computing test embeddings from best checkpoint...")
+            test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader_raw, device)
+            test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
+            test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
+        test_loss, _, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
+        eval_metrics.update(report_eval(
+            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+
+        if args.btxrd_manifest:
+            print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
+            btxrd_samples = load_btxrd_samples(args.btxrd_manifest)
+            btxrd_raw, n_btxrd = build_downstream_loader(
+                btxrd_samples, age_mean, age_std, preprocess_val, args.use_mask,
+                args.batch_size, label_to_idx, device)
+            print(f"BTXRD samples: {n_btxrd}")
+            b_emb, b_age, b_sex, b_lbl = extract_embeddings(encoder, btxrd_raw, device)
+            btxrd_loader = DataLoader(
+                EmbeddingDataset(b_emb, b_age, b_sex, b_lbl),
+                batch_size=args.batch_size, shuffle=False)
+            btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(head, btxrd_loader, criterion, device)
+            eval_metrics.update(report_eval(
+                "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
+                idx_to_label, num_classes, prefix="btxrd"))
+    else:
+        print("\nSkipping held-out test / BTXRD evaluation (--eval_test not set).")
 
     if use_wandb:
-        test_bal_acc = balanced_accuracy_score(test_labels, test_preds)
-        test_prec, test_rec, test_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, average="macro", zero_division=0
-        )
-        per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=present_labels, zero_division=0
-        )
-        log_dict = {
-            "test/loss": test_loss, "test/acc": test_acc,
-            "test/balanced_acc": test_bal_acc,
-            "test/precision_macro":    test_prec,    "test/recall_macro":    test_rec,
-            "test/precision_weighted": test_weighted_prec, "test/recall_weighted": test_weighted_rec,
-            "test/f1_macro": test_f1,
-        }
-        for i, name in enumerate(present_names):
-            log_dict[f"test/precision_{name}"] = per_class_prec[i]
-            log_dict[f"test/recall_{name}"]    = per_class_rec[i]
-            log_dict[f"test/f1_{name}"]        = per_class_f1[i]
-        wandb.log(log_dict)
+        if eval_metrics:
+            wandb.log(eval_metrics)
         wandb.finish()
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")

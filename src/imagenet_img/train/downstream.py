@@ -38,11 +38,17 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
-                                       IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES)
+                                       IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES,
+                                       LABEL_TO_IDX_BINARY, IDX_TO_LABEL_BINARY,
+                                       NUM_CLASSES_BINARY)
 from biomedclip.data.splits import build_stratified_splits
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
 from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_OUT_DIR
+from biomedclip.utils.downstream_eval import (
+    resolve_label_maps, require_binary_for_btxrd, load_btxrd_samples,
+    build_downstream_loader, report_eval,
+)
 from imagenet_img.data.transforms import build_train_transform, build_val_transform
 from imagenet_img.models.encoders import build_encoder
 
@@ -127,6 +133,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--out_dir",  default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--use_mask", action="store_true",
                         help="Crop images around the lesion mask before feeding to the encoder.")
+    parser.add_argument("--binary", type=lambda x: str(x).lower() in ("true", "1", "yes"),
+                        default=False,
+                        help="Binary classification (benign vs malignant). "
+                             "Use with split_binary.json — intermediate cases must already be excluded.")
+    parser.add_argument("--eval_test", action="store_true",
+                        help="Evaluate the split's held-out test set after training. Off by "
+                             "default so hyperparameter sweeps never touch test/BTXRD.")
+    parser.add_argument("--btxrd_manifest", default=None,
+                        help="Path to a BTXRD downstream manifest to also score as an external "
+                             "test set. Requires --eval_test and --binary.")
 
     parser.add_argument("--epochs",        type=int,   default=100)
     parser.add_argument("--patience",      type=int,   default=15)
@@ -198,6 +214,12 @@ def main(args: argparse.Namespace) -> None:
         if args.sweep:
             _apply_sweep_config(args)
 
+    # ── Label mapping ─────────────────────────────────────────────────────────
+    require_binary_for_btxrd(args.binary, args.btxrd_manifest)
+    label_to_idx, idx_to_label, num_classes = resolve_label_maps(args.binary)
+    if args.binary:
+        print("Mode: binary (benign vs malignant)")
+
     # ── Encoder + MLP ─────────────────────────────────────────────────────────
     encoder, embed_dim = build_encoder()
     encoder = encoder.to(device)
@@ -207,7 +229,7 @@ def main(args: argparse.Namespace) -> None:
 
     use_meta = args.head != "mlp_no_meta"
     mlp = MalignancyMLP(embed_dim, args.hidden_dims, args.dropout, args.meta_embed_dim,
-                        use_meta=use_meta).to(device)
+                        use_meta=use_meta, num_classes=num_classes).to(device)
     print(f"Encoder: ViT-B/16 ({embed_dim}-dim, frozen) | Head: {args.head} | "
           f"MLP params: {sum(p.numel() for p in mlp.parameters()):,}")
 
@@ -240,11 +262,11 @@ def main(args: argparse.Namespace) -> None:
     preprocess_val   = build_val_transform()
 
     train_ds = DownstreamDataset(splits["train"], age_sex_lookup, age_mean, age_std,
-                                  preprocess_train, use_mask=args.use_mask)
+                                  preprocess_train, use_mask=args.use_mask, label_to_idx=label_to_idx)
     val_ds   = DownstreamDataset(splits["val"],   age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   use_mask=args.use_mask)
+                                  preprocess_val,   use_mask=args.use_mask, label_to_idx=label_to_idx)
     test_ds  = DownstreamDataset(splits["test"],  age_sex_lookup, age_mean, age_std,
-                                  preprocess_val,   use_mask=args.use_mask)
+                                  preprocess_val,   use_mask=args.use_mask, label_to_idx=label_to_idx)
     print(f"Samples — train: {len(train_ds)}, val: {len(val_ds)}, test: {len(test_ds)}")
 
     use_pin       = device.type == "cuda"
@@ -253,25 +275,27 @@ def main(args: argparse.Namespace) -> None:
     val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
     test_loader  = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
-    # ── Pre-compute val and test embeddings ───────────────────────────────────
-    print("Pre-computing val and test embeddings...")
-    val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader,  device)
-    test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader, device)
-
     emb_loader_kwargs = {"batch_size": args.batch_size, "num_workers": 0, "pin_memory": use_pin}
+
+    # ── Pre-compute val (and test if --eval_test) embeddings ──────────────────
+    print("Pre-computing val embeddings...")
+    val_emb,  val_age,  val_sex,  val_lbl  = extract_embeddings(encoder, val_loader,  device)
     val_emb_loader  = DataLoader(EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl),
                                  shuffle=False, **emb_loader_kwargs)
-    test_emb_loader = DataLoader(EmbeddingDataset(test_emb, test_age, test_sex, test_lbl),
-                                 shuffle=False, **emb_loader_kwargs)
+    if args.eval_test:
+        print("Pre-computing test embeddings...")
+        test_emb, test_age, test_sex, test_lbl = extract_embeddings(encoder, test_loader, device)
+        test_emb_loader = DataLoader(EmbeddingDataset(test_emb, test_age, test_sex, test_lbl),
+                                     shuffle=False, **emb_loader_kwargs)
 
     # ── Class weighting ───────────────────────────────────────────────────────
     train_labels_all = torch.tensor(
-        [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
+        [label_to_idx[s["label"]] for s in train_ds.samples], dtype=torch.long
     )
-    label_counts  = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
-    class_weights = compute_class_weights(label_counts, NUM_CLASSES, args.class_weighting,
+    label_counts  = torch.bincount(train_labels_all, minlength=num_classes).float()
+    class_weights = compute_class_weights(label_counts, num_classes, args.class_weighting,
                                            args.cb_beta, device)
-    criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
+    criterion = build_classification_loss(args, label_counts, num_classes, class_weights, device)
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=args.lr_mlp,
@@ -328,6 +352,9 @@ def main(args: argparse.Namespace) -> None:
                 "mlp_state_dict": mlp.state_dict(),
                 "val_loss": val_loss,
                 "args": vars(args),
+                "age_mean": age_mean,
+                "age_std": age_std,
+                "embed_dim": embed_dim,
             }, ckpt_path)
         else:
             patience_counter += 1
@@ -335,56 +362,39 @@ def main(args: argparse.Namespace) -> None:
                 print(f"Early stopping at epoch {epoch}.")
                 break
 
-    # ── Test evaluation ───────────────────────────────────────────────────────
+    # ── Restore best head ─────────────────────────────────────────────────────
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     mlp.load_state_dict(ckpt["mlp_state_dict"])
 
-    test_loss, test_acc, test_preds, test_labels = evaluate_cached(mlp, test_emb_loader,
-                                                                     criterion, device)
-    label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
+    # ── Held-out test / external BTXRD evaluation (opt-in via --eval_test) ─────
+    eval_metrics: dict = {}
+    if args.eval_test:
+        test_loss, _, test_preds, test_labels = evaluate_cached(mlp, test_emb_loader,
+                                                                 criterion, device)
+        eval_metrics.update(report_eval(
+            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
 
-    print("\n" + "=" * 60)
-    print("TEST RESULTS")
-    print("=" * 60)
-    print(f"Loss: {test_loss:.4f}  |  Accuracy: {test_acc:.3f}")
-    test_bal_acc = balanced_accuracy_score(test_labels, test_preds)
-    print(f"Balanced accuracy: {test_bal_acc:.3f}")
-    print(f"Macro F1: {f1_score(test_labels, test_preds, average='macro'):.3f}")
-    test_weighted_prec, test_weighted_rec, _, _ = precision_recall_fscore_support(
-        test_labels, test_preds, average="weighted", zero_division=0
-    )
-    print(f"Weighted Precision: {test_weighted_prec:.3f}  |  Weighted Recall: {test_weighted_rec:.3f}")
-    print()
-    print(classification_report(test_labels, test_preds,
-                                  labels=list(range(NUM_CLASSES)),
-                                  target_names=label_names, digits=3, zero_division=0))
-    print("Confusion matrix (rows=true, cols=pred):")
-    print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=list(range(NUM_CLASSES))),
-        index=label_names, columns=label_names,
-    ).to_string())
+        if args.btxrd_manifest:
+            print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
+            btxrd_samples = load_btxrd_samples(args.btxrd_manifest)
+            btxrd_raw, n_btxrd = build_downstream_loader(
+                btxrd_samples, age_mean, age_std, preprocess_val, args.use_mask,
+                args.batch_size, label_to_idx, device)
+            print(f"BTXRD samples: {n_btxrd}")
+            b_emb, b_age, b_sex, b_lbl = extract_embeddings(encoder, btxrd_raw, device)
+            btxrd_emb_loader = DataLoader(EmbeddingDataset(b_emb, b_age, b_sex, b_lbl),
+                                          shuffle=False, **emb_loader_kwargs)
+            btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate_cached(
+                mlp, btxrd_emb_loader, criterion, device)
+            eval_metrics.update(report_eval(
+                "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
+                idx_to_label, num_classes, prefix="btxrd"))
+    else:
+        print("\nSkipping held-out test / BTXRD evaluation (--eval_test not set).")
 
     if use_wandb:
-        test_prec, test_rec, test_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, average="macro", zero_division=0
-        )
-        per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=list(range(NUM_CLASSES)), zero_division=0
-        )
-        log_dict = {
-            "test/loss": test_loss, "test/acc": test_acc,
-            "test/balanced_acc": test_bal_acc,
-            "test/precision_macro":    test_prec,
-            "test/recall_macro":       test_rec,
-            "test/precision_weighted": test_weighted_prec,
-            "test/recall_weighted":    test_weighted_rec,
-            "test/f1_macro":           test_f1,
-        }
-        for i, name in enumerate(label_names):
-            log_dict[f"test/precision_{name}"] = per_class_prec[i]
-            log_dict[f"test/recall_{name}"]    = per_class_rec[i]
-            log_dict[f"test/f1_{name}"]        = per_class_f1[i]
-        wandb.log(log_dict)
+        if eval_metrics:
+            wandb.log(eval_metrics)
         wandb.finish()
 
     print(f"\nBest val loss: {best_val_loss:.4f}")

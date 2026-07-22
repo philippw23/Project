@@ -2,43 +2,55 @@ program: src/lace_downstream.py
 project: lace-downstream
 entity: philipp-wiese
 method: bayes
-run_cap: 30
 metric:
-  name: val/best_f1_macro
-  goal: maximize
+  name: val/loss
+  goal: minimize
+run_cap: 25
 
 parameters:
-  head:
-    value: mlp_no_meta
+  checkpoint:
+    value: results/lace_v2_pretrain/run_20260721_080616/best_retrieval_checkpoint.pt
+
   downstream_visual_mode:
-    values: [cls, fg, cls_fg]
+    values: [fg, cls_fg, cls]
+
   image_size:
-    values: [224, 512]
+    value: 224
+
+  batch_size:
+    values: [16, 32, 64]
+
+  hidden_dims:
+    values:
+      - [64, 32]
+      - [128, 64]
+      - [256, 128]
+      - [512, 256]
+
+  dropout:
+    values: [0.2, 0.25, 0.3, 0.35]
+
   lr:
     distribution: log_uniform_values
     min: 1e-5
-    max: 1e-3
-  dropout:
-    values: [0.0, 0.1, 0.2, 0.3]
+    max: 3e-4
+
   weight_decay:
-    values: [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
-  hidden_dims:
-    values:
-      - [128, 64]
-      - [128]
-      - [256, 128]
-      - [512, 256]
-      - [256]
-  batch_size:
-    values: [16, 32, 64]
-  loss:
-    value: focal
-  class_weighting:
-    value: effective
+    values: [0.3, 0.35, 0.4, 0.45, 0.5]
+
   focal_gamma:
     distribution: uniform
     min: 2.5
     max: 3.25
+
+  loss:
+    value: focal
+
+  class_weighting:
+    value: effective
+
+  head:
+    value: mlp_no_meta
 
 command:
   - ${env}
@@ -46,11 +58,10 @@ command:
   - ${program}
   - --version
   - v2
-  - --checkpoint
-  - results/lace_v2_pretrain/run_20260708_153804/best_retrieval_checkpoint.pt
   - --splits
-  - data/internal_dataset/test/split_binary_backup.json
+  - data/internal_dataset/split_binary_final.json
   - --binary
+  - --eval_test
   - --use_mask
   - --out_dir
   - results

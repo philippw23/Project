@@ -93,6 +93,7 @@ class SharedViT(nn.Module):
         alpha: float,
         embed_dim: int = EMBED_DIM,
         unfreeze_layers: int = 0,
+        verbose: bool = True,
     ) -> None:
         super().__init__()
         _model, _, self.preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
@@ -111,12 +112,18 @@ class SharedViT(nn.Module):
         self.img_proj   = ProjectionHead(VIT_DIM, embed_dim)
         self.patch_proj = ProjectionHead(VIT_DIM, embed_dim)
 
+        # Describes the adapter topology only; callers that freeze the trunk after
+        # construction must report their own trainable count (see verbose).
+        self.adapter_mode = mode_str
+
+        if verbose:
+            print(f"SharedViT: {mode_str} | {self.param_summary()}")
+
+    def param_summary(self) -> str:
+        """Trainable/total parameter counts, evaluated at call time."""
         n_train = count_trainable_params(self)
         n_total = sum(p.numel() for p in self.parameters())
-        print(
-            f"SharedViT: {mode_str} | "
-            f"trainable: {n_train:,} / {n_total:,} ({100 * n_train / n_total:.2f}%)"
-        )
+        return f"trainable: {n_train:,} / {n_total:,} ({100 * n_train / n_total:.2f}%)"
 
     def load_pretrained_projections(self) -> None:
         """Copy img_proj and patch_proj weights from BiomedCLIP's pretrained visual.head.proj."""
@@ -292,7 +299,7 @@ class BiomedCLIPTextEncoder(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Projected CLS of Beurteilung text for L_ITA. Returns [B, 256]."""
+        """Projected CLS of Beurteilung text for L_ITA. Returns [B, 512]."""
         seq = self._forward(input_ids, attention_mask)
         return self.cls_proj(seq[:, 0, :])
 
@@ -303,7 +310,7 @@ class BiomedCLIPTextEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """CLS + word-token projections of Befund text for L_sim (full-text mode).
 
-        Returns (z_cls [B, 256], proj_phrases [B, L, 256]).
+        Returns (z_cls [B, 512], proj_phrases [B, L, 512]).
         z_cls is kept for API compatibility; sim_loss_v2 uses proj_phrases only.
         """
         seq = self._forward(input_ids, attention_mask)

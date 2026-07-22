@@ -134,8 +134,8 @@ class InternalDatasetV2(Dataset):
         s           = self.samples[idx]
         image_path  = Path(s["image"])
         mask_path   = Path(s["mask"])
-        beurteilung  = str(s.get("beurteilung") or "").strip()
-        befund       = str(s.get("befund") or "").strip()
+        beurteilung  = str(s.get("beurteilung_en") or "").strip()
+        befund       = str(s.get("befund_en") or "").strip()
         beur_phrases = s.get("beurteilung_phrases") or []
         bef_phrases  = s.get("befund_phrases") or []
 
@@ -158,7 +158,7 @@ class InternalDatasetV2(Dataset):
         else:
             image = Image.fromarray(pad_to_square(np.array(image)))
             patch_labels = torch.zeros(self.n_patches, dtype=torch.float32)
-        full_image = self.preprocess(image)
+        input_image = self.preprocess(image)
 
         if self.text_mode == "full":
             b_enc = self._tok(beurteilung, self.max_text_len)
@@ -210,7 +210,7 @@ class InternalDatasetV2(Dataset):
             }
 
         return {
-            "full_image":   full_image,
+            "input_image":  input_image,
             "patch_labels": patch_labels,
             "has_mask":     torch.tensor(has_mask, dtype=torch.bool),
             "label":        torch.tensor(LABEL_TO_INT[s["label"]], dtype=torch.long),
@@ -337,8 +337,8 @@ class InternalTripleDataset(Dataset):
         s           = self.samples[idx]
         image_path  = Path(s["image"])
         mask_path   = Path(s["mask"])
-        beurteilung  = str(s.get("beurteilung") or "").strip()
-        befund       = str(s.get("befund") or "").strip()
+        beurteilung  = str(s.get("beurteilung_en") or "").strip()
+        befund       = str(s.get("befund_en") or "").strip()
         beur_phrases = s.get("beurteilung_phrases") or []
         bef_phrases  = s.get("befund_phrases") or []
 

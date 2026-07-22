@@ -14,14 +14,14 @@
 CHECKPOINT="none"
 CHEXFOUND_WEIGHTS="/mnt/nfs/homedirs/philippw/Project/src/chexfound/data/teacher_checkpoint.pth"
 IMAGE_SIZE=512   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
-SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_binary_final.json"
 HEAD="mlp_no_meta"   # linear | mlp | mlp_no_meta
 BATCH_SIZE=16
 LR=0.0002402131717649611
 DROPOUT=0.3
 HIDDEN_DIMS="64"
 META_EMBED_DIM=16
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.1
 EPOCHS=50
 LOSS="focal"  # ce | wce | ce_smooth | focal | cb_focal | ldam | balanced_softmax
 FOCAL_GAMMA=4.0
@@ -71,5 +71,7 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfou
     --seed 42 \
     --wandb \
     --wandb_project chexfound-downstream \
-    --wandb_entity  philipp-wiese
-    #    --binary true \
+    --wandb_entity  philipp-wiese \
+    --binary true \
+    
+
