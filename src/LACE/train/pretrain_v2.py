@@ -702,7 +702,6 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--cv_pattern", default="split_binary_fold*.json",
                         help="Glob for fold files inside --cv_dir (sorted; fold index parsed "
                              "from each filename, e.g. '...fold3...' -> fold3).")
-    #parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON))
     parser.add_argument("--btxrd_images", default=str(DEFAULT_BTXRD_IMAGES))
     parser.add_argument("--btxrd_annots", default=str(DEFAULT_BTXRD_ANNOTS))
     parser.add_argument("--out_dir", default=str(DEFAULT_OUT_DIR))
@@ -932,16 +931,13 @@ def main(args: argparse.Namespace) -> None:
                 p.requires_grad_(False)
 
         # ── Data ──────────────────────────────────────────────────────────────
-        if split_path is not None:
-            with open(split_path, encoding="utf-8") as fh:
-                split_data = json.load(fh)
-            shutil.copy(split_path, this_run_dir / "split.json")
-            pretrain_samples = split_data["train"]
-            val_samples      = split_data["val"]
-            print(f"Loaded split from {split_path} "
-                  f"({len(pretrain_samples)} train, {len(val_samples)} val samples)")
-        else:
-            pretrain_samples, val_samples, _test = build_stratified_splits(args, run_dir=this_run_dir)
+        with open(split_path, encoding="utf-8") as fh:
+            split_data = json.load(fh)
+        shutil.copy(split_path, this_run_dir / "split.json")
+        pretrain_samples = split_data["train"]
+        val_samples      = split_data["val"]
+        print(f"Loaded split from {split_path} "
+                f"({len(pretrain_samples)} train, {len(val_samples)} val samples)")
 
         preprocess_val   = vit.preprocess_val
         preprocess_train = build_train_transform_lace(preprocess_val)
@@ -1054,6 +1050,7 @@ def main(args: argparse.Namespace) -> None:
                       if p.requires_grad and n != "prototypes"]
         bank_nd    = [mask_bank.prototypes] if mask_bank.prototypes.requires_grad else []
 
+        # ── Optimizer groups: decay vs no-decay ───────────────────────────────
         optimizer = torch.optim.AdamW(
             [
                 {"params": vit_decay + txt_decay + dec_decay + hd_decay + bank_decay,

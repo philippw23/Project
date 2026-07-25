@@ -34,6 +34,7 @@ from LACE.train.downstream import (build_v1_model, build_v2_model,
 
 
 def parse_args(argv=None) -> argparse.Namespace:
+    """Parse the CLI args for this evaluation script."""
     p = argparse.ArgumentParser(description="Evaluate a saved LACE downstream head (no training).")
     p.add_argument("--head_checkpoint", required=True,
                    help="Trained head .pt (best_<run_id>.pt) — carries its own config.")
@@ -68,20 +69,25 @@ def _load_config(head_ckpt: dict, cli: argparse.Namespace) -> argparse.Namespace
 
 
 def main(cli: argparse.Namespace) -> dict:
+    """Evaluate a saved LACE downstream head checkpoint on the specified test split(s)."""
+    # Load the head checkpoint and rebuild the training args Namespace from its stored config.
     head_ckpt = torch.load(cli.head_checkpoint, map_location="cpu", weights_only=False)
     args = _load_config(head_ckpt, cli)
 
+    # Set the random seeds and device, and print the evaluation mode.
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}  |  LACE version: {args.version}  |  eval-only")
 
+    # Check that the backbone checkpoint exists (either the stored one or the CLI override).
     if not Path(args.checkpoint).exists():
         raise SystemExit(
             f"Backbone checkpoint not found: {args.checkpoint}\n"
             f"Pass --checkpoint <path> to point at the (possibly moved) pretrain checkpoint."
         )
 
+    # Determine whether this is a binary or multi-class downstream task, to pick the right label mapping and number of classes.
     if args.binary:
         label_to_idx, idx_to_label, num_classes = (
             LABEL_TO_IDX_BINARY, IDX_TO_LABEL_BINARY, NUM_CLASSES_BINARY)

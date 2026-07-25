@@ -29,36 +29,41 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 IMAGE_SIZE=224
 USE_MASK=true
 VERSION=v2
-VISUAL_MODE=fg          # cls | fg | cls_fg
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260708_153804/best_retrieval_checkpoint.pt
+VISUAL_MODE=cls          # cls | fg | cls_fg
 
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
+# CV-mode pretrain run dir: one fold<N>/{split.json,best_retrieval_checkpoint.pt}
+# per fold. Each fold's checkpoint + split are picked up together from there —
+# update this to the CV pretrain run you want to evaluate.  run_20260724_221040
+CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260724_205525
+PATTERN="fold*/split.json"
+CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt
+
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
-BINARY=true
+BINARY=false
 
 EPOCHS=100
 PATIENCE=10
-BATCH_SIZE=64
-LR=0.00006350687837057624
-WEIGHT_DECAY=0.5
+BATCH_SIZE=16
+LR=5.373534110012835e-06
+WEIGHT_DECAY=0.05
 DROPOUT=0.3
 HEAD=mlp_no_meta
-HIDDEN_DIMS="256"
+HIDDEN_DIMS="[128, 64]"
 
 LOSS=focal
 CLASS_WEIGHTING=effective
-FOCAL_GAMMA=2.9884943503608565
+FOCAL_GAMMA=3.224219517589033
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Note: --splits and --eval_test are managed per fold by the orchestrator.
+# Note: --splits, --eval_test and --checkpoint are managed per fold by the orchestrator.
 python $home_dir/Project/src/lace_downstream_cv.py \
     --version                $VERSION \
     --image_size             $IMAGE_SIZE \
     --downstream_visual_mode $VISUAL_MODE \
-    --checkpoint             $CHECKPOINT \
     --cv_dir                 $CV_DIR \
-    --btxrd_manifest         $BTXRD_MANIFEST \
+    --pattern                "$PATTERN" \
+    --checkpoint_filename    $CHECKPOINT_FILENAME \
     --out_dir                $home_dir/Project/results \
     --epochs                 $EPOCHS \
     --patience               $PATIENCE \
@@ -73,4 +78,9 @@ python $home_dir/Project/src/lace_downstream_cv.py \
     --class_weighting        $CLASS_WEIGHTING \
     --use_mask               $USE_MASK \
     $( [ "$BINARY" = "true" ] && echo "--binary" ) \
-    --seed                   $SEED
+    --seed                   $SEED \
+    --wandb \
+    --wandb_project lace-downstream \
+    --wandb_entity  philipp-wiese \
+    --sweep
+    # --btxrd_manifest         $BTXRD_MANIFEST \

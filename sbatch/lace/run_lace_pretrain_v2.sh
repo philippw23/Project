@@ -14,9 +14,9 @@
 # run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
 # a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary # e.g. $home_dir/Project/data/internal_dataset/cv_binary
+CV_DIR= # e.g. $home_dir/Project/data/internal_dataset/cv_binary
 CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
-SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json   # ignored when CV_DIR is set
+SPLITS=$home_dir/Project/data/internal_dataset/cv/split_binary_fold9.json  # ignored when CV_DIR is set
 
 # ── Image encoder ─────────────────────────────────────────────────────────────
 IMAGE_ENCODER=biomedclip   # biomedclip | chexfound
@@ -55,15 +55,15 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # Standard is 0.15
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
-STAGE1_EPOCHS=16           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 10
+STAGE1_EPOCHS=20           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 10
 EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 16
 PATIENCE=20
 
 # ── Optimisation ──────────────────────────────────────────────────────────────
 # overfit: LR=1e-3 SCHEDULER=constant
-LR=1.672772947691402e-05
+LR=8e-5
 SCHEDULER=cosine
-WEIGHT_DECAY=0.0010489285940590723
+WEIGHT_DECAY=0.001
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
 #LOSSES="ita evid ortho dice" # swap "sim" -> "evid" for the LGDEA prototype variant
@@ -79,11 +79,11 @@ LAMBDA_REC=1.0
 LAMBDA_EVID=1.0
 
 # ── Soft-target / t2i ────────────────────────────────────────────────────────
-TAU_S_BEUR=0.03
-TAU_S_BEF=0.045
-TAU_S_IMG_FULL=0.03
+TAU_S_BEUR=0.0325
+TAU_S_BEF=0.038
+TAU_S_IMG_FULL=0.028
 LAMBDA_T2I=0.5
-SAME_IMAGE_BOOST=20.0
+SAME_IMAGE_BOOST=10.0
 REWEIGHT_BY_N_PHRASES=true
 T2I_MODE=image_image  #image_image | "text_text" | "descriptor" | "infonce"
 
