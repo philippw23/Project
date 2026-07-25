@@ -11,14 +11,21 @@ ita, sim, ortho, dice, rec (=L_rec), evid (=L_evid_p).
 
 Set --stage1_epochs 0 to disable the curriculum split and run every configured
 loss's stage-2 set from epoch 1.
+
+Pass --cv_dir <folder> (e.g. data/internal_dataset/cv_binary) to run one full
+pretraining pass per fold file matching --cv_pattern instead of a single run:
+results land under run_<timestamp>/fold0/, fold1/, ... alongside the usual
+checkpoints/heatmaps/split.json. Mutually exclusive with --splits.
 """
 from __future__ import annotations
 
 import argparse
+import gc
 import itertools
 import json
 import math
 import random
+import re
 import shutil
 import sys
 import warnings
@@ -688,6 +695,13 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     parser.add_argument("--splits", default=str(DEFAULT_SPLITS),
                         help="Path to split.json. Pass '' to generate from --dataset.")
+    parser.add_argument("--cv_dir", default=None,
+                        help="Directory of fold split files (e.g. data/internal_dataset/cv_binary). "
+                             "If set, runs one pretraining pass per fold, writing each fold's "
+                             "checkpoints/heatmaps to run_dir/foldN/. Mutually exclusive with --splits.")
+    parser.add_argument("--cv_pattern", default="split_binary_fold*.json",
+                        help="Glob for fold files inside --cv_dir (sorted; fold index parsed "
+                             "from each filename, e.g. '...fold3...' -> fold3).")
     #parser.add_argument("--dataset", default=str(DEFAULT_DATASET_JSON))
     parser.add_argument("--btxrd_images", default=str(DEFAULT_BTXRD_IMAGES))
     parser.add_argument("--btxrd_annots", default=str(DEFAULT_BTXRD_ANNOTS))
@@ -809,6 +823,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
+    if args.cv_dir and args.splits not in (None, "", str(DEFAULT_SPLITS)):
+        raise SystemExit("--cv_dir and --splits are mutually exclusive — --splits is managed per fold.")
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -818,423 +835,460 @@ def main(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ── Models ────────────────────────────────────────────────────────────────
-    if args.image_encoder == "chexfound":
-        vit = CheXFoundSharedViT(
-            args.chexfound_config, args.chexfound_weights,
-            args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim,
-        )
-        if args.warm_start_projections:
-            print("Note: --warm_start_projections ignored for chexfound "
-                  "(no compatible BiomedCLIP projection to copy).")
-        if args.unfreeze_layers > 0:
-            print("Note: --unfreeze_layers ignored for chexfound "
-                  "(only supported by the biomedclip SharedViT encoder).")
-    else:
-        vit = SharedViT(
-            args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim,
-            unfreeze_layers=args.unfreeze_layers,
-        )
-        if args.warm_start_projections:
-            vit.load_pretrained_projections()
-
-    text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim)
-    if args.warm_start_projections:
-        text_enc.load_pretrained_projections()
-
-    vit      = vit.to(device)
-    text_enc = text_enc.to(device)
-
-    vit_dim = vit.vit_dim
-    mask_decoder = MaskTokenDecoder(
-        n_tokens=args.n_mask_tokens,
-        n_heads=args.n_mask_heads,
-        sigma=args.gauss_sigma,
-        vit_dim=vit_dim,
-    ).to(device)
-    mask_head = MaskPredictionHead(tau=args.mask_head_tau, vit_dim=vit_dim).to(device)
-    mask_bank = PrototypeBank(
-        n_prototypes=args.n_prototypes,
-        dim=args.embed_dim,
-        vit_dim=vit_dim,
-        tau=args.tau_proto,
-    ).to(device)
-
-    τ = nn.Parameter(torch.tensor(0.07, device=device))
-
-    # ── Log-lambda weights ────────────────────────────────────────────────────
-    log_lambda_ita   = nn.Parameter(torch.zeros([], device=device))
-    log_lambda_sim   = nn.Parameter(torch.zeros([], device=device))
-    log_lambda_ortho = nn.Parameter(torch.zeros([], device=device))
-    log_lambda_dice  = nn.Parameter(torch.zeros([], device=device))
-    log_lambda_rec   = nn.Parameter(torch.zeros([], device=device))
-    log_lambda_evid  = nn.Parameter(torch.zeros([], device=device))
-
-    if args.learn_loss_weights:
-        lambda_params = [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-                         log_lambda_rec, log_lambda_evid]
-    else:
-        log_lambda_ita.data.fill_(0.0)
-        log_lambda_sim.data.fill_(math.log(args.lambda_sim))
-        log_lambda_ortho.data.fill_(math.log(args.lambda_ortho))
-        log_lambda_dice.data.fill_(math.log(args.lambda_dice))
-        log_lambda_rec.data.fill_(math.log(args.lambda_rec))
-        log_lambda_evid.data.fill_(math.log(args.lambda_evid))
-        lambda_params = []
-        for p in [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-                  log_lambda_rec, log_lambda_evid]:
-            p.requires_grad_(False)
-
     # ── Run directory ─────────────────────────────────────────────────────────
-    run_dir = (
-        Path(args.out_dir) / "lace_v2_pretrain" /
-        datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    )
+    run_stamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    run_dir   = Path(args.out_dir) / "lace_v2_pretrain" / run_stamp
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run directory: {run_dir}")
 
-    # ── Data ──────────────────────────────────────────────────────────────────
-    if args.splits is not None:
-        with open(args.splits, encoding="utf-8") as fh:
-            split_data = json.load(fh)
-        shutil.copy(args.splits, run_dir / "split.json")
-        pretrain_samples = split_data["train"]
-        val_samples      = split_data["val"]
-        print(f"Loaded split from {args.splits} "
-              f"({len(pretrain_samples)} train, {len(val_samples)} val samples)")
+    # ── Fold targets: 1 entry for a normal run, N for --cv_dir ─────────────────
+    if args.cv_dir:
+        fold_files = sorted(Path(args.cv_dir).glob(args.cv_pattern))
+        if not fold_files:
+            raise SystemExit(f"No fold files matching {args.cv_pattern!r} in {args.cv_dir}")
+        fold_targets = []
+        for fp in fold_files:
+            m = re.search(r"fold(\d+)", fp.stem)
+            if not m:
+                raise SystemExit(f"Could not parse a fold index out of {fp.name!r} (expected '...foldN...')")
+            fold_targets.append((fp, run_dir / f"fold{int(m.group(1))}", int(m.group(1))))
+        print(f"CV mode: {len(fold_targets)} folds from {args.cv_dir}")
     else:
-        pretrain_samples, val_samples, _test = build_stratified_splits(args, run_dir=run_dir)
+        split_path = Path(args.splits) if args.splits else None
+        fold_targets = [(split_path, run_dir, None)]
 
-    preprocess_val   = vit.preprocess_val
-    preprocess_train = build_train_transform_lace(preprocess_val)
-    tokenizer        = text_enc.tokenizer
+    btxrd_loader = None  # fold-independent; built once on first use, reused across folds
 
-    ds_kwargs = dict(
-        max_text_len=args.max_text_len,
-        max_beur_text_len=args.max_beur_text_len,
-        text_mode=args.text_mode,
-        max_bef_phrases=args.max_bef_phrases,
-        max_beur_phrases=args.max_beur_phrases,
-        context_fraction=args.context_fraction,
-    )
-    train_ds = InternalDatasetV2(pretrain_samples, preprocess_train, tokenizer, **ds_kwargs)
-    val_ds   = InternalDatasetV2(val_samples,      preprocess_val,   tokenizer, **ds_kwargs)
+    for split_path, this_run_dir, fold_idx in fold_targets:
+        if args.cv_dir:
+            this_run_dir.mkdir(parents=True, exist_ok=True)
+            print(f"\n{'#' * 70}\n# FOLD {fold_idx} — {split_path.name}\n{'#' * 70}")
 
-    if args.overfit_n is not None:
-        from torch.utils.data import Subset
-        n = args.overfit_n
-        indices = list(range(min(n, len(train_ds))))
-        train_ds = Subset(train_ds, indices)
-        # val uses the same samples as train so we can observe overfitting directly
-        val_ds   = Subset(InternalDatasetV2(pretrain_samples, preprocess_val, tokenizer, **ds_kwargs), indices)
-        args.no_btxrd = True
-        print(f"[overfit mode] using {len(train_ds)} train samples as train+val, BTXRD disabled")
-
-    print(f"Pretrain datasets: {len(train_ds)} train / {len(val_ds)} val")
-
-    # ── Fixed visualisation samples (picked once, reused every epoch) ─────────
-    vis_samples: list[dict] = []
-    raw_val_ds = val_ds.dataset if hasattr(val_ds, "dataset") else val_ds
-    for s in raw_val_ds.samples:
-        if len(vis_samples) >= 10:
-            break
-        mask_path = Path(s["mask"])
-        if not mask_path.exists():
-            continue
-        mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
-        if not np.any(mask_arr > 0):
-            continue
-        img_path = Path(s["image"])
-        img_arr = np.array(Image.open(img_path).convert("RGB"))
-        if args.context_fraction >= 0:
-            img_crop_arr, crop_mask_arr = crop_around_mask_pair(
-                img_arr, mask_arr, context_fraction=args.context_fraction,
+        # ── Models ────────────────────────────────────────────────────────────
+        if args.image_encoder == "chexfound":
+            vit = CheXFoundSharedViT(
+                args.chexfound_config, args.chexfound_weights,
+                args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim,
             )
+            if args.warm_start_projections:
+                print("Note: --warm_start_projections ignored for chexfound "
+                      "(no compatible BiomedCLIP projection to copy).")
+            if args.unfreeze_layers > 0:
+                print("Note: --unfreeze_layers ignored for chexfound "
+                      "(only supported by the biomedclip SharedViT encoder).")
         else:
-            img_crop_arr = pad_to_square(img_arr)
-            crop_mask_arr = pad_to_square(mask_arr)
-        vis_samples.append({
-            "img_path":   img_path,
-            "img_crop":   img_crop_arr,
-            "img_tensor": preprocess_val(Image.fromarray(img_crop_arr)),
-            "mask_arr":   (crop_mask_arr > 0),
-        })
-    print(f"Visualisation samples: {len(vis_samples)} fixed val images with GT masks")
-
-    use_pin = device.type == "cuda"
-    internal_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=4, pin_memory=use_pin,
-        drop_last=(args.overfit_n is None),
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=4, pin_memory=use_pin,
-    )
-    # No-aug, deterministic train-eval bank for the k-NN proxy metric: same train
-    # samples but val transform + shuffle=False, so the reference bank is a clean
-    # function of the encoder weights only (image-only CLS embeddings).
-    knn_train_ds = InternalDatasetV2(pretrain_samples, preprocess_val, tokenizer, **ds_kwargs)
-    if args.overfit_n is not None:
-        from torch.utils.data import Subset
-        knn_train_ds = Subset(knn_train_ds, list(range(min(args.overfit_n, len(knn_train_ds)))))
-    knn_train_loader = DataLoader(
-        knn_train_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=4, pin_memory=use_pin,
-    )
-    btxrd_loader = None
-    if not args.no_btxrd:
-        btxrd_ds = BTXRDOrthoDataset(
-            Path(args.btxrd_images), Path(args.btxrd_annots), preprocess_val,
-        )
-        if len(btxrd_ds) > 0:
-            btxrd_loader = DataLoader(
-                btxrd_ds, batch_size=args.btxrd_batch_size, shuffle=True,
-                num_workers=4, pin_memory=use_pin, drop_last=True,
+            vit = SharedViT(
+                args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim,
+                unfreeze_layers=args.unfreeze_layers,
             )
+            if args.warm_start_projections:
+                vit.load_pretrained_projections()
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
-    no_decay_keys = ("bias", "norm.weight", "norm.bias", "ln_1.weight", "ln_1.bias",
-                     "ln_2.weight", "ln_2.bias")
+        text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim)
+        if args.warm_start_projections:
+            text_enc.load_pretrained_projections()
 
-    def _split_params(module: nn.Module):
-        decay, no_decay = [], []
-        for name, param in module.named_parameters():
-            if not param.requires_grad:
+        vit      = vit.to(device)
+        text_enc = text_enc.to(device)
+
+        vit_dim = vit.vit_dim
+        mask_decoder = MaskTokenDecoder(
+            n_tokens=args.n_mask_tokens,
+            n_heads=args.n_mask_heads,
+            sigma=args.gauss_sigma,
+            vit_dim=vit_dim,
+        ).to(device)
+        mask_head = MaskPredictionHead(tau=args.mask_head_tau, vit_dim=vit_dim).to(device)
+        mask_bank = PrototypeBank(
+            n_prototypes=args.n_prototypes,
+            dim=args.embed_dim,
+            vit_dim=vit_dim,
+            tau=args.tau_proto,
+        ).to(device)
+
+        τ = nn.Parameter(torch.tensor(0.07, device=device))
+
+        # ── Log-lambda weights ────────────────────────────────────────────────
+        log_lambda_ita   = nn.Parameter(torch.zeros([], device=device))
+        log_lambda_sim   = nn.Parameter(torch.zeros([], device=device))
+        log_lambda_ortho = nn.Parameter(torch.zeros([], device=device))
+        log_lambda_dice  = nn.Parameter(torch.zeros([], device=device))
+        log_lambda_rec   = nn.Parameter(torch.zeros([], device=device))
+        log_lambda_evid  = nn.Parameter(torch.zeros([], device=device))
+
+        if args.learn_loss_weights:
+            lambda_params = [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
+                             log_lambda_rec, log_lambda_evid]
+        else:
+            log_lambda_ita.data.fill_(0.0)
+            log_lambda_sim.data.fill_(math.log(args.lambda_sim))
+            log_lambda_ortho.data.fill_(math.log(args.lambda_ortho))
+            log_lambda_dice.data.fill_(math.log(args.lambda_dice))
+            log_lambda_rec.data.fill_(math.log(args.lambda_rec))
+            log_lambda_evid.data.fill_(math.log(args.lambda_evid))
+            lambda_params = []
+            for p in [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
+                      log_lambda_rec, log_lambda_evid]:
+                p.requires_grad_(False)
+
+        # ── Data ──────────────────────────────────────────────────────────────
+        if split_path is not None:
+            with open(split_path, encoding="utf-8") as fh:
+                split_data = json.load(fh)
+            shutil.copy(split_path, this_run_dir / "split.json")
+            pretrain_samples = split_data["train"]
+            val_samples      = split_data["val"]
+            print(f"Loaded split from {split_path} "
+                  f"({len(pretrain_samples)} train, {len(val_samples)} val samples)")
+        else:
+            pretrain_samples, val_samples, _test = build_stratified_splits(args, run_dir=this_run_dir)
+
+        preprocess_val   = vit.preprocess_val
+        preprocess_train = build_train_transform_lace(preprocess_val)
+        tokenizer        = text_enc.tokenizer
+
+        ds_kwargs = dict(
+            max_text_len=args.max_text_len,
+            max_beur_text_len=args.max_beur_text_len,
+            text_mode=args.text_mode,
+            max_bef_phrases=args.max_bef_phrases,
+            max_beur_phrases=args.max_beur_phrases,
+            context_fraction=args.context_fraction,
+        )
+        train_ds = InternalDatasetV2(pretrain_samples, preprocess_train, tokenizer, **ds_kwargs)
+        val_ds   = InternalDatasetV2(val_samples,      preprocess_val,   tokenizer, **ds_kwargs)
+
+        if args.overfit_n is not None:
+            from torch.utils.data import Subset
+            n = args.overfit_n
+            indices = list(range(min(n, len(train_ds))))
+            train_ds = Subset(train_ds, indices)
+            # val uses the same samples as train so we can observe overfitting directly
+            val_ds   = Subset(InternalDatasetV2(pretrain_samples, preprocess_val, tokenizer, **ds_kwargs), indices)
+            args.no_btxrd = True
+            print(f"[overfit mode] using {len(train_ds)} train samples as train+val, BTXRD disabled")
+
+        print(f"Pretrain datasets: {len(train_ds)} train / {len(val_ds)} val")
+
+        # ── Fixed visualisation samples (picked once, reused every epoch) ──────
+        vis_samples: list[dict] = []
+        raw_val_ds = val_ds.dataset if hasattr(val_ds, "dataset") else val_ds
+        for s in raw_val_ds.samples:
+            if len(vis_samples) >= 10:
+                break
+            mask_path = Path(s["mask"])
+            if not mask_path.exists():
                 continue
-            if any(name.endswith(k) for k in no_decay_keys):
-                no_decay.append(param)
+            mask_arr = np.array(Image.open(mask_path).convert("L"), dtype=float)
+            if not np.any(mask_arr > 0):
+                continue
+            img_path = Path(s["image"])
+            img_arr = np.array(Image.open(img_path).convert("RGB"))
+            if args.context_fraction >= 0:
+                img_crop_arr, crop_mask_arr = crop_around_mask_pair(
+                    img_arr, mask_arr, context_fraction=args.context_fraction,
+                )
             else:
-                decay.append(param)
-        return decay, no_decay
+                img_crop_arr = pad_to_square(img_arr)
+                crop_mask_arr = pad_to_square(mask_arr)
+            vis_samples.append({
+                "img_path":   img_path,
+                "img_crop":   img_crop_arr,
+                "img_tensor": preprocess_val(Image.fromarray(img_crop_arr)),
+                "mask_arr":   (crop_mask_arr > 0),
+            })
+        print(f"Visualisation samples: {len(vis_samples)} fixed val images with GT masks")
 
-    vit_decay,  vit_nd  = _split_params(vit)
-    txt_decay,  txt_nd  = _split_params(text_enc)
-    dec_decay,  dec_nd  = _split_params(mask_decoder)
-    hd_decay,   hd_nd   = _split_params(mask_head)
-    # φ (img_proj) gets weight decay; raw prototypes do not (shrinkage handled by λ_µ).
-    bank_decay = [p for n, p in mask_bank.named_parameters()
-                  if p.requires_grad and n != "prototypes"]
-    bank_nd    = [mask_bank.prototypes] if mask_bank.prototypes.requires_grad else []
-
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": vit_decay + txt_decay + dec_decay + hd_decay + bank_decay,
-             "weight_decay": args.weight_decay},
-            {"params": vit_nd + txt_nd + dec_nd + hd_nd + bank_nd + [τ] + lambda_params,
-             "weight_decay": 0.0},
-        ],
-        lr=args.lr, betas=(0.9, 0.98), eps=1e-6,
-    )
-    trainable_params = (
-        vit_decay + txt_decay + dec_decay + hd_decay + bank_decay
-        + vit_nd + txt_nd + dec_nd + hd_nd + bank_nd
-        + [τ] + lambda_params
-    )
-
-    warmup_stage1 = max(1, args.stage1_epochs // 5) if args.stage1_epochs > 0 else 0
-    warmup_stage2 = max(1, (args.epochs - args.stage1_epochs) // 5)
-    scheduler     = make_scheduler(
-        optimizer, warmup_stage1, args.stage1_epochs or args.epochs, args.scheduler
-    )
-    scaler        = (
-        torch.amp.GradScaler("cuda") if device.type == "cuda"
-        else torch.amp.GradScaler("cpu")
-    )
-
-    lora_cfg = {
-        "lora_layers":     args.lora_layers,
-        "lora_r":          args.lora_r,
-        "lora_alpha":      args.lora_alpha,
-        "embed_dim":       args.embed_dim,
-        "unfreeze_layers": args.unfreeze_layers,
-    }
-
-    # ── W&B ───────────────────────────────────────────────────────────────────
-    use_wandb = args.wandb and WANDB_AVAILABLE
-    if args.wandb and not WANDB_AVAILABLE:
-        warnings.warn("--wandb set but wandb is not installed. Skipping.")
-    if use_wandb:
-        run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_run,
-            config=vars(args),
+        use_pin = device.type == "cuda"
+        internal_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, shuffle=True,
+            num_workers=4, pin_memory=use_pin,
+            drop_last=(args.overfit_n is None),
         )
-
-    # ── Training loop ─────────────────────────────────────────────────────────
-    best_val_loss     = float("inf")
-    best_mean_r1      = float("-inf")
-    epochs_no_improve = 0
-    val_loss          = float("inf")
-    stage1_end        = args.stage1_epochs   # 0 means skip directly to stage 2
-
-    loss_stage_map = build_loss_stage_map(args.loss_stages)
-    active_losses  = {k for k, v in loss_stage_map.items() if v}
-    stage_desc = ", ".join(
-        f"{k}:{sorted(loss_stage_map[k]) or 'off'}" for k in _STAGEABLE_LOSSES
-    )
-    print(f"Active losses: {sorted(active_losses)}")
-    print(f"Loss stage map: {stage_desc}")
-
-    shared_kwargs = dict(
-        loss_stage_map=loss_stage_map,
-        text_mode=args.text_mode,
-        τ_s_beur=args.tau_s_beur,
-        τ_s_bef=args.tau_s_bef,
-        τ_s_img_full=args.tau_s_img_full,
-        sim_attn_tau=args.sim_attn_tau,
-        same_image_boost=args.same_image_boost,
-        reweight_by_n_phrases=args.reweight_by_n_phrases,
-        t2i_mode=args.t2i_mode,
-        lambda_t2i=args.lambda_t2i,
-        lambda_mu=args.lambda_mu,
-    )
-
-    stage2_epochs = args.epochs - stage1_end
-    print(
-        f"\nStarting LACE v2 training: {args.epochs} epochs "
-        f"(stage1={stage1_end}, stage2={stage2_epochs})\n"
-    )
-
-    checkpoint = {}
-    stage2_started = False
-    for epoch in range(1, args.epochs + 1):
-        stage = 1 if epoch <= stage1_end else 2
-
-        if stage == 2 and not stage2_started:
-            stage2_started = True
-            scheduler = make_scheduler(
-                optimizer, warmup_stage2,
-                args.epochs - stage1_end, args.scheduler,
+        val_loader = DataLoader(
+            val_ds, batch_size=args.batch_size, shuffle=False,
+            num_workers=4, pin_memory=use_pin,
+        )
+        # No-aug, deterministic train-eval bank for the k-NN proxy metric: same train
+        # samples but val transform + shuffle=False, so the reference bank is a clean
+        # function of the encoder weights only (image-only CLS embeddings).
+        knn_train_ds = InternalDatasetV2(pretrain_samples, preprocess_val, tokenizer, **ds_kwargs)
+        if args.overfit_n is not None:
+            from torch.utils.data import Subset
+            knn_train_ds = Subset(knn_train_ds, list(range(min(args.overfit_n, len(knn_train_ds)))))
+        knn_train_loader = DataLoader(
+            knn_train_ds, batch_size=args.batch_size, shuffle=False,
+            num_workers=4, pin_memory=use_pin,
+        )
+        if btxrd_loader is None and not args.no_btxrd:
+            btxrd_ds = BTXRDOrthoDataset(
+                Path(args.btxrd_images), Path(args.btxrd_annots), preprocess_val,
             )
-            # best_val_loss scale changes when sim+ortho activate (affects best_checkpoint.pt);
-            # reset epochs_no_improve so stage 2 gets a fresh mean_r1 patience budget.
-            # best_mean_r1 is intentionally NOT reset: retrieval scale is stable across stages,
-            # so best_retrieval_checkpoint.pt keeps the globally best checkpoint.
-            best_val_loss     = float("inf")
-            epochs_no_improve = 0
+            if len(btxrd_ds) > 0:
+                btxrd_loader = DataLoader(
+                    btxrd_ds, batch_size=args.btxrd_batch_size, shuffle=True,
+                    num_workers=4, pin_memory=use_pin, drop_last=True,
+                )
 
-        train_metrics = train_one_epoch(
-            vit, text_enc, mask_decoder, mask_head, mask_bank,
-            internal_loader, btxrd_loader,
-            optimizer, scaler, τ,
-            log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-            log_lambda_rec, log_lambda_evid,
-            trainable_params, device,
-            stage=stage,
-            learn_loss_weights=args.learn_loss_weights,
-            **shared_kwargs,
-        )
-        val_metrics = evaluate(
-            vit, text_enc, mask_decoder, mask_head, mask_bank, val_loader, τ,
-            log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-            log_lambda_rec, log_lambda_evid,
-            device, stage=stage, **shared_kwargs,
-        )
-        retrieval_metrics = evaluate_retrieval_lace(
-            vit, text_enc, val_loader, device, text_mode=args.text_mode,
-        )
-        knn_metrics = evaluate_knn_probe(
-            vit, knn_train_loader, val_loader, device,
-        )
-        if vis_samples:
-            visualize_heatmaps(
-                vit, mask_decoder, mask_head, vis_samples,
-                epoch, run_dir, device, use_wandb=use_wandb,
-            )
-        scheduler.step()
+        # ── Optimizer ─────────────────────────────────────────────────────────
+        no_decay_keys = ("bias", "norm.weight", "norm.bias", "ln_1.weight", "ln_1.bias",
+                         "ln_2.weight", "ln_2.bias")
 
-        val_loss   = val_metrics["val/loss"]
-        lr_current = scheduler.get_last_lr()[0]
-        i2t_r1  = retrieval_metrics.get("retrieval/i2t_r1",          float("nan"))
-        i2t_r5  = retrieval_metrics.get("retrieval/i2t_r5",          float("nan"))
-        i2t_med = retrieval_metrics.get("retrieval/i2t_median_rank",  float("nan"))
-        t2i_r1  = retrieval_metrics.get("retrieval/t2i_r1",          float("nan"))
-        t2i_r5  = retrieval_metrics.get("retrieval/t2i_r5",          float("nan"))
-        t2i_med = retrieval_metrics.get("retrieval/t2i_median_rank",  float("nan"))
-        mean_r1 = retrieval_metrics.get("retrieval/mean_r1",          float("nan"))
-        mean_r5 = retrieval_metrics.get("retrieval/mean_r5",          float("nan"))
-        print(
-            f"Epoch {epoch:03d}/{args.epochs} [stage {stage}] | "
-            f"train={train_metrics['train/loss']:.4f} | val={val_loss:.4f} | "
-            f"ita={val_metrics['val/l_ita']:.4f} | "
-            f"sim={val_metrics['val/l_sim']:.4f} | "
-            f"rec={val_metrics['val/l_rec']:.4f} evid={val_metrics['val/l_evid']:.4f} "
-            f"(H={val_metrics['val/proto_entropy']:.2f}) | "
-            f"ortho={val_metrics['val/l_ortho']:.4f} | "
-            f"dice={val_metrics['val/l_dice']:.4f} "
-            f"(d={val_metrics['val/l_dice_only']:.4f} bce={val_metrics['val/l_bce']:.4f}) | "
-            f"lr={lr_current:.2e}"
+        def _split_params(module: nn.Module):
+            decay, no_decay = [], []
+            for name, param in module.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if any(name.endswith(k) for k in no_decay_keys):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+            return decay, no_decay
+
+        vit_decay,  vit_nd  = _split_params(vit)
+        txt_decay,  txt_nd  = _split_params(text_enc)
+        dec_decay,  dec_nd  = _split_params(mask_decoder)
+        hd_decay,   hd_nd   = _split_params(mask_head)
+        # φ (img_proj) gets weight decay; raw prototypes do not (shrinkage handled by λ_µ).
+        bank_decay = [p for n, p in mask_bank.named_parameters()
+                      if p.requires_grad and n != "prototypes"]
+        bank_nd    = [mask_bank.prototypes] if mask_bank.prototypes.requires_grad else []
+
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": vit_decay + txt_decay + dec_decay + hd_decay + bank_decay,
+                 "weight_decay": args.weight_decay},
+                {"params": vit_nd + txt_nd + dec_nd + hd_nd + bank_nd + [τ] + lambda_params,
+                 "weight_decay": 0.0},
+            ],
+            lr=args.lr, betas=(0.9, 0.98), eps=1e-6,
         )
-        print(
-            f"  I2T R@1={i2t_r1:.3f} R@5={i2t_r5:.3f} med={i2t_med:.0f} | "
-            f"T2I R@1={t2i_r1:.3f} R@5={t2i_r5:.3f} med={t2i_med:.0f} | "
-            f"mean_r1={mean_r1:.3f} mean_r5={mean_r5:.3f}"
-        )
-        print(
-            f"  kNN bal_acc k5={knn_metrics.get('knn/bal_acc_k5', float('nan')):.3f} "
-            f"k20={knn_metrics.get('knn/bal_acc_k20', float('nan')):.3f} | "
-            f"macro_F1 k5={knn_metrics.get('knn/f1_k5', float('nan')):.3f} "
-            f"k20={knn_metrics.get('knn/f1_k20', float('nan')):.3f}"
+        trainable_params = (
+            vit_decay + txt_decay + dec_decay + hd_decay + bank_decay
+            + vit_nd + txt_nd + dec_nd + hd_nd + bank_nd
+            + [τ] + lambda_params
         )
 
-        if use_wandb:
-            wandb.log(
-                {**train_metrics, **val_metrics, **retrieval_metrics, **knn_metrics,
-                 "epoch": epoch, "stage": stage, "train/lr": lr_current},
-                step=epoch,
-            )
+        warmup_stage1 = max(1, args.stage1_epochs // 5) if args.stage1_epochs > 0 else 0
+        warmup_stage2 = max(1, (args.epochs - args.stage1_epochs) // 5)
+        scheduler     = make_scheduler(
+            optimizer, warmup_stage1, args.stage1_epochs or args.epochs, args.scheduler
+        )
+        scaler        = (
+            torch.amp.GradScaler("cuda") if device.type == "cuda"
+            else torch.amp.GradScaler("cpu")
+        )
 
-        checkpoint = {
-            "epoch":                epoch,
-            "stage":                stage,
-            "val_loss":             val_loss,
-            "image_encoder":        args.image_encoder,
-            "lora_config":          lora_cfg,
-            "n_mask_tokens":        args.n_mask_tokens,
-            "n_mask_heads":         args.n_mask_heads,
-            "gauss_sigma":          args.gauss_sigma,
-            "n_prototypes":         args.n_prototypes,
-            "tau_proto":            args.tau_proto,
-            "vit_state":            vit.state_dict(),
-            "text_enc_state":       text_enc.state_dict(),
-            "mask_decoder_state":   mask_decoder.state_dict(),
-            "mask_head_state":      mask_head.state_dict(),
-            "mask_bank_state":      mask_bank.state_dict(),
-            "tau":                  τ.data,
-            "log_lambda_ita":       log_lambda_ita.data,
-            "log_lambda_sim":       log_lambda_sim.data,
-            "log_lambda_ortho":     log_lambda_ortho.data,
-            "log_lambda_dice":      log_lambda_dice.data,
-            "log_lambda_rec":       log_lambda_rec.data,
-            "log_lambda_evid":      log_lambda_evid.data,
-            "optimizer_state":      optimizer.state_dict(),
+        lora_cfg = {
+            "lora_layers":     args.lora_layers,
+            "lora_r":          args.lora_r,
+            "lora_alpha":      args.lora_alpha,
+            "embed_dim":       args.embed_dim,
+            "unfreeze_layers": args.unfreeze_layers,
         }
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(checkpoint, run_dir / "best_checkpoint.pt")
+        # ── W&B ───────────────────────────────────────────────────────────────
+        use_wandb = args.wandb and WANDB_AVAILABLE
+        if args.wandb and not WANDB_AVAILABLE:
+            warnings.warn("--wandb set but wandb is not installed. Skipping.")
+        if use_wandb:
+            if args.cv_dir:
+                wb_base = args.wandb_run or run_stamp
+                run = wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=f"{wb_base}_fold{fold_idx}",
+                    group=wb_base,
+                    config=vars(args),
+                )
+            else:
+                run = wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=args.wandb_run,
+                    config=vars(args),
+                )
 
-        # Early stopping keys on retrieval mean_r1 (higher is better).
-        if mean_r1 > best_mean_r1:
-            best_mean_r1      = mean_r1
-            epochs_no_improve = 0
-            torch.save(checkpoint, run_dir / "best_retrieval_checkpoint.pt")
-        else:
-            epochs_no_improve += 1
+        # ── Training loop ────────────────────────────────────────────────────
+        best_val_loss     = float("inf")
+        best_mean_r1      = float("-inf")
+        epochs_no_improve = 0
+        val_loss          = float("inf")
+        stage1_end        = args.stage1_epochs   # 0 means skip directly to stage 2
 
-        if args.patience > 0 and epochs_no_improve >= args.patience:
-            print(f"\nEarly stopping at epoch {epoch} "
-                  f"(no mean_r1 improvement for {args.patience} epochs).")
-            break
+        loss_stage_map = build_loss_stage_map(args.loss_stages)
+        active_losses  = {k for k, v in loss_stage_map.items() if v}
+        stage_desc = ", ".join(
+            f"{k}:{sorted(loss_stage_map[k]) or 'off'}" for k in _STAGEABLE_LOSSES
+        )
+        print(f"Active losses: {sorted(active_losses)}")
+        print(f"Loss stage map: {stage_desc}")
 
-    # Save final checkpoint without optimizer state
-    checkpoint.pop("optimizer_state", None)
-    torch.save(checkpoint, run_dir / "final_checkpoint.pt")
-    print(f"\nDone. Best val loss: {best_val_loss:.4f} | Best mean R@1: {best_mean_r1:.3f}. Checkpoints: {run_dir}")
-    if use_wandb:
-        wandb.finish()
+        shared_kwargs = dict(
+            loss_stage_map=loss_stage_map,
+            text_mode=args.text_mode,
+            τ_s_beur=args.tau_s_beur,
+            τ_s_bef=args.tau_s_bef,
+            τ_s_img_full=args.tau_s_img_full,
+            sim_attn_tau=args.sim_attn_tau,
+            same_image_boost=args.same_image_boost,
+            reweight_by_n_phrases=args.reweight_by_n_phrases,
+            t2i_mode=args.t2i_mode,
+            lambda_t2i=args.lambda_t2i,
+            lambda_mu=args.lambda_mu,
+        )
+
+        stage2_epochs = args.epochs - stage1_end
+        print(
+            f"\nStarting LACE v2 training: {args.epochs} epochs "
+            f"(stage1={stage1_end}, stage2={stage2_epochs})\n"
+        )
+
+        checkpoint = {}
+        stage2_started = False
+        for epoch in range(1, args.epochs + 1):
+            stage = 1 if epoch <= stage1_end else 2
+
+            if stage == 2 and not stage2_started:
+                stage2_started = True
+                scheduler = make_scheduler(
+                    optimizer, warmup_stage2,
+                    args.epochs - stage1_end, args.scheduler,
+                )
+                # best_val_loss scale changes when sim+ortho activate (affects best_checkpoint.pt);
+                # reset epochs_no_improve so stage 2 gets a fresh mean_r1 patience budget.
+                # best_mean_r1 is intentionally NOT reset: retrieval scale is stable across stages,
+                # so best_retrieval_checkpoint.pt keeps the globally best checkpoint.
+                best_val_loss     = float("inf")
+                epochs_no_improve = 0
+
+            train_metrics = train_one_epoch(
+                vit, text_enc, mask_decoder, mask_head, mask_bank,
+                internal_loader, btxrd_loader,
+                optimizer, scaler, τ,
+                log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
+                log_lambda_rec, log_lambda_evid,
+                trainable_params, device,
+                stage=stage,
+                learn_loss_weights=args.learn_loss_weights,
+                **shared_kwargs,
+            )
+            val_metrics = evaluate(
+                vit, text_enc, mask_decoder, mask_head, mask_bank, val_loader, τ,
+                log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
+                log_lambda_rec, log_lambda_evid,
+                device, stage=stage, **shared_kwargs,
+            )
+            retrieval_metrics = evaluate_retrieval_lace(
+                vit, text_enc, val_loader, device, text_mode=args.text_mode,
+            )
+            knn_metrics = evaluate_knn_probe(
+                vit, knn_train_loader, val_loader, device,
+            )
+            if vis_samples:
+                visualize_heatmaps(
+                    vit, mask_decoder, mask_head, vis_samples,
+                    epoch, this_run_dir, device, use_wandb=use_wandb,
+                )
+            scheduler.step()
+
+            val_loss   = val_metrics["val/loss"]
+            lr_current = scheduler.get_last_lr()[0]
+            i2t_r1  = retrieval_metrics.get("retrieval/i2t_r1",          float("nan"))
+            i2t_r5  = retrieval_metrics.get("retrieval/i2t_r5",          float("nan"))
+            i2t_med = retrieval_metrics.get("retrieval/i2t_median_rank",  float("nan"))
+            t2i_r1  = retrieval_metrics.get("retrieval/t2i_r1",          float("nan"))
+            t2i_r5  = retrieval_metrics.get("retrieval/t2i_r5",          float("nan"))
+            t2i_med = retrieval_metrics.get("retrieval/t2i_median_rank",  float("nan"))
+            mean_r1 = retrieval_metrics.get("retrieval/mean_r1",          float("nan"))
+            mean_r5 = retrieval_metrics.get("retrieval/mean_r5",          float("nan"))
+            print(
+                f"Epoch {epoch:03d}/{args.epochs} [stage {stage}] | "
+                f"train={train_metrics['train/loss']:.4f} | val={val_loss:.4f} | "
+                f"ita={val_metrics['val/l_ita']:.4f} | "
+                f"sim={val_metrics['val/l_sim']:.4f} | "
+                f"rec={val_metrics['val/l_rec']:.4f} evid={val_metrics['val/l_evid']:.4f} "
+                f"(H={val_metrics['val/proto_entropy']:.2f}) | "
+                f"ortho={val_metrics['val/l_ortho']:.4f} | "
+                f"dice={val_metrics['val/l_dice']:.4f} "
+                f"(d={val_metrics['val/l_dice_only']:.4f} bce={val_metrics['val/l_bce']:.4f}) | "
+                f"lr={lr_current:.2e}"
+            )
+            print(
+                f"  I2T R@1={i2t_r1:.3f} R@5={i2t_r5:.3f} med={i2t_med:.0f} | "
+                f"T2I R@1={t2i_r1:.3f} R@5={t2i_r5:.3f} med={t2i_med:.0f} | "
+                f"mean_r1={mean_r1:.3f} mean_r5={mean_r5:.3f}"
+            )
+            print(
+                f"  kNN bal_acc k5={knn_metrics.get('knn/bal_acc_k5', float('nan')):.3f} "
+                f"k20={knn_metrics.get('knn/bal_acc_k20', float('nan')):.3f} | "
+                f"macro_F1 k5={knn_metrics.get('knn/f1_k5', float('nan')):.3f} "
+                f"k20={knn_metrics.get('knn/f1_k20', float('nan')):.3f}"
+            )
+
+            if use_wandb:
+                wandb.log(
+                    {**train_metrics, **val_metrics, **retrieval_metrics, **knn_metrics,
+                     "epoch": epoch, "stage": stage, "train/lr": lr_current},
+                    step=epoch,
+                )
+
+            checkpoint = {
+                "epoch":                epoch,
+                "stage":                stage,
+                "val_loss":             val_loss,
+                "image_encoder":        args.image_encoder,
+                "lora_config":          lora_cfg,
+                "n_mask_tokens":        args.n_mask_tokens,
+                "n_mask_heads":         args.n_mask_heads,
+                "gauss_sigma":          args.gauss_sigma,
+                "n_prototypes":         args.n_prototypes,
+                "tau_proto":            args.tau_proto,
+                "vit_state":            vit.state_dict(),
+                "text_enc_state":       text_enc.state_dict(),
+                "mask_decoder_state":   mask_decoder.state_dict(),
+                "mask_head_state":      mask_head.state_dict(),
+                "mask_bank_state":      mask_bank.state_dict(),
+                "tau":                  τ.data,
+                "log_lambda_ita":       log_lambda_ita.data,
+                "log_lambda_sim":       log_lambda_sim.data,
+                "log_lambda_ortho":     log_lambda_ortho.data,
+                "log_lambda_dice":      log_lambda_dice.data,
+                "log_lambda_rec":       log_lambda_rec.data,
+                "log_lambda_evid":      log_lambda_evid.data,
+                "optimizer_state":      optimizer.state_dict(),
+            }
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(checkpoint, this_run_dir / "best_checkpoint.pt")
+
+            # Early stopping keys on retrieval mean_r1 (higher is better).
+            if mean_r1 > best_mean_r1:
+                best_mean_r1      = mean_r1
+                epochs_no_improve = 0
+                torch.save(checkpoint, this_run_dir / "best_retrieval_checkpoint.pt")
+            else:
+                epochs_no_improve += 1
+
+            if args.patience > 0 and epochs_no_improve >= args.patience:
+                print(f"\nEarly stopping at epoch {epoch} "
+                      f"(no mean_r1 improvement for {args.patience} epochs).")
+                break
+
+        # Save final checkpoint without optimizer state
+        checkpoint.pop("optimizer_state", None)
+        torch.save(checkpoint, this_run_dir / "final_checkpoint.pt")
+        print(f"\nDone. Best val loss: {best_val_loss:.4f} | Best mean R@1: {best_mean_r1:.3f}. "
+              f"Checkpoints: {this_run_dir}")
+        if use_wandb:
+            wandb.finish()
+
+        # Fold's model/optimizer must not leak into the next fold's GPU memory.
+        del vit, text_enc, mask_decoder, mask_head, mask_bank, optimizer, scheduler, scaler, checkpoint
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

@@ -13,17 +13,18 @@
 # Set CHECKPOINT to a continued-pretrain .pth path, or "none" to use frozen original weights
 CHECKPOINT="none"
 CHEXFOUND_WEIGHTS="/mnt/nfs/homedirs/philippw/Project/src/chexfound/data/teacher_checkpoint.pth"
-IMAGE_SIZE=512   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
-SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_binary_final.json"
+IMAGE_SIZE=224   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
+SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json"
+BINARY="false"  # true | false
 HEAD="mlp_no_meta"   # linear | mlp | mlp_no_meta
 BATCH_SIZE=16
-LR=0.0002402131717649611
-DROPOUT=0.3
+LR=0.0003946323640213164
+DROPOUT=0.4
 HIDDEN_DIMS="64"
 META_EMBED_DIM=16
 WEIGHT_DECAY=0.1
 EPOCHS=50
-LOSS="focal"  # ce | wce | ce_smooth | focal | cb_focal | ldam | balanced_softmax
+LOSS="cb_focal"  # ce | wce | ce_smooth | focal | cb_focal | ldam | balanced_softmax
 FOCAL_GAMMA=4.0
 CLASS_WEIGHTING="inverse"  # none | inverse | sqrt | effective
 CB_BETA=0.99  # only active for cb_focal
@@ -72,6 +73,7 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfou
     --wandb \
     --wandb_project chexfound-downstream \
     --wandb_entity  philipp-wiese \
-    --binary true \
+    --binary        $BINARY \
+    --eval_test
     
 

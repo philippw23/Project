@@ -6,6 +6,17 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_lacev2.out"
+# Note: bump --time above when CV_DIR is set below — CV runs N folds back to
+# back in a single job, so it needs roughly N x a normal single-run time budget.
+
+# ── Cross-validation ────────────────────────────────────────────────────────────
+# Set CV_DIR to run one full pretraining pass per fold file instead of a single
+# run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
+# a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
+home_dir="/mnt/nfs/homedirs/$USER"
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary # e.g. $home_dir/Project/data/internal_dataset/cv_binary
+CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
+SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json   # ignored when CV_DIR is set
 
 # ── Image encoder ─────────────────────────────────────────────────────────────
 IMAGE_ENCODER=biomedclip   # biomedclip | chexfound
@@ -15,7 +26,7 @@ LORA_LAYERS=6
 LORA_R=8
 LORA_ALPHA=32
 EMBED_DIM=512
-UNFREEZE_LAYERS=6          # 0 = use LoRA | >0 = full fine-tune last N ViT blocks (overrides LoRA, biomedclip only)
+UNFREEZE_LAYERS=4          # 0 = use LoRA | >0 = full fine-tune last N ViT blocks (overrides LoRA, biomedclip only)
 N_MASK_TOKENS=1
 N_MASK_HEADS=16
 GAUSS_SIGMA=4.5
@@ -44,15 +55,15 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # Standard is 0.15
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
-STAGE1_EPOCHS=18           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 10
+STAGE1_EPOCHS=16           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 10
 EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 16
 PATIENCE=20
 
 # ── Optimisation ──────────────────────────────────────────────────────────────
 # overfit: LR=1e-3 SCHEDULER=constant
-LR=8e-5 #0.000199055811638479 # 
+LR=1.672772947691402e-05
 SCHEDULER=cosine
-WEIGHT_DECAY=0.001
+WEIGHT_DECAY=0.0010489285940590723
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
 #LOSSES="ita evid ortho dice" # swap "sim" -> "evid" for the LGDEA prototype variant
@@ -68,9 +79,9 @@ LAMBDA_REC=1.0
 LAMBDA_EVID=1.0
 
 # ── Soft-target / t2i ────────────────────────────────────────────────────────
-TAU_S_BEUR=0.0325
-TAU_S_BEF=0.038
-TAU_S_IMG_FULL=0.028
+TAU_S_BEUR=0.03
+TAU_S_BEF=0.045
+TAU_S_IMG_FULL=0.03
 LAMBDA_T2I=0.5
 SAME_IMAGE_BOOST=20.0
 REWEIGHT_BY_N_PHRASES=true
@@ -79,7 +90,7 @@ T2I_MODE=image_image  #image_image | "text_text" | "descriptor" | "infonce"
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
-home_dir="/mnt/nfs/homedirs/$USER"
+
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
 echo Starting job ${SLURM_JOBID}
@@ -99,7 +110,9 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/lace_pretrain_v2.py \
     --image_encoder     $IMAGE_ENCODER \
-    --splits            $home_dir/Project/data/internal_dataset/split_binary_final.json \
+    $( [ -z "$CV_DIR" ] && echo "--splits $SPLITS" ) \
+    $( [ -n "$CV_DIR" ] && echo "--cv_dir $CV_DIR" ) \
+    $( [ -n "$CV_DIR" ] && [ -n "$CV_PATTERN" ] && echo "--cv_pattern $CV_PATTERN" ) \
     --btxrd_images      $home_dir/Project/data/BTXRD/images \
     --btxrd_annots      $home_dir/Project/data/BTXRD/Annotations \
     --out_dir           $home_dir/Project/results \

@@ -61,7 +61,7 @@ def parse_args(argv=None) -> tuple[argparse.Namespace, list[str]]:
         description="K-fold CV orchestrator for LACE downstream (fixed hyperparameters).",
         add_help=True,
     )
-    p.add_argument("--cv_dir", default=str(ROOT_DIR / "data" / "internal_dataset" / "cv"),
+    p.add_argument("--cv_dir", default=str(ROOT_DIR / "data" / "internal_dataset" / "cv_binary"),
                    help="Directory containing the fold split files.")
     p.add_argument("--pattern", default="split_binary_fold*.json",
                    help="Glob for fold files inside --cv_dir (sorted).")

@@ -20,10 +20,7 @@ val/test splits are assumed to already be patient-disjoint from train (this is
 asserted per fold).
 
 Usage:
-    python src/create_cv_splits.py \\
-        --input  data/internal_dataset/test/split_binary_backup.json \\
-        --out_dir data/internal_dataset/cv \\
-        --seed 42
+    python src/create_cv_splits.py --input  data/internal_dataset/split_final.json --out_dir data/internal_dataset/cv --seed 42
 """
 from __future__ import annotations
 
@@ -116,7 +113,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--input",   default=str(ROOT_DIR / "data" / "internal_dataset" / "test" / "split_binary_backup.json"),
                    help="Existing split manifest with train/val/test keys.")
-    p.add_argument("--out_dir", default=str(ROOT_DIR / "data" / "internal_dataset" / "cv"))
+    p.add_argument("--out_dir", default=str(ROOT_DIR / "data" / "internal_dataset" / "cv_binary"))
     p.add_argument("--seed",     type=int,   default=42)
     return p.parse_args(argv)
 

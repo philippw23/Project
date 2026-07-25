@@ -8,6 +8,17 @@
 #SBATCH --partition=all_nodes
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
+# Note: bump --time above when CV_DIR is set below — CV runs N folds back to
+# back in a single job, so it needs roughly N x a normal single-run time budget.
+
+# ── Cross-validation ─────────────────────────────────────────────────────────
+# Set CV_DIR to run one full pretraining pass per fold file instead of a single
+# run (results land under run_<name>/fold0/, fold1/, ...). Leave empty for a
+# normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
+home_dir="/mnt/nfs/homedirs/$USER"
+CV_DIR=                                             # e.g. $home_dir/Project/data/internal_dataset/cv_binary
+CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
+SPLITS=$home_dir/Project/data/internal_dataset/split.json   # ignored when CV_DIR is set
 
 # ── Training parameters (edit here) ──────────────────────────────────────────
 BATCH_SIZE=128
@@ -20,7 +31,6 @@ LR_PROJ=0.0003727751781632684
 LR_LORA=1e-5
 # ─────────────────────────────────────────────────────────────────────────────
 
-home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
 
@@ -50,7 +60,9 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 if [ "$NO_LORA" = true ]; then
     python $home_dir/Project/src/biomedclip_pretrain.py \
-        --splits   $home_dir/Project/data/internal_dataset/split.json \
+        $( [ -z "$CV_DIR" ] && echo "--splits $SPLITS" ) \
+        $( [ -n "$CV_DIR" ] && echo "--cv_dir $CV_DIR" ) \
+        $( [ -n "$CV_DIR" ] && [ -n "$CV_PATTERN" ] && echo "--cv_pattern $CV_PATTERN" ) \
         --out_dir  $home_dir/Project/results \
         --use_mask \
         --no_lora \
@@ -65,7 +77,9 @@ if [ "$NO_LORA" = true ]; then
         --wandb_entity philipp-wiese
 else
     python $home_dir/Project/src/biomedclip_pretrain.py \
-        --splits   $home_dir/Project/data/internal_dataset/split.json \
+        $( [ -z "$CV_DIR" ] && echo "--splits $SPLITS" ) \
+        $( [ -n "$CV_DIR" ] && echo "--cv_dir $CV_DIR" ) \
+        $( [ -n "$CV_DIR" ] && [ -n "$CV_PATTERN" ] && echo "--cv_pattern $CV_PATTERN" ) \
         --out_dir  $home_dir/Project/results \
         --use_mask \
         --lora_layers $LORA_LAYERS \
