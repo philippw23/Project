@@ -58,6 +58,14 @@ from biomedclip.models.lora import inject_lora, count_trainable_params
 from biomedclip.loss.contrastive import clip_loss
 from biomedclip.eval.retrieval import evaluate, evaluate_retrieval
 
+# Norm and bias parameters are excluded from weight decay because they act as
+# scale/shift terms and should not be penalised toward zero.
+_NO_DECAY_SUFFIXES = ("bias", "norm.weight", "norm.bias", "ln_1.weight", "ln_1.bias",
+                      "ln_2.weight", "ln_2.bias", "ln_pre.weight", "ln_pre.bias",
+                      "ln_post.weight", "ln_post.bias")
+_PROJ_PARAM_NAMES = {"visual.head", "text.proj", "logit_scale"}
+
+
 def _unfreeze_last_blocks(model: nn.Module, unfreeze_blocks: int) -> None:
     """Freeze the whole model then unfreeze the last N ViT blocks plus projection layers.
 
@@ -250,18 +258,379 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
         args.lora_alpha = 2.0 * args.lora_r
 
 
-def main(args: argparse.Namespace) -> None:
+def _validate_args(args: argparse.Namespace) -> None:
     if args.cv_dir and args.splits is not None:
         raise SystemExit("--cv_dir and --splits are mutually exclusive — --splits is managed per fold.")
     if args.cv_dir and args.sweep:
         raise SystemExit("--cv_dir and --sweep are mutually exclusive.")
 
-    # ── Reproducibility ───────────────────────────────────────────────────────
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed_all(seed)
+
+
+def _make_run_dir(args: argparse.Namespace) -> tuple[str, Path]:
+    if args.no_lora:
+        tune_tag = f"unfreeze{args.unfreeze_blocks}"
+    else:
+        tune_tag = f"lora{args.lora_layers}"
+    text_tag = "_phrases" if args.use_phrases else ""
+    run_name = f"run_bs{args.batch_size}_{tune_tag}{text_tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(args.out_dir) / "biomedclip_pretrain" / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run directory: {run_dir}")
+    return run_name, run_dir
+
+
+def _resolve_fold_targets(
+    args: argparse.Namespace, run_dir: Path,
+) -> list[tuple[Path | None, Path, int | None]]:
+    """One (split_path, this_run_dir, fold_idx) entry per fold, or a single
+    entry with fold_idx=None for a normal (non-CV) run."""
+    if not args.cv_dir:
+        split_path = Path(args.splits) if args.splits else None
+        return [(split_path, run_dir, None)]
+
+    fold_files = sorted(Path(args.cv_dir).glob(args.cv_pattern))
+    if not fold_files:
+        raise SystemExit(f"No fold files matching {args.cv_pattern!r} in {args.cv_dir}")
+    fold_targets = []
+    for fp in fold_files:
+        m = re.search(r"fold(\d+)", fp.stem)
+        if not m:
+            raise SystemExit(f"Could not parse a fold index out of {fp.name!r} (expected '...foldN...')")
+        fold_targets.append((fp, run_dir / f"fold{int(m.group(1))}", int(m.group(1))))
+    print(f"CV mode: {len(fold_targets)} folds from {args.cv_dir}")
+    return fold_targets
+
+
+def _load_model(
+    args: argparse.Namespace, device: torch.device,
+) -> tuple[nn.Module, object, object, object]:
+    """Load BiomedCLIP and apply LoRA or partial-unfreeze adaptation.
+
+    Returns (model, tokenizer, preprocess_val, augment_transform).
+    """
+    print(f"Loading model: {MODEL_TAG}")
+    # open_clip returns (model, train_preprocess, val_preprocess).
+    # We override train_preprocess with a custom augmentation pipeline below.
+    model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
+    tokenizer = open_clip.get_tokenizer(MODEL_TAG)
+    model = model.to(device)
+    # Adds random horizontal flip, colour jitter, and random resized crop on top of val_preprocess.
+    augment_transform = build_train_transform(preprocess_val)
+
+    if args.no_lora:
+        _unfreeze_last_blocks(model, args.unfreeze_blocks)
+        print(f"Partial fine-tune: last {args.unfreeze_blocks} ViT blocks unfrozen (no LoRA)")
+    else:
+        args.lora_alpha = 2.0 * args.lora_r  # enforce alpha = 2r regardless of CLI default
+        inject_lora(model, args.lora_layers, args.lora_r, args.lora_alpha)
+        print(
+            f"LoRA injected into last {args.lora_layers} ViT blocks "
+            f"(r={args.lora_r}, alpha={args.lora_alpha})"
+        )
+    n_trainable = count_trainable_params(model)
+    n_total     = sum(p.numel() for p in model.parameters())
+    print(f"Trainable params: {n_trainable:,} / {n_total:,} ({100 * n_trainable / n_total:.2f} %)")
+
+    return model, tokenizer, preprocess_val, augment_transform
+
+
+def _to_tuples(samples: list[dict], use_phrases: bool) -> list[tuple]:
+    if use_phrases:
+        result = []
+        dropped = 0
+        for s in samples:
+            bp  = s.get("befund_phrases") or []
+            bep = s.get("beurteilung_phrases") or []
+            if not bp or not bep:
+                dropped += 1
+                continue
+            result.append((Path(s["image"]), Path(s["mask"]), ". ".join(bp + bep)))
+        if dropped:
+            print(f"  use_phrases: dropped {dropped} samples missing phrase lists.")
+        return result
+    return [(Path(s["image"]), Path(s["mask"]), s["report"]) for s in samples]
+
+
+def _load_fold_datasets(
+    args: argparse.Namespace,
+    split_path: Path | None,
+    this_run_dir: Path,
+    tokenizer,
+    preprocess_val,
+    augment_transform,
+    device: torch.device,
+) -> tuple[DataLoader, DataLoader, BoneTumorPairDataset]:
+    """Resolve this fold's train/val samples into DataLoaders.
+
+    Returns (train_loader, val_loader, val_ds) — val_ds is also needed
+    separately for retrieval evaluation.
+    """
+    if split_path is not None:
+        with open(split_path, encoding="utf-8") as fh:
+            split_data = json.load(fh)
+        shutil.copy(split_path, this_run_dir / "split.json")
+        train_samples = split_data["train"]
+        val_samples   = split_data["val"]
+        print(f"Loaded split from {split_path} ({len(train_samples)} train, {len(val_samples)} val samples)")
+    else:
+        train_samples, val_samples, _ = build_stratified_splits(args, run_dir=this_run_dir)
+
+    train_ds = BoneTumorPairDataset(
+        _to_tuples(train_samples, args.use_phrases), augment_transform, tokenizer, args.use_mask)
+    val_ds   = BoneTumorPairDataset(
+        _to_tuples(val_samples, args.use_phrases),   preprocess_val,   tokenizer, args.use_mask)
+    print(f"Pretrain datasets: {len(train_ds)} train / {len(val_ds)} monitor-val")
+
+    use_pin_memory = device.type == "cuda"
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=use_pin_memory,
+        drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=use_pin_memory,
+        drop_last=False,
+    )
+    return train_loader, val_loader, val_ds
+
+
+def _build_optimizer(
+    args: argparse.Namespace, model: nn.Module,
+) -> tuple[torch.optim.Optimizer, list]:
+    """AdamW with 3 param groups: block/LoRA-with-decay, block/LoRA-no-decay
+    (norm/bias), and projection heads + logit_scale.
+
+    Differential LR: unfrozen/LoRA params use a low LR to avoid destabilising
+    pretrained representations; projection and logit_scale use the full
+    (higher) LR to adapt the contrastive head quickly.
+    """
+    block_lr = args.lr_blocks if args.no_lora else args.lr_lora
+
+    block_decay, block_no_decay, proj_params = [], [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(name == pn or name.startswith(pn + ".") for pn in _PROJ_PARAM_NAMES):
+            proj_params.append(param)
+        elif name.endswith(_NO_DECAY_SUFFIXES):
+            block_no_decay.append(param)
+        else:
+            block_decay.append(param)
+
+    trainable_params = block_decay + block_no_decay + proj_params
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": block_decay,    "lr": block_lr,      "weight_decay": args.weight_decay},
+            {"params": block_no_decay, "lr": block_lr,      "weight_decay": 0.0},
+            {"params": proj_params,    "lr": args.lr_proj,  "weight_decay": 0.0},
+        ],
+        betas=(0.9, 0.98),
+        eps=1e-6,
+    )
+    return optimizer, trainable_params
+
+
+def _init_wandb_run(
+    args: argparse.Namespace, run_name: str, fold_idx: int | None,
+) -> bool:
+    """Start a W&B run for this fold (if enabled) and apply sweep-agent
+    hyperparameter overrides. Returns whether W&B logging is active."""
+    use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
+    if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
+        warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
+    if not use_wandb:
+        return False
+
+    wandb_config = {
+        "lora_layers": args.lora_layers,
+        "lora_r":      args.lora_r,
+        "lora_alpha":  args.lora_alpha,
+        "epochs":      args.epochs,
+        "batch_size":  args.batch_size,
+        "lr_lora":     args.lr_lora,
+        "lr_proj":     args.lr_proj,
+        "weight_decay": args.weight_decay,
+        "seed":        args.seed,
+        "use_mask":    args.use_mask,
+        "text_mode":   "phrases" if args.use_phrases else "full",
+    }
+    if args.cv_dir:
+        wb_base = args.wandb_run or run_name
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=f"{wb_base}_fold{fold_idx}",
+            group=wb_base,
+            config=wandb_config,
+        )
+    else:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run,
+            config=wandb_config,
+        )
+    if args.sweep:
+        # Overwrite CLI args with sweep-agent-supplied hyperparameters.
+        _apply_sweep_config(args)
+    return True
+
+
+def _make_lora_config(args: argparse.Namespace) -> dict:
+    if args.no_lora:
+        return {"no_lora": True, "unfreeze_blocks": args.unfreeze_blocks}
+    return {"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha}
+
+
+def _train_fold(
+    args: argparse.Namespace,
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    val_ds: BoneTumorPairDataset,
+    preprocess_val,
+    tokenizer,
+    optimizer: torch.optim.Optimizer,
+    trainable_params: list,
+    scheduler: torch.optim.lr_scheduler.LambdaLR,
+    scaler,
+    use_wandb: bool,
+    this_run_dir: Path,
+    device: torch.device,
+) -> None:
+    """Run the epoch loop for one fold: train, validate, retrieval-eval,
+    checkpoint on improvement, early stop, and save the final checkpoint."""
+    lora_config = _make_lora_config(args)
+
+    best_val_loss     = float("inf")
+    best_mean_r1      = 0.0          # average of I2T R@1 and T2I R@1
+    epochs_no_improve = 0            # consecutive epochs without R@1 improvement
+    warmup_epochs      = max(1, args.epochs // 5)
+
+    print(f"\nStarting training for {args.epochs} epochs (warmup: {warmup_epochs})\n")
+
+    val_loss = float("nan")  # in case epochs == 0 (not expected, but keeps the final save well-defined)
+    for epoch in range(1, args.epochs + 1):
+        train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, trainable_params)
+        # evaluate() computes the symmetric CLIP val loss without gradient updates.
+        val_loss   = evaluate(model, val_loader, device)
+        scheduler.step()
+
+        lr_current  = scheduler.get_last_lr()[0]
+        logit_scale = model.logit_scale.item()
+        print(
+            f"Epoch {epoch:03d}/{args.epochs} | "
+            f"train={train_loss:.4f} | val={val_loss:.4f} | "
+            f"lr={lr_current:.2e} | logit_scale={logit_scale:.3f}"
+        )
+
+        # Retrieval evaluation: R@1, R@5, median rank for I→T and T→I directions.
+        retrieval = evaluate_retrieval(
+            model, val_ds.samples, preprocess_val, tokenizer, device,
+            args.use_mask, batch_size=args.batch_size,
+        ) or {}
+        if retrieval:
+            # mean_r1 averages both retrieval directions as a single summary metric.
+            retrieval["retrieval/mean_r1"] = (
+                retrieval["retrieval/i2t_r1"] + retrieval["retrieval/t2i_r1"]
+            ) / 2
+            print(
+                f"           | I2T R@1={retrieval['retrieval/i2t_r1']:.1%}"
+                f"  R@5={retrieval['retrieval/i2t_r5']:.1%}"
+                f"  med={retrieval['retrieval/i2t_median_rank']:.0f}"
+                f" | T2I R@1={retrieval['retrieval/t2i_r1']:.1%}"
+                f"  R@5={retrieval['retrieval/t2i_r5']:.1%}"
+                f"  med={retrieval['retrieval/t2i_median_rank']:.0f}"
+                f" | n={int(retrieval['retrieval/n_pairs'])}"
+            )
+        if use_wandb:
+            log_dict = {
+                "train/loss": train_loss, "val/loss": val_loss,
+                "train/lr": lr_current,   "train/logit_scale": logit_scale,
+            }
+            log_dict.update(retrieval)
+            wandb.log(log_dict, step=epoch)
+
+        # Save a checkpoint whenever validation loss reaches a new minimum.
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(model, optimizer, epoch, val_loss,
+                            this_run_dir / "best_val_checkpoint.pt", lora_config=lora_config)
+
+        # Save the best-R@1 checkpoint and track early stopping progress.
+        mean_r1 = retrieval.get("retrieval/mean_r1", 0.0)
+        if mean_r1 > best_mean_r1:
+            best_mean_r1      = mean_r1
+            epochs_no_improve = 0
+            save_checkpoint(model, optimizer, epoch, val_loss,
+                            this_run_dir / "best_r1_checkpoint.pt", lora_config=lora_config)
+        else:
+            epochs_no_improve += 1
+            if args.patience > 0 and epochs_no_improve >= args.patience:
+                print(f"\nEarly stopping triggered (no R@1 improvement for {args.patience} epochs).")
+                break
+
+    # ── Final checkpoint and summary ─────────────────────────────────────
+    save_checkpoint(model, optimizer, args.epochs, val_loss,
+                    this_run_dir / "final_checkpoint.pt", lora_config=lora_config)
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f} | Best mean R@1: {best_mean_r1:.1%}")
+    print(f"Checkpoints saved to: {this_run_dir}")
+    if use_wandb:
+        wandb.finish()
+
+
+def _run_fold(
+    args: argparse.Namespace,
+    split_path: Path | None,
+    this_run_dir: Path,
+    fold_idx: int | None,
+    run_name: str,
+    device: torch.device,
+) -> None:
+    if args.cv_dir:
+        this_run_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n{'#' * 70}\n# FOLD {fold_idx} — {split_path.name}\n{'#' * 70}")
+
+    model, tokenizer, preprocess_val, augment_transform = _load_model(args, device)
+    train_loader, val_loader, val_ds = _load_fold_datasets(
+        args, split_path, this_run_dir, tokenizer, preprocess_val, augment_transform, device)
+    optimizer, trainable_params = _build_optimizer(args, model)
+
+    # Warm-up for the first 20 % of epochs, then cosine decay to 0.
+    warmup_epochs = max(1, args.epochs // 5)
+    scheduler     = make_scheduler(optimizer, warmup_epochs, args.epochs)
+    # GradScaler prevents float16 gradient underflow during mixed-precision training.
+    scaler        = torch.amp.GradScaler("cuda") if device.type == "cuda" else torch.amp.GradScaler("cpu")
+
+    use_wandb = _init_wandb_run(args, run_name, fold_idx)
+
+    _train_fold(
+        args, model, train_loader, val_loader, val_ds, preprocess_val, tokenizer,
+        optimizer, trainable_params, scheduler, scaler, use_wandb, this_run_dir, device,
+    )
+
+    # Fold's model/optimizer must not leak into the next fold's GPU memory.
+    del model, optimizer, scheduler, scaler
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def main(args: argparse.Namespace) -> None:
+    _validate_args(args)
+    _set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -275,295 +644,11 @@ def main(args: argparse.Namespace) -> None:
         )
         return
 
-    # ── Output directory ──────────────────────────────────────────────────────
-    if args.no_lora:
-        tune_tag = f"unfreeze{args.unfreeze_blocks}"
-    else:
-        tune_tag = f"lora{args.lora_layers}"
-    text_tag = "_phrases" if args.use_phrases else ""
-    run_name = f"run_bs{args.batch_size}_{tune_tag}{text_tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(args.out_dir) / "biomedclip_pretrain" / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Run directory: {run_dir}")
-
-    # ── Fold targets: 1 entry for a normal run, N for --cv_dir ────────────────
-    if args.cv_dir:
-        fold_files = sorted(Path(args.cv_dir).glob(args.cv_pattern))
-        if not fold_files:
-            raise SystemExit(f"No fold files matching {args.cv_pattern!r} in {args.cv_dir}")
-        fold_targets = []
-        for fp in fold_files:
-            m = re.search(r"fold(\d+)", fp.stem)
-            if not m:
-                raise SystemExit(f"Could not parse a fold index out of {fp.name!r} (expected '...foldN...')")
-            fold_targets.append((fp, run_dir / f"fold{int(m.group(1))}", int(m.group(1))))
-        print(f"CV mode: {len(fold_targets)} folds from {args.cv_dir}")
-    else:
-        split_path = Path(args.splits) if args.splits else None
-        fold_targets = [(split_path, run_dir, None)]
+    run_name, run_dir = _make_run_dir(args)
+    fold_targets = _resolve_fold_targets(args, run_dir)
 
     for split_path, this_run_dir, fold_idx in fold_targets:
-        if args.cv_dir:
-            this_run_dir.mkdir(parents=True, exist_ok=True)
-            print(f"\n{'#' * 70}\n# FOLD {fold_idx} — {split_path.name}\n{'#' * 70}")
-
-        # ── Model loading ───────────────────────────────────────────────────
-        print(f"Loading model: {MODEL_TAG}")
-        # open_clip returns (model, train_preprocess, val_preprocess).
-        # We override train_preprocess with a custom augmentation pipeline below.
-        model, _, preprocess_val = open_clip.create_model_and_transforms(MODEL_TAG)
-        tokenizer = open_clip.get_tokenizer(MODEL_TAG)
-        model = model.to(device)
-        # Adds random horizontal flip, colour jitter, and random resized crop on top of val_preprocess.
-        augment_transform = build_train_transform(preprocess_val)
-
-        if args.no_lora:
-            _unfreeze_last_blocks(model, args.unfreeze_blocks)
-            print(f"Partial fine-tune: last {args.unfreeze_blocks} ViT blocks unfrozen (no LoRA)")
-        else:
-            args.lora_alpha = 2.0 * args.lora_r  # enforce alpha = 2r regardless of CLI default
-            inject_lora(model, args.lora_layers, args.lora_r, args.lora_alpha)
-            print(
-                f"LoRA injected into last {args.lora_layers} ViT blocks "
-                f"(r={args.lora_r}, alpha={args.lora_alpha})"
-            )
-        n_trainable = count_trainable_params(model)
-        n_total     = sum(p.numel() for p in model.parameters())
-        print(f"Trainable params: {n_trainable:,} / {n_total:,} ({100 * n_trainable / n_total:.2f} %)")
-
-        # ── Data splits and datasets ─────────────────────────────────────────
-        if split_path is not None:
-            with open(split_path, encoding="utf-8") as fh:
-                split_data = json.load(fh)
-            shutil.copy(split_path, this_run_dir / "split.json")
-            train_samples = split_data["train"]
-            val_samples   = split_data["val"]
-            print(f"Loaded split from {split_path} ({len(train_samples)} train, {len(val_samples)} val samples)")
-        else:
-            train_samples, val_samples, _ = build_stratified_splits(args, run_dir=this_run_dir)
-
-        def _to_tuples(samples: list[dict]) -> list[tuple]:
-            if args.use_phrases:
-                result = []
-                dropped = 0
-                for s in samples:
-                    bp  = s.get("befund_phrases") or []
-                    bep = s.get("beurteilung_phrases") or []
-                    if not bp or not bep:
-                        dropped += 1
-                        continue
-                    result.append((Path(s["image"]), Path(s["mask"]), ". ".join(bp + bep)))
-                if dropped:
-                    print(f"  use_phrases: dropped {dropped} samples missing phrase lists.")
-                return result
-            return [(Path(s["image"]), Path(s["mask"]), s["report"]) for s in samples]
-
-        train_ds = BoneTumorPairDataset(_to_tuples(train_samples), augment_transform, tokenizer, args.use_mask)
-        val_ds   = BoneTumorPairDataset(_to_tuples(val_samples),   preprocess_val,   tokenizer, args.use_mask)
-        print(f"Pretrain datasets: {len(train_ds)} train / {len(val_ds)} monitor-val")
-
-        use_pin_memory = device.type == "cuda"
-        train_loader = DataLoader(
-            train_ds, batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=use_pin_memory,
-            drop_last=False,
-        )
-        val_loader = DataLoader(
-            val_ds, batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=use_pin_memory,
-            drop_last=False,
-        )
-
-        # ── Optimizer ─────────────────────────────────────────────────────────
-        # Norm and bias parameters are excluded from weight decay because they
-        # act as scale/shift terms and should not be penalised toward zero.
-        no_decay_suffixes = ("bias", "norm.weight", "norm.bias", "ln_1.weight", "ln_1.bias",
-                             "ln_2.weight", "ln_2.bias", "ln_pre.weight", "ln_pre.bias",
-                             "ln_post.weight", "ln_post.bias")
-
-        if args.no_lora:
-            # Differential LR: unfrozen ViT block params use a low LR to avoid
-            # destabilising pretrained representations; projection and logit_scale
-            # use the full (higher) LR to adapt the contrastive head quickly.
-            proj_param_names = {"visual.head", "text.proj", "logit_scale"}
-            block_decay, block_no_decay, proj_params = [], [], []
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                if any(name == pn or name.startswith(pn + ".") for pn in proj_param_names):
-                    proj_params.append(param)
-                elif name.endswith(no_decay_suffixes):
-                    block_no_decay.append(param)
-                else:
-                    block_decay.append(param)
-            trainable_params = block_decay + block_no_decay + proj_params
-            optimizer = torch.optim.AdamW(
-                [
-                    {"params": block_decay,    "lr": args.lr_blocks, "weight_decay": args.weight_decay},
-                    {"params": block_no_decay, "lr": args.lr_blocks, "weight_decay": 0.0},
-                    {"params": proj_params,    "lr": args.lr_proj,   "weight_decay": 0.0},
-                ],
-                betas=(0.9, 0.98),
-                eps=1e-6,
-            )
-        else:
-            lr_lora = args.lr_lora
-            lr_proj = args.lr_proj
-            proj_param_names = {"visual.head", "text.proj", "logit_scale"}
-            lora_decay, lora_no_decay, proj_params = [], [], []
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                if any(name == pn or name.startswith(pn + ".") for pn in proj_param_names):
-                    proj_params.append(param)
-                elif name.endswith(no_decay_suffixes):
-                    lora_no_decay.append(param)
-                else:
-                    lora_decay.append(param)
-            trainable_params = lora_decay + lora_no_decay + proj_params
-            optimizer = torch.optim.AdamW(
-                [
-                    {"params": lora_decay,    "lr": lr_lora, "weight_decay": args.weight_decay},
-                    {"params": lora_no_decay, "lr": lr_lora, "weight_decay": 0.0},
-                    {"params": proj_params,   "lr": lr_proj, "weight_decay": 0.0},
-                ],
-                betas=(0.9, 0.98),
-                eps=1e-6,
-            )
-
-        # Warm-up for the first 20 % of epochs, then cosine decay to 0.
-        warmup_epochs = max(1, args.epochs // 5)
-        scheduler     = make_scheduler(optimizer, warmup_epochs, args.epochs)
-        # GradScaler prevents float16 gradient underflow during mixed-precision training.
-        scaler        = torch.amp.GradScaler("cuda") if device.type == "cuda" else torch.amp.GradScaler("cpu")
-
-        # ── W&B initialisation ────────────────────────────────────────────────
-        use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
-        if (args.wandb or args.sweep) and not WANDB_AVAILABLE:
-            warnings.warn("--wandb/--sweep set but wandb is not installed. Skipping.")
-        if use_wandb:
-            wandb_config = {
-                "lora_layers": args.lora_layers,
-                "lora_r":      args.lora_r,
-                "lora_alpha":  args.lora_alpha,
-                "epochs":      args.epochs,
-                "batch_size":  args.batch_size,
-                "lr_lora":     args.lr_lora,
-                "lr_proj":     args.lr_proj,
-                "weight_decay": args.weight_decay,
-                "seed":        args.seed,
-                "use_mask":    args.use_mask,
-                "text_mode":   "phrases" if args.use_phrases else "full",
-            }
-            if args.cv_dir:
-                wb_base = args.wandb_run or run_name
-                wandb.init(
-                    project=args.wandb_project,
-                    entity=args.wandb_entity,
-                    name=f"{wb_base}_fold{fold_idx}",
-                    group=wb_base,
-                    config=wandb_config,
-                )
-            else:
-                wandb.init(
-                    project=args.wandb_project,
-                    entity=args.wandb_entity,
-                    name=args.wandb_run,
-                    config=wandb_config,
-                )
-            if args.sweep:
-                # Overwrite CLI args with sweep-agent-supplied hyperparameters.
-                _apply_sweep_config(args)
-
-        # ── Training loop ────────────────────────────────────────────────────
-        best_val_loss     = float("inf")
-        best_mean_r1      = 0.0          # average of I2T R@1 and T2I R@1
-        epochs_no_improve = 0            # consecutive epochs without R@1 improvement
-        lora_config = (
-            {"no_lora": True, "unfreeze_blocks": args.unfreeze_blocks}
-            if args.no_lora
-            else {"lora_layers": args.lora_layers, "lora_r": args.lora_r, "lora_alpha": args.lora_alpha}
-        )
-
-        print(f"\nStarting training for {args.epochs} epochs (warmup: {warmup_epochs})\n")
-
-        for epoch in range(1, args.epochs + 1):
-            train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, trainable_params)
-            # evaluate() computes the symmetric CLIP val loss without gradient updates.
-            val_loss   = evaluate(model, val_loader, device)
-            scheduler.step()
-
-            lr_current  = scheduler.get_last_lr()[0]
-            logit_scale = model.logit_scale.item()
-            print(
-                f"Epoch {epoch:03d}/{args.epochs} | "
-                f"train={train_loss:.4f} | val={val_loss:.4f} | "
-                f"lr={lr_current:.2e} | logit_scale={logit_scale:.3f}"
-            )
-
-            # Retrieval evaluation: R@1, R@5, median rank for I→T and T→I directions.
-            retrieval = evaluate_retrieval(
-                model, val_ds.samples, preprocess_val, tokenizer, device,
-                args.use_mask, batch_size=args.batch_size,
-            ) or {}
-            if retrieval:
-                # mean_r1 averages both retrieval directions as a single summary metric.
-                retrieval["retrieval/mean_r1"] = (
-                    retrieval["retrieval/i2t_r1"] + retrieval["retrieval/t2i_r1"]
-                ) / 2
-                print(
-                    f"           | I2T R@1={retrieval['retrieval/i2t_r1']:.1%}"
-                    f"  R@5={retrieval['retrieval/i2t_r5']:.1%}"
-                    f"  med={retrieval['retrieval/i2t_median_rank']:.0f}"
-                    f" | T2I R@1={retrieval['retrieval/t2i_r1']:.1%}"
-                    f"  R@5={retrieval['retrieval/t2i_r5']:.1%}"
-                    f"  med={retrieval['retrieval/t2i_median_rank']:.0f}"
-                    f" | n={int(retrieval['retrieval/n_pairs'])}"
-                )
-            if use_wandb:
-                log_dict = {
-                    "train/loss": train_loss, "val/loss": val_loss,
-                    "train/lr": lr_current,   "train/logit_scale": logit_scale,
-                }
-                log_dict.update(retrieval)
-                wandb.log(log_dict, step=epoch)
-
-            # Save a checkpoint whenever validation loss reaches a new minimum.
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                save_checkpoint(model, optimizer, epoch, val_loss,
-                                this_run_dir / "best_val_checkpoint.pt", lora_config=lora_config)
-
-            # Save the best-R@1 checkpoint and track early stopping progress.
-            mean_r1 = retrieval.get("retrieval/mean_r1", 0.0)
-            if mean_r1 > best_mean_r1:
-                best_mean_r1      = mean_r1
-                epochs_no_improve = 0
-                save_checkpoint(model, optimizer, epoch, val_loss,
-                                this_run_dir / "best_r1_checkpoint.pt", lora_config=lora_config)
-            else:
-                epochs_no_improve += 1
-                if args.patience > 0 and epochs_no_improve >= args.patience:
-                    print(f"\nEarly stopping triggered (no R@1 improvement for {args.patience} epochs).")
-                    break
-
-        # ── Final checkpoint and summary ─────────────────────────────────────
-        save_checkpoint(model, optimizer, args.epochs, val_loss,
-                        this_run_dir / "final_checkpoint.pt", lora_config=lora_config)
-        print(f"\nTraining complete. Best val loss: {best_val_loss:.4f} | Best mean R@1: {best_mean_r1:.1%}")
-        print(f"Checkpoints saved to: {this_run_dir}")
-        if use_wandb:
-            wandb.finish()
-
-        # Fold's model/optimizer must not leak into the next fold's GPU memory.
-        del model, optimizer, scheduler, scaler
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _run_fold(args, split_path, this_run_dir, fold_idx, run_name, device)
 
 
 if __name__ == "__main__":

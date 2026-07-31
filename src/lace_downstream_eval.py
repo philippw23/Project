@@ -28,9 +28,10 @@ from biomedclip.data.datasets import (IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES,
                                        IDX_TO_LABEL_BINARY, LABEL_TO_IDX_BINARY,
                                        NUM_CLASSES_BINARY)
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
+from biomedclip.utils.downstream_eval import report_eval
 from LACE.train.downstream import (build_v1_model, build_v2_model,
                                     extract_v1_embeddings, extract_v2_representations,
-                                    evaluate, _precompute_repr_loader, _report_eval)
+                                    evaluate, _precompute_repr_loader)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -143,7 +144,7 @@ def main(cli: argparse.Namespace) -> dict:
     )
     print(f"Test samples: {n_test}")
     test_loss, _, test_preds, test_labels = evaluate(trainable_model, test_loader, criterion, device)
-    results.update(_report_eval(
+    results.update(report_eval(
         "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
 
     # ── BTXRD external test (optional) ────────────────────────────────────────
@@ -158,7 +159,7 @@ def main(cli: argparse.Namespace) -> dict:
         print(f"BTXRD samples: {n_btxrd}")
         btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(
             trainable_model, btxrd_loader, criterion, device)
-        results.update(_report_eval(
+        results.update(report_eval(
             "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
             idx_to_label, num_classes, prefix="btxrd"))
 

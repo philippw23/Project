@@ -34,7 +34,7 @@ else
     tune_tag="lora${LORA_LAYERS}"
 fi
 
-LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}_lr${LR}_phrases.out"
+LOG_FILE="$home_dir/Project/logs/biomedclip/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}_lr${LR}_phrases.out"
 exec > "$LOG_FILE" 2>&1
 
 echo Starting job ${SLURM_JOBID}

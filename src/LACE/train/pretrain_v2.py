@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import itertools
 import json
 import math
 import random
@@ -173,6 +172,13 @@ def _phrase_to_image(phrase_mask: torch.Tensor) -> torch.Tensor:
     return idx[phrase_mask]
 
 
+def _infinite(loader: DataLoader):
+    """Repeat a DataLoader indefinitely, re-iterating (and reshuffling) it on
+    every wraparound — unlike itertools.cycle, which caches the first pass's
+    batches and replays that frozen, unshuffled set for all later cycles."""
+    while True:
+        yield from loader
+
 
 def _encode_beur(
     batch: dict,
@@ -268,7 +274,7 @@ def train_one_epoch(
     total_rec = total_evid = total_proto_ent = 0.0
     n_batches = 0
 
-    btxrd_cycle = itertools.cycle(btxrd_loader) if btxrd_loader is not None else None
+    btxrd_cycle = _infinite(btxrd_loader) if btxrd_loader is not None else None
     pbar = tqdm(internal_loader, desc=f"  stage{stage}", leave=False,
                 disable=not sys.stdout.isatty())
     zero = torch.zeros(1, device=device)[0]
@@ -281,6 +287,7 @@ def train_one_epoch(
 
         l_ita = l_sim = l_sim_i2t = l_sim_t2i = zero
         loss_ita_val = 0.0
+
 
         # ── Pass 1: L_ITA (stage 2 only) ─────────────────────────────────────
         if "ita" in stage_losses:
@@ -299,6 +306,10 @@ def train_one_epoch(
                 )
                 l_ita    = l_ita_i2t + lambda_t2i * l_ita_t2i
                 loss_ita = log_lambda_ita.exp() * l_ita
+                if learn_loss_weights:
+                    # Kendall-style counter-penalty: without -log_lambda, gradient
+                    # descent on exp(log_lambda) * L trivially drives lambda -> 0.
+                    loss_ita = loss_ita - log_lambda_ita
             scaler.scale(loss_ita).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=max_grad_norm)
@@ -312,8 +323,9 @@ def train_one_epoch(
         l_sim = l_sim_i2t = l_sim_t2i = zero
         l_rec = l_evid = zero
         proto_ent_val = 0.0
-
+        dice_active = ortho_active = sim_active = rec_active = evid_active = False
         optimizer.zero_grad()
+        
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             cls_raw2, patch_feat = vit.forward_all(img)
             z_img2      = vit.img_proj(cls_raw2)
@@ -324,6 +336,7 @@ def train_one_epoch(
                 l_dice, l_dice_only, l_bce, l_hard_neg = compute_l_dice_ce(
                     mask_logits[has_mask], plabels[has_mask],
                 )
+                dice_active = True
 
             # Befund phrases feed both L_sim and the evidence prototype terms.
             z_bef_phrases = bef_pmask = None
@@ -348,6 +361,7 @@ def train_one_epoch(
                         img_cls_features=z_img2[sim_valid],
                         patch_mask=plabels[sim_valid].bool(),
                     )
+                    sim_active = True
 
             # Evidence prototypes: L_rec ('rec' key) and L_evid_p ('evid' key),
             # each gated to its own configured stage set.
@@ -364,9 +378,12 @@ def train_one_epoch(
                     lambda_mu=lambda_mu,
                 )
                 proto_ent_val = proto_ent.item()
+                rec_active  = compute_rec
+                evid_active = compute_evid_p
 
             if "ortho" in stage_losses and has_mask.any():
                 l_ortho = ortho_loss(patch_feat[has_mask], plabels[has_mask])
+                ortho_active = True
 
             # ── BTXRD: extra L_dice + L_ortho ────────────────────────────────
             if btxrd_cycle is not None:
@@ -384,14 +401,30 @@ def train_one_epoch(
                     l_dice_only = l_dice_only + btxrd_dice_only
                     l_bce       = l_bce       + btxrd_bce
                     l_hard_neg  = l_hard_neg  + btxrd_hard_neg
+                    dice_active = True
                 if "ortho" in stage_losses:
                     l_ortho = l_ortho + ortho_loss(btxrd_patches, btxrd_labels)
+                    ortho_active = True
 
             loss_seg = (log_lambda_sim.exp()   * l_sim
                       + log_lambda_ortho.exp() * l_ortho
                       + log_lambda_dice.exp()  * l_dice
                       + log_lambda_rec.exp()   * l_rec
                       + log_lambda_evid.exp()  * l_evid)
+
+            if learn_loss_weights:
+                # Counter-penalty per active term (see pass 1): prevents
+                # gradient descent from collapsing every lambda toward 0.
+                if sim_active:
+                    loss_seg = loss_seg - log_lambda_sim
+                if ortho_active:
+                    loss_seg = loss_seg - log_lambda_ortho
+                if dice_active:
+                    loss_seg = loss_seg - log_lambda_dice
+                if rec_active:
+                    loss_seg = loss_seg - log_lambda_rec
+                if evid_active:
+                    loss_seg = loss_seg - log_lambda_evid
 
         scaler.scale(loss_seg).backward()
         scaler.unscale_(optimizer)
@@ -1223,10 +1256,20 @@ def main(args: argparse.Namespace) -> None:
                 f"k20={knn_metrics.get('knn/f1_k20', float('nan')):.3f}"
             )
 
+            # Early stopping keys on retrieval mean_r1 (higher is better). Updated
+            # before logging so "retrieval/best_mean_r1" reflects this epoch too.
+            is_new_best_r1 = mean_r1 > best_mean_r1
+            if is_new_best_r1:
+                best_mean_r1      = mean_r1
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+
             if use_wandb:
                 wandb.log(
                     {**train_metrics, **val_metrics, **retrieval_metrics, **knn_metrics,
-                     "epoch": epoch, "stage": stage, "train/lr": lr_current},
+                     "epoch": epoch, "stage": stage, "train/lr": lr_current,
+                     "retrieval/best_mean_r1": best_mean_r1},
                     step=epoch,
                 )
 
@@ -1260,13 +1303,8 @@ def main(args: argparse.Namespace) -> None:
                 best_val_loss = val_loss
                 torch.save(checkpoint, this_run_dir / "best_checkpoint.pt")
 
-            # Early stopping keys on retrieval mean_r1 (higher is better).
-            if mean_r1 > best_mean_r1:
-                best_mean_r1      = mean_r1
-                epochs_no_improve = 0
+            if is_new_best_r1:
                 torch.save(checkpoint, this_run_dir / "best_retrieval_checkpoint.pt")
-            else:
-                epochs_no_improve += 1
 
             if args.patience > 0 and epochs_no_improve >= args.patience:
                 print(f"\nEarly stopping at epoch {epoch} "

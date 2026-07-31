@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=01:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_chexfound_downstream_eval.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_downstream_eval.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -28,7 +28,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # read from the head checkpoint itself. Optional: --btxrd_manifest to also score
 # BTXRD (requires the head to have been trained with --binary); --checkpoint to
 # override the backbone path if the pretrain checkpoint has moved.
-HEAD_CHECKPOINT=$home_dir/Project/results/chexfound_downstream/best_head_xcnz9sco.pt  # <-- set this
+HEAD_CHECKPOINT=$home_dir/Project/results/chexfound_downstream/best_head_l1f6q1jv.pt  # <-- set this
 SPLITS=$home_dir/Project/data/internal_dataset/split_final.json
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # ─────────────────────────────────────────────────────────────────────────────

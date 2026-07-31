@@ -11,6 +11,11 @@ Usage:
         --base_cfg src/chexfound/data/config.yaml \\
         --out_dir  results/chexfound_pretrain
 
+Pass --cv_dir <folder> (e.g. data/internal_dataset/cv_binary) to run one full
+pretraining pass per fold file matching --cv_pattern instead of a single run:
+results land under out_dir/fold0/, fold1/, ... alongside the usual
+checkpoints/split.json. Mutually exclusive with --splits and --sweep.
+
 Checkpoints are saved as:
     results/chexfound_pretrain/
         checkpoint_ep{N}.pth   — periodic snapshots
@@ -19,8 +24,12 @@ Checkpoints are saved as:
 from __future__ import annotations
 
 import argparse
+import copy
+import gc
 import json
 import os
+import re
+import shutil
 import sys
 import time
 from functools import partial
@@ -133,6 +142,17 @@ def _parse_dataset_path(dataset_path: str) -> tuple[str, dict]:
         k, _, v = part.partition("=")
         kwargs[k] = v
     return name, kwargs
+
+
+def _override_dataset_path_splits(dataset_path: str, splits_path: str) -> str:
+    """Rebuild a `Name:k=v:...` dataset_path string with its `splits` kwarg replaced.
+
+    Used for --splits / --cv_dir overrides so the rest of the dataset_path
+    (e.g. `dataset=`) survives untouched.
+    """
+    name, kwargs = _parse_dataset_path(dataset_path)
+    kwargs["splits"] = splits_path
+    return ":".join([name] + [f"{k}={v}" for k, v in kwargs.items()])
 
 
 def build_dataset(dataset_path: str, transform, out_dir: Path) -> torch.utils.data.Dataset:
@@ -561,9 +581,23 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--out_dir",  required=True,  help="Directory for checkpoints and logs.")
     p.add_argument("--epochs",     type=int, default=None, help="Override epochs (useful for sweep trials).")
     p.add_argument("--batch_size", type=int, default=None, help="Override batch_size_per_gpu.")
+    p.add_argument("--splits", default=None,
+                   help="Override the split.json path baked into train.dataset_path in the "
+                        "config (only meaningful for dataset_path=BoneTumor:...). Mutually "
+                        "exclusive with --cv_dir.")
+    p.add_argument("--cv_dir", default=None,
+                   help="Directory of fold split files (e.g. data/internal_dataset/cv_binary). "
+                        "If set, runs one pretraining pass per fold, writing each fold's "
+                        "checkpoints to out_dir/foldN/. Mutually exclusive with --splits and --sweep.")
+    p.add_argument("--cv_pattern", default="split_binary_fold*.json",
+                   help="Glob for fold files inside --cv_dir (sorted; fold index parsed "
+                        "from each filename, e.g. '...fold3...' -> fold3).")
     p.add_argument("--sweep",  action="store_true", help="Read hyperparams from wandb.config (W&B sweep mode).")
     p.add_argument("--wandb",  action="store_true", help="Enable W&B logging without a sweep.")
     p.add_argument("--wandb_project", default="chexfound-pretrain")
+    p.add_argument("--wandb_run",     default=None,
+                   help="W&B run name. In --cv_dir mode this is the shared group name "
+                        "('<wandb_run>_fold<N>' per fold); default: the out_dir basename.")
     p.add_argument("--wandb_entity",  default=None)
     p.add_argument("--early_stopping_patience", type=int, default=None,
                    help="Stop if total loss does not improve for this many epochs. "
@@ -575,28 +609,75 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    cfg  = merge_configs(args.base_cfg, args.config)
+    if args.cv_dir and args.splits is not None:
+        raise SystemExit("--cv_dir and --splits are mutually exclusive — --splits is managed per fold.")
+    if args.cv_dir and args.sweep:
+        raise SystemExit("--cv_dir and --sweep are mutually exclusive.")
+
+    base_cfg = merge_configs(args.base_cfg, args.config)
 
     if args.epochs is not None:
-        cfg.setdefault("optim",  {})["epochs"]            = args.epochs
+        base_cfg.setdefault("optim",  {})["epochs"]            = args.epochs
     if args.batch_size is not None:
-        cfg.setdefault("train", {})["batch_size_per_gpu"] = args.batch_size
+        base_cfg.setdefault("train", {})["batch_size_per_gpu"] = args.batch_size
     if args.early_stopping_patience is not None:
-        cfg.setdefault("train", {})["early_stopping_patience"] = args.early_stopping_patience
+        base_cfg.setdefault("train", {})["early_stopping_patience"] = args.early_stopping_patience
     if args.early_stopping_min_delta is not None:
-        cfg.setdefault("train", {})["early_stopping_min_delta"] = args.early_stopping_min_delta
+        base_cfg.setdefault("train", {})["early_stopping_min_delta"] = args.early_stopping_min_delta
+    if args.splits is not None:
+        base_cfg.setdefault("train", {})["dataset_path"] = _override_dataset_path_splits(
+            base_cfg["train"]["dataset_path"], args.splits)
 
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
-    if use_wandb:
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity)
-        if args.sweep:
-            _apply_sweep_cfg(cfg)
+    run_dir = Path(args.out_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Each sweep run gets its own subdirectory named after the W&B run ID
-    # so checkpoints from different runs don't overwrite each other.
-    if use_wandb and wandb.run is not None:
-        out_dir = Path(args.out_dir) / wandb.run.id
+    # ── Fold targets: 1 entry for a normal run, N for --cv_dir ────────────────
+    if args.cv_dir:
+        fold_files = sorted(Path(args.cv_dir).glob(args.cv_pattern))
+        if not fold_files:
+            raise SystemExit(f"No fold files matching {args.cv_pattern!r} in {args.cv_dir}")
+        fold_targets = []
+        for fp in fold_files:
+            m = re.search(r"fold(\d+)", fp.stem)
+            if not m:
+                raise SystemExit(f"Could not parse a fold index out of {fp.name!r} (expected '...foldN...')")
+            fold_targets.append((fp, run_dir / f"fold{int(m.group(1))}", int(m.group(1))))
+        print(f"CV mode: {len(fold_targets)} folds from {args.cv_dir}")
     else:
-        out_dir = Path(args.out_dir)
+        fold_targets = [(None, run_dir, None)]
 
-    train(cfg, out_dir, use_wandb=use_wandb)
+    for split_path, this_out_dir, fold_idx in fold_targets:
+        cfg = copy.deepcopy(base_cfg)
+        if args.cv_dir:
+            this_out_dir.mkdir(parents=True, exist_ok=True)
+            print(f"\n{'#' * 70}\n# FOLD {fold_idx} — {split_path.name}\n{'#' * 70}")
+            shutil.copy(split_path, this_out_dir / "split.json")
+            cfg["train"]["dataset_path"] = _override_dataset_path_splits(
+                cfg["train"]["dataset_path"], str(this_out_dir / "split.json"))
+
+        if use_wandb:
+            if args.cv_dir:
+                wb_base = args.wandb_run or run_dir.name
+                wandb.init(
+                    project=args.wandb_project, entity=args.wandb_entity,
+                    name=f"{wb_base}_fold{fold_idx}", group=wb_base,
+                )
+            else:
+                wandb.init(project=args.wandb_project, entity=args.wandb_entity)
+            if args.sweep:
+                _apply_sweep_cfg(cfg)
+
+        # Each sweep run gets its own subdirectory named after the W&B run ID
+        # so checkpoints from different runs don't overwrite each other.
+        if not args.cv_dir and use_wandb and wandb.run is not None:
+            fold_out_dir = this_out_dir / wandb.run.id
+        else:
+            fold_out_dir = this_out_dir
+
+        train(cfg, fold_out_dir, use_wandb=use_wandb)
+
+        if args.cv_dir:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()

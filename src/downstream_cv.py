@@ -41,9 +41,20 @@ except ImportError:
 
 from biomedclip.data.datasets import (IDX_TO_LABEL, IDX_TO_LABEL_BINARY,
                                        NUM_CLASSES, NUM_CLASSES_BINARY)
+from biomedclip_downstream import (main as run_biomedclip_downstream,
+                                   parse_args as parse_biomedclip_downstream_args)
+from biomedclip_img_text_downstream import (main as run_biomedclip_img_text_downstream,
+                                            parse_args as parse_biomedclip_img_text_downstream_args)
+from chexfound_downstream import (main as run_chexfound_downstream,
+                                  parse_args as parse_chexfound_downstream_args)
+from gloria_downstream import (main as run_gloria_downstream,
+                               parse_args as parse_gloria_downstream_args)
+from imagenet_img.train.downstream import (main as run_imagenet_downstream,
+                                           parse_args as parse_imagenet_downstream_args)
+
 from biomedclip.utils.downstream_eval import report_eval
-from LACE.train.downstream import (main as run_downstream,
-                                   parse_args as parse_downstream_args)
+from LACE.train.downstream import (main as run_lace_downstream,
+                                   parse_args as parse_lace_downstream_args)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -63,6 +74,20 @@ def parse_args(argv=None) -> tuple[argparse.Namespace, list[str]]:
         description="K-fold CV orchestrator for LACE downstream (fixed hyperparameters).",
         add_help=True,
     )
+    p.add_argument("--baseline", default="lace",
+                   choices=["lace", "biomedclip", "biomedclip_img_text", "chexfound",
+                            "gloria", "imagenet"],
+                   help="Baseline for which downstream cv is done in a loop")
+    p.add_argument("--frozen", action="store_true",
+                   help="Frozen-encoder mode: no per-fold pretrain checkpoint is looked up or "
+                        "injected (--cv_dir/--pattern just need to resolve to the raw fold split "
+                        "files, e.g. data/internal_dataset/cv_binary). Pass whatever flag "
+                        "selects the frozen encoder for --baseline through as normal: "
+                        "--freezed_biomedclip for biomedclip, --checkpoint none "
+                        "--chexfound_weights <path> for chexfound, --checkpoint <fixed ckpt> "
+                        "for gloria (no vanilla-weights option). imagenet has no checkpoint "
+                        "concept at all — always frozen ImageNet-1k weights, --frozen still "
+                        "required so the orchestrator doesn't try to inject one.")
     p.add_argument("--cv_dir", default=str(ROOT_DIR / "data" / "internal_dataset" / "cv_binary"),
                    help="Directory containing the fold split files.")
     p.add_argument("--pattern", default="split_binary_fold*.json",
@@ -104,8 +129,11 @@ def _aggregate(fold_results: list[dict]) -> dict:
 def main(argv=None) -> None:
     known, passthrough = parse_args(argv)
 
-    # reserved flags the user passed through by mistake
-    bad = _RESERVED.intersection(passthrough)
+    # reserved flags the user passed through by mistake. In --frozen mode there is no per-fold
+    # checkpoint for the orchestrator to inject, so --checkpoint is the caller's to set (e.g.
+    # chexfound's --checkpoint none for its frozen baseline) rather than reserved.
+    reserved = _RESERVED - {"--checkpoint"} if known.frozen else _RESERVED
+    bad = reserved.intersection(passthrough)
     if bad:
         raise SystemExit(f"Do not pass {sorted(bad)} to the CV orchestrator — they are managed per fold.")
 
@@ -116,8 +144,16 @@ def main(argv=None) -> None:
         raise SystemExit(f"No fold files matching {known.pattern!r} in {cv_dir}")
     print(f"Found {len(fold_files)} folds in {cv_dir}")
 
-    # Determine whether this is a binary or multi-class downstream task, to pick the right label mapping and number of classes.
-    binary       = "--binary" in passthrough
+    # Determine whether this is a binary or multi-class downstream task, to pick the right label
+    # mapping and number of classes. LACE's --binary is a bare store_true flag, but biomedclip's
+    # --binary takes an explicit value (--binary true/false), so presence alone isn't enough —
+    # check the following token too when there is one.
+    if "--binary" in passthrough:
+        i = passthrough.index("--binary")
+        nxt = passthrough[i + 1] if i + 1 < len(passthrough) else ""
+        binary = nxt.lower() not in ("false", "0", "no")
+    else:
+        binary = False
     idx_to_label = IDX_TO_LABEL_BINARY if binary else IDX_TO_LABEL
     num_classes  = NUM_CLASSES_BINARY if binary else NUM_CLASSES
 
@@ -129,19 +165,38 @@ def main(argv=None) -> None:
         print("\n" + "#" * 70)
         print(f"# FOLD {fold} — {split_path.name}")
         print("#" * 70)
-        ckpt = split_path.parent / known.checkpoint_filename
-        if not ckpt.exists():
-            raise SystemExit(f"No per-fold checkpoint at {ckpt}")
-        print(f"  checkpoint: {ckpt}")
         # Pass through the user-specified hyperparameters, plus the fold-specific flags.
         fold_argv = passthrough + [
             "--splits", str(split_path), "--eval_test",
             "--run_name", f"cv_fold{fold}_{split_path.stem}",
-            "--checkpoint", str(ckpt),
         ]
+        if known.frozen:
+            print("  encoder: frozen (no per-fold checkpoint)")
+        else:
+            ckpt = split_path.parent / known.checkpoint_filename
+            if not ckpt.exists():
+                raise SystemExit(f"No per-fold checkpoint at {ckpt}")
+            print(f"  checkpoint: {ckpt}")
+            fold_argv += ["--checkpoint", str(ckpt)]
         # Parse the fold-specific args and run the downstream evaluation for this fold.
-        args = parse_downstream_args(fold_argv)
-        results = run_downstream(args)
+        if known.baseline == "lace":
+            args = parse_lace_downstream_args(fold_argv)
+            results = run_lace_downstream(args)
+        elif known.baseline == "biomedclip":
+            args = parse_biomedclip_downstream_args(fold_argv)
+            results = run_biomedclip_downstream(args)
+        elif known.baseline == "chexfound":
+            args = parse_chexfound_downstream_args(fold_argv)
+            results = run_chexfound_downstream(args)
+        elif known.baseline == "biomedclip_img_text":
+            args = parse_biomedclip_img_text_downstream_args(fold_argv)
+            results = run_biomedclip_img_text_downstream(args)
+        elif known.baseline == "gloria":
+            args = parse_gloria_downstream_args(fold_argv)
+            results = run_gloria_downstream(args)
+        elif known.baseline == "imagenet":
+            args = parse_imagenet_downstream_args(fold_argv)
+            results = run_imagenet_downstream(args)
         # peel off the raw per-sample predictions (kept out of scalar aggregation)
         oof_preds  += results.pop("test/_preds",  [])
         oof_labels += results.pop("test/_labels", [])

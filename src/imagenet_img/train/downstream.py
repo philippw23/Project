@@ -22,13 +22,10 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import (balanced_accuracy_score, classification_report,
-                              confusion_matrix, f1_score,
-                              precision_recall_fscore_support)
+from sklearn.metrics import (balanced_accuracy_score, precision_recall_fscore_support)
 from torch.utils.data import DataLoader
 
 try:
@@ -37,10 +34,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
-                                       IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES,
-                                       LABEL_TO_IDX_BINARY, IDX_TO_LABEL_BINARY,
-                                       NUM_CLASSES_BINARY)
+from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset)
 from biomedclip.data.splits import build_stratified_splits
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
@@ -166,6 +160,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--overfit_n",     type=int, default=0,
                         help="If > 0, truncate all splits to N samples (overfit sanity check).")
     parser.add_argument("--seed",          type=int, default=42)
+    parser.add_argument("--run_name",      default=None,
+                        help="Output-dir name under --out_dir "
+                             "(default: auto-generated from timestamp/head/loss).")
     parser.add_argument("--wandb",         action="store_true")
     parser.add_argument("--wandb_project", default="imagenet-img-downstream")
     parser.add_argument("--wandb_run",     default=None)
@@ -195,7 +192,7 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -302,10 +299,13 @@ def main(args: argparse.Namespace) -> None:
                                    weight_decay=args.weight_decay)
 
     # ── Output dir ────────────────────────────────────────────────────────────
-    ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_tag = f"{ts}_{args.head}_{args.loss}"
-    if use_wandb and wandb.run:
-        run_tag = f"{run_tag}_{wandb.run.id}"
+    if args.run_name:
+        run_tag = args.run_name
+    else:
+        ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_tag = f"{ts}_{args.head}_{args.loss}"
+        if use_wandb and wandb.run:
+            run_tag = f"{run_tag}_{wandb.run.id}"
     out_dir = Path(args.out_dir) / run_tag
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = out_dir / "best_checkpoint.pt"
@@ -373,6 +373,8 @@ def main(args: argparse.Namespace) -> None:
                                                                  criterion, device)
         eval_metrics.update(report_eval(
             "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+        eval_metrics["test/_preds"]  = test_preds.tolist()
+        eval_metrics["test/_labels"] = test_labels.tolist()
 
         if args.btxrd_manifest:
             print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
@@ -399,3 +401,4 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"\nBest val loss: {best_val_loss:.4f}")
     print(f"Checkpoint saved to: {ckpt_path}")
+    return eval_metrics

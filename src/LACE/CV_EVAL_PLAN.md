@@ -119,7 +119,7 @@ full SLURM training (needs GPU + pretrain checkpoint).
 - `downstream.main` returns the internal-test `preds`/`labels` (`test/_preds`,
   `test/_labels`) alongside scalar metrics so folds can be pooled.
 - `lace_downstream_cv.py` peels those off each fold, concatenates them, and
-  computes the **pooled** `test_pooled/*` metrics (primary) via `_report_eval`;
+  computes the **pooled** `test_pooled/*` metrics (primary) via `report_eval`;
   per-fold scalars still aggregate to mean ± std (secondary); BTXRD stays
   mean ± std. All three written to `cv_results.json`
   (`pooled_oof_internal`, `per_fold`, `aggregate`).

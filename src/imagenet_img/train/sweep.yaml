@@ -4,15 +4,15 @@ entity: philipp-wiese
 method: bayes
 run_cap: 40
 metric:
-  name: val/balanced_acc
-  goal: maximize
+  name: val/loss
+  goal: minimize
 
 parameters:
   head:
     value: mlp_no_meta
   lr_mlp:
     distribution: log_uniform_values
-    min: 1e-4
+    min: 1e-5
     max: 1e-3
   weight_decay:
     distribution: log_uniform_values
@@ -22,29 +22,34 @@ parameters:
     values: [0.2, 0.3, 0.4, 0.5]
   hidden_dims:
     values:
+      - [32]
       - [64]
       - [128]
-      - [256]
-      - [128, 64]
+      - [64, 32]
   batch_size:
-    values: [16, 32, 64]
+    values: [32, 64, 128]
   loss:
-    values: [wce, focal]
+    values: [focal, cb_focal]
   class_weighting:
     values: [sqrt, inverse, effective]
   focal_gamma:
-    values: [1.0, 2.0, 3.0]
+    values: [1.5, 2.0, 2.5, 3.0]
 
 command:
   - ${env}
   - ${interpreter}
   - ${program}
+  - --splits
+  - data/internal_dataset/split_binary_final.json
+  - --binary
+  - "true"
+  - --use_mask
   - --out_dir
   - results/imagenet_img
   - --epochs
   - "100"
   - --patience
-  - "20"
+  - "100"
   - --seed
   - "42"
   - --wandb
@@ -53,4 +58,5 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --sweep
+  - --eval_test
   - ${args}

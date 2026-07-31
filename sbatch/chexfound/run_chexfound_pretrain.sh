@@ -5,8 +5,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
-#SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.err"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j.out"
+#SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j.err"
 
 
 home_dir="/mnt/nfs/homedirs/$USER"
@@ -33,10 +33,30 @@ echo Environment activated
 echo "CUDA/NVML preflight:"
 nvidia-smi || echo "WARNING: nvidia-smi failed on $(hostname) (NVML mismatch) — CUDA may still work."
 
+# ── Cross-validation ─────────────────────────────────────────────────────────
+# Set CV_DIR to run one full pretraining pass per fold file instead of a single
+# run (results land under out_dir/fold0/, fold1/, ...). Leave empty for a
+# normal single-split run using the config's baked-in dataset_path (override
+# with SPLITS below). Mutually exclusive with SPLITS/--sweep.
+CV_DIR=""   # e.g. $home_dir/Project/data/internal_dataset/cv
+CV_PATTERN="split_binary_fold*.json"
+SPLITS="$home_dir/Project/data/internal_dataset/split_final.json"   # e.g. $home_dir/Project/data/internal_dataset/split_final.json — ignored when CV_DIR is set
+
+EPOCHS=30
+BATCH_SIZE=4
+OUT_DIR=$home_dir/Project/results/chexfound_pretrain_sweep
+
 # Run the Python script
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python \
     $home_dir/Project/src/chexfound/train/pretrain.py \
     --config     $home_dir/Project/src/chexfound/configs/chexfound_vitl16_bonetumor.yaml \
     --base_cfg   $home_dir/Project/src/chexfound/data/config.yaml \
-    --out_dir    $home_dir/Project/results/chexfound_pretrain/job_${SLURM_JOBID} \
-    --batch_size 4
+    --out_dir    $OUT_DIR \
+    --epochs     $EPOCHS \
+    --batch_size $BATCH_SIZE \
+    $( [ -n "$CV_DIR" ] && echo "--cv_dir $CV_DIR" ) \
+    $( [ -n "$CV_DIR" ] && [ -n "$CV_PATTERN" ] && echo "--cv_pattern $CV_PATTERN" ) \
+    $( [ -z "$CV_DIR" ] && [ -n "$SPLITS" ] && echo "--splits $SPLITS" ) \
+    --wandb \
+    --wandb_project chexfound-pretrain \
+    --wandb_entity  philipp-wiese

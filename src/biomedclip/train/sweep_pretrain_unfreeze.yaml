@@ -9,7 +9,7 @@ metric:
 
 parameters:
   unfreeze_blocks:
-    values: [2, 4, 6, 8]
+    value: 4
   lr_proj:
     distribution: log_uniform_values
     min: 5e-5
@@ -35,7 +35,7 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --splits
-  - data/internal_dataset/split.json
+  - data/internal_dataset/split_binary_final.json
   - --out_dir
   - results
   - --use_mask

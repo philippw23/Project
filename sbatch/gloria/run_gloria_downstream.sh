@@ -10,26 +10,26 @@
 #SBATCH --error=/dev/null
 
 # ── Parameters (edit here) ────────────────────────────────────────────────────
-CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/gloria_pretrain/gloria_pretrain_lora2_r8_20260610_133210/best_retrieval_checkpoint.pt"
-# /mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt
-SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt" #"/mnt/nfs/homedirs/philippw/Project/results/gloria_pretrain/gloria_pretrain_lora2_r8_20260610_133210/best_retrieval_checkpoint.pt"
+SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json"
+BINARY=false
 
-BATCH_SIZE=16
-LR=1e-3
+BATCH_SIZE=32
+LR=0.0026469369761300088
 DROPOUT=0.3
-WEIGHT_DECAY=0.01
+WEIGHT_DECAY=0.05
 EPOCHS=50
 
 # Head mode: mlp (age+sex fusion), mlp_no_meta (no metadata), linear (linear probe)
 HEAD="mlp_no_meta"
-HIDDEN_DIMS="256 128"
+HIDDEN_DIMS="256"
 META_EMBED_DIM=16
 
 # Loss: ce, wce, ce_smooth, focal, cb_focal, ldam, balanced_softmax
 LOSS="focal"
-FOCAL_GAMMA=2.5
+FOCAL_GAMMA=3.2655347210387062
 # Class weighting: none, inverse, sqrt, effective
-CLASS_WEIGHTING="sqrt"
+CLASS_WEIGHTING="effective"
 
 # Embedding: leave unset to use 2048-dim pre-projection features (default),
 # or set USE_PROJECTION=1 to use 768-dim post-projection features.
@@ -62,6 +62,7 @@ PROJ_FLAG=""
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria_downstream.py \
     --checkpoint    $CHECKPOINT \
     --splits        $SPLITS \
+    --binary                  $BINARY \
     --out_dir       $home_dir/Project/results \
     --epochs        $EPOCHS \
     --batch_size    $BATCH_SIZE \

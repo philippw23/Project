@@ -358,6 +358,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)
+    parser.add_argument("--run_name",      default=None,
+                        help="Output-dir name under <out_dir>/gloria_downstream/ "
+                             "(default: auto-generated from head/loss/timestamp).")
     parser.add_argument("--wandb",         action="store_true")
     parser.add_argument("--wandb_project", default="gloria-downstream")
     parser.add_argument("--wandb_run",     default=None)
@@ -386,7 +389,7 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -498,7 +501,7 @@ def main(args: argparse.Namespace) -> None:
     criterion = build_classification_loss(args, label_counts, num_classes, class_weights, device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    run_name = (
+    run_name = args.run_name or (
         f"run_{args.head}_{args.loss}_{args.class_weighting}_"
         + datetime.now().strftime("%Y%m%d_%H%M%S")
     )
@@ -574,6 +577,8 @@ def main(args: argparse.Namespace) -> None:
         test_loss, _, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
         eval_metrics.update(report_eval(
             "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+        eval_metrics["test/_preds"]  = test_preds.tolist()
+        eval_metrics["test/_labels"] = test_labels.tolist()
 
         if args.btxrd_manifest:
             print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
@@ -600,6 +605,7 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
     print(f"Checkpoints saved to: {run_dir}")
+    return eval_metrics
 
 
 if __name__ == "__main__":

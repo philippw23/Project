@@ -34,9 +34,6 @@ parameters:
     values: [2.0, 3.0, 4.0]
   cb_beta:                   # only active for cb_focal
     values: [0.99, 0.999]
-  binary:
-    value: true
-  
 
 command:
   - ${env}
@@ -48,11 +45,15 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --splits
-  - data/internal_dataset/split_binary.json
-  - --freezed_biomedclip
+  - data/internal_dataset/split_binary_final.json
+  - --checkpoint
+  - results/biomedclip_pretrain/run_bs128_unfreeze4_20260727_234731/best_r1_checkpoint.pt
   - --out_dir
   - results
   - --use_mask
+  - --binary
+  - "true"
+  - --eval_test
   - --epochs
   - "50"
   - --seed

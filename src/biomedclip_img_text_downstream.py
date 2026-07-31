@@ -8,6 +8,10 @@ Head variants (--head):
     mlp          — MLP with age/sex late fusion (default)
     mlp_no_meta  — same MLP capacity, no clinical metadata
 
+No BTXRD evaluation: BTXRD samples carry no report text, so the text-encoder
+pathway this baseline depends on has nothing to embed for that dataset. There
+is no --btxrd_manifest flag here.
+
 Usage:
     python src/biomedclip_img_text_downstream.py \\
         --checkpoint results/biomedclip_pretrain/.../best_r1_checkpoint.pt \\
@@ -24,12 +28,10 @@ from pathlib import Path
 
 import numpy as np
 import open_clip
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import (balanced_accuracy_score, classification_report, confusion_matrix,
-                              f1_score, precision_recall_fscore_support)
+from sklearn.metrics import balanced_accuracy_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -40,27 +42,29 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_SPLITS
-from biomedclip.data.datasets import (
-    DownstreamDatasetWithText, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
-)
+from biomedclip.data.datasets import DownstreamDatasetWithText, EmbeddingDataset
 from biomedclip.data.transforms import build_train_transform
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.lora import inject_lora
 from biomedclip.models.classifier import LinearHead, MalignancyMLP
+from biomedclip.utils.downstream_eval import resolve_label_maps, report_eval
 
 DEFAULT_CHECKPOINT = ROOT_DIR / "results" / "biomedclip_pretrain" / "best_r1_checkpoint.pt"
 EMBED_DIM = 1024  # 512-dim image + 512-dim text
 
 
-def build_head(args: argparse.Namespace, embed_dim: int, device: torch.device) -> nn.Module:
+def build_head(args: argparse.Namespace, embed_dim: int, device: torch.device,
+               num_classes: int) -> nn.Module:
     if args.head == "linear":
-        return LinearHead(embed_dim).to(device)
+        return LinearHead(embed_dim, num_classes=num_classes).to(device)
     elif args.head == "mlp_no_meta":
         return MalignancyMLP(embed_dim, args.hidden_dims, args.dropout,
-                             args.meta_embed_dim, use_meta=False).to(device)
+                             args.meta_embed_dim, use_meta=False,
+                             num_classes=num_classes).to(device)
     else:
         return MalignancyMLP(embed_dim, args.hidden_dims, args.dropout,
-                             args.meta_embed_dim, use_meta=True).to(device)
+                             args.meta_embed_dim, use_meta=True,
+                             num_classes=num_classes).to(device)
 
 
 @torch.no_grad()
@@ -154,6 +158,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--splits",   default=str(DEFAULT_SPLITS))
     parser.add_argument("--out_dir",  default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--use_mask", action="store_true")
+    parser.add_argument("--binary", type=lambda x: str(x).lower() in ("true", "1", "yes"),
+                        default=False,
+                        help="Binary classification (benign vs malignant). "
+                             "Use with split_binary.json — intermediate cases must already be excluded.")
+    parser.add_argument("--eval_test", action="store_true",
+                        help="Evaluate the split's held-out test set after training. Off by "
+                             "default so hyperparameter sweeps never touch test. No BTXRD "
+                             "evaluation — BTXRD carries no report text for the text encoder.")
 
     # ── Head variant ─────────────────────────────────────────────────────────
     parser.add_argument("--head", default="mlp",
@@ -184,6 +196,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--seed",          type=int, default=42)
+    parser.add_argument("--run_name",      default=None,
+                        help="Output-dir name under <out_dir>/biomedclip_img_text_downstream/ "
+                             "(default: auto-generated from head/loss/timestamp).")
     parser.add_argument("--wandb",         action="store_true")
     parser.add_argument("--wandb_project", default="biomedclip-img-text-downstream")
     parser.add_argument("--wandb_run",     default=None)
@@ -210,7 +225,7 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
         args.hidden_dims = list(cfg["hidden_dims"])
 
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -228,6 +243,11 @@ def main(args: argparse.Namespace) -> None:
         )
         if args.sweep:
             _apply_sweep_config(args)
+
+    # ── Label mapping ─────────────────────────────────────────────────────────
+    label_to_idx, idx_to_label, num_classes = resolve_label_maps(args.binary)
+    if args.binary:
+        print("Mode: binary (benign vs malignant)")
 
     # ── Load BiomedCLIP ───────────────────────────────────────────────────────
     print(f"Loading model: {MODEL_TAG}")
@@ -270,9 +290,11 @@ def main(args: argparse.Namespace) -> None:
 
     preprocess_train = build_train_transform(preprocess_val)
     val_kwargs   = dict(age_sex_lookup=age_sex_lookup, age_mean=age_mean, age_std=age_std,
-                        preprocess=preprocess_val,   tokenizer=tokenizer, use_mask=args.use_mask)
+                        preprocess=preprocess_val,   tokenizer=tokenizer, use_mask=args.use_mask,
+                        label_to_idx=label_to_idx)
     train_kwargs = dict(age_sex_lookup=age_sex_lookup, age_mean=age_mean, age_std=age_std,
-                        preprocess=preprocess_train, tokenizer=tokenizer, use_mask=args.use_mask)
+                        preprocess=preprocess_train, tokenizer=tokenizer, use_mask=args.use_mask,
+                        label_to_idx=label_to_idx)
 
     train_ds = DownstreamDatasetWithText(splits["train"], **train_kwargs)
     val_ds   = DownstreamDatasetWithText(splits["val"],   **val_kwargs)
@@ -283,37 +305,43 @@ def main(args: argparse.Namespace) -> None:
     loader_kwargs = {"batch_size": args.batch_size, "num_workers": 4, "pin_memory": use_pin}
     train_loader = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
     val_loader_raw   = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
-    test_loader_raw  = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
-    # ── Pre-compute val/test embeddings (train is embedded on-the-fly for augmentation) ──
-    print("Pre-computing val/test embeddings...")
-    val_emb,  val_age,  val_sex,  val_lbl  = extract_img_text_embeddings(model, val_loader_raw,  device)
-    test_emb, test_age, test_sex, test_lbl = extract_img_text_embeddings(model, test_loader_raw, device)
+    # ── Pre-compute val (and test if --eval_test) embeddings (train is embedded
+    # on-the-fly for augmentation) ──────────────────────────────────────────────
+    print("Pre-computing val embeddings...")
+    val_emb, val_age, val_sex, val_lbl = extract_img_text_embeddings(model, val_loader_raw, device)
     print(f"Embedding dim: {val_emb.shape[1]}")
+    val_loader = DataLoader(EmbeddingDataset(val_emb, val_age, val_sex, val_lbl),
+                            batch_size=args.batch_size, shuffle=False)
 
-    val_loader  = DataLoader(EmbeddingDataset(val_emb,  val_age,  val_sex,  val_lbl),
-                             batch_size=args.batch_size, shuffle=False)
-    test_loader = DataLoader(EmbeddingDataset(test_emb, test_age, test_sex, test_lbl),
-                             batch_size=args.batch_size, shuffle=False)
+    if args.eval_test:
+        test_loader_raw = DataLoader(test_ds, shuffle=False, **loader_kwargs)
+        print("Pre-computing test embeddings...")
+        test_emb, test_age, test_sex, test_lbl = extract_img_text_embeddings(
+            model, test_loader_raw, device)
+        test_loader = DataLoader(EmbeddingDataset(test_emb, test_age, test_sex, test_lbl),
+                                 batch_size=args.batch_size, shuffle=False)
 
     # ── Class weighting ───────────────────────────────────────────────────────
     train_labels_all = torch.tensor(
-        [LABEL_TO_IDX[s["label"]] for s in train_ds.samples], dtype=torch.long
+        [label_to_idx[s["label"]] for s in train_ds.samples], dtype=torch.long
     )
-    label_counts  = torch.bincount(train_labels_all, minlength=NUM_CLASSES).float()
+    label_counts  = torch.bincount(train_labels_all, minlength=num_classes).float()
     class_weights = compute_class_weights(
-        label_counts, num_classes=NUM_CLASSES, mode=args.class_weighting,
+        label_counts, num_classes=num_classes, mode=args.class_weighting,
         beta=args.cb_beta, device=device,
     )
-    print(f"Class counts (train): { {IDX_TO_LABEL[i]: int(label_counts[i]) for i in range(NUM_CLASSES)} }")
+    print(f"Class counts (train): { {idx_to_label[i]: int(label_counts[i]) for i in range(num_classes)} }")
     print(f"Loss: {args.loss} | class_weighting={args.class_weighting}")
 
     # ── Head, loss, optimiser ─────────────────────────────────────────────────
-    head      = build_head(args, EMBED_DIM, device)
-    criterion = build_classification_loss(args, label_counts, NUM_CLASSES, class_weights, device)
+    head      = build_head(args, EMBED_DIM, device, num_classes)
+    criterion = build_classification_loss(args, label_counts, num_classes, class_weights, device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    run_name = f"run_{args.head}_{args.loss}_{args.class_weighting}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = args.run_name or (
+        f"run_{args.head}_{args.loss}_{args.class_weighting}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     run_dir  = Path(args.out_dir) / "biomedclip_img_text_downstream" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = run_dir / "best_head.pt"
@@ -368,60 +396,30 @@ def main(args: argparse.Namespace) -> None:
                 print(f"Early stopping at epoch {epoch} (no improvement for {args.patience} epochs).")
                 break
 
-    # ── Test evaluation ───────────────────────────────────────────────────────
+    # ── Restore best head ─────────────────────────────────────────────────────
     best_ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     head.load_state_dict(best_ckpt["head_state_dict"])
-    test_loss, test_acc, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
 
-    label_names = [IDX_TO_LABEL[i] for i in range(NUM_CLASSES)]
-    print("\n" + "=" * 60)
-    print("TEST RESULTS")
-    print("=" * 60)
-    print(f"Loss: {test_loss:.4f}  |  Accuracy: {test_acc:.3f}")
-    print(f"Balanced accuracy: {balanced_accuracy_score(test_labels, test_preds):.3f}")
-    print(f"Macro F1: {f1_score(test_labels, test_preds, average='macro'):.3f}")
-    test_weighted_prec, test_weighted_rec, _, _ = precision_recall_fscore_support(
-        test_labels, test_preds, average="weighted", zero_division=0
-    )
-    print(f"Weighted Precision: {test_weighted_prec:.3f}  |  Weighted Recall: {test_weighted_rec:.3f}")
-    print()
-    print(classification_report(
-        test_labels, test_preds,
-        labels=list(range(NUM_CLASSES)), target_names=label_names,
-        digits=3, zero_division=0,
-    ))
-    print("Confusion matrix (rows=true, cols=pred):")
-    print(pd.DataFrame(
-        confusion_matrix(test_labels, test_preds, labels=list(range(NUM_CLASSES))),
-        index=label_names, columns=label_names,
-    ).to_string())
+    # ── Held-out test evaluation (opt-in via --eval_test; no BTXRD — see module
+    # docstring) ─────────────────────────────────────────────────────────────
+    eval_metrics: dict = {}
+    if args.eval_test:
+        test_loss, _, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
+        eval_metrics.update(report_eval(
+            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+        eval_metrics["test/_preds"]  = test_preds.tolist()
+        eval_metrics["test/_labels"] = test_labels.tolist()
+    else:
+        print("\nSkipping held-out test evaluation (--eval_test not set).")
 
     if use_wandb:
-        test_bal_acc = balanced_accuracy_score(test_labels, test_preds)
-        test_prec, test_rec, test_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, average="macro", zero_division=0
-        )
-        per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(
-            test_labels, test_preds, labels=list(range(NUM_CLASSES)), zero_division=0
-        )
-        log_dict = {
-            "test/loss": test_loss, "test/acc": test_acc,
-            "test/balanced_acc":      test_bal_acc,
-            "test/precision_macro":    test_prec,
-            "test/recall_macro":       test_rec,
-            "test/precision_weighted": test_weighted_prec,
-            "test/recall_weighted":    test_weighted_rec,
-            "test/f1_macro":           test_f1,
-        }
-        for i, name in enumerate(label_names):
-            log_dict[f"test/precision_{name}"] = per_class_prec[i]
-            log_dict[f"test/recall_{name}"]    = per_class_rec[i]
-            log_dict[f"test/f1_{name}"]        = per_class_f1[i]
-        wandb.log(log_dict)
+        if eval_metrics:
+            wandb.log(eval_metrics)
         wandb.finish()
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
     print(f"Checkpoints saved to: {run_dir}")
+    return eval_metrics
 
 
 if __name__ == "__main__":

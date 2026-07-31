@@ -24,11 +24,17 @@ parameters:
 
   # ── Soft-target temperatures ─────────────────────────────────────────────────
   tau_s_beur:
-    values: [0.030, 0.0325, 0.035, 0.040]
+    distribution: uniform
+    min: 0.030
+    max: 0.040
   tau_s_bef:
-    values: [0.035, 0.038, 0.040, 0.045]
+    distribution: uniform
+    min: 0.035
+    max: 0.045
   tau_s_img_full:
-    values: [0.025, 0.028, 0.030, 0.035]
+    distribution: uniform
+    min: 0.025
+    max: 0.035
 
   # ── t2i ──────────────────────────────────────────────────────────────────────
   t2i_mode:
@@ -36,8 +42,11 @@ parameters:
   lambda_t2i:
     value: 0.5
   same_image_boost:
-    value: 20.0
+    values: [5.0, 10.0, 15.0, 20.0]
 
+  # ─── mask capacity ────────────────────────────────────────────────────────── 
+  n_mask_heads:
+    values: [16, 24, 32]
   # ── Epoch stages ────────────────────────────────────────────────
   stage1_epochs:
     values: [0, 16, 18, 20]
@@ -62,8 +71,14 @@ command:
   - "0.15"
   - --text_mode
   - mixed
+  - --max_text_len
+  - "128"
   - --max_beur_text_len
   - "256"
+  - --max_bef_phrases
+  - "16"
+  - --max_beur_phrases
+  - "16"
   - --batch_size
   - "128"
   - --btxrd_batch_size
@@ -81,6 +96,8 @@ command:
   - "4"
   - --warm_start_projections
   # ── Mask token decoder ───────────────────────────────────────────────────────
+  - --n_mask_tokens
+  - "1"
   - --gauss_sigma
   - "4.5"
   - --mask_head_tau
@@ -90,6 +107,8 @@ command:
   # ── Evidence prototype space ─────────────────────────────────────────────────
   - --n_prototypes
   - "32"
+  - --tau_proto
+  - "0.1"
   - --lambda_mu
   - "0.01"
   # ── Curriculum (authoritative loss/stage assignment) ─────────────────────────

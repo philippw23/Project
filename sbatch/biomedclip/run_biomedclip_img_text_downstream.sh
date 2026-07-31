@@ -40,7 +40,7 @@ home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
 
-LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_biomedclip_img_text_downstream_${HEAD}_${LOSS}.out"
+LOG_FILE="$home_dir/Project/logs/biomedclip/slurm-${SLURM_JOBID}_biomedclip_img_text_downstream_${HEAD}_${LOSS}.out"
 exec > "$LOG_FILE" 2>&1
 
 echo "Starting job ${SLURM_JOBID}"

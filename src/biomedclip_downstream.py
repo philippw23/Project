@@ -248,6 +248,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "arbitrary sizes via pos-embedding interpolation.")
 
     # ── Misc ──────────────────────────────────────────────────────────────────
+    parser.add_argument("--run_name",      default=None,
+                        help="Override the auto-generated run name (used for the checkpoint "
+                             "dir under --out_dir/biomedclip_downstream/; e.g. per-fold naming "
+                             "in CV mode). Default: run_<head>_<loss>_<class_weighting>_<timestamp>.")
     parser.add_argument("--seed",          type=int, default=42)
     parser.add_argument("--wandb",         action="store_true")
     parser.add_argument("--wandb_project", default="biomedclip-downstream")
@@ -276,7 +280,7 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
         args.hidden_dims = list(cfg["hidden_dims"])
 
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -425,7 +429,9 @@ def main(args: argparse.Namespace) -> None:
     else:
         optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    run_name  = f"run_{args.head}_{args.loss}_{args.class_weighting}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name  = args.run_name or (
+        f"run_{args.head}_{args.loss}_{args.class_weighting}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     run_dir   = Path(args.out_dir) / "biomedclip_downstream" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = run_dir / "best_head.pt"
@@ -503,6 +509,10 @@ def main(args: argparse.Namespace) -> None:
         encoder.load_state_dict(enc_state)
 
     # ── Held-out test / external BTXRD evaluation (opt-in via --eval_test) ─────
+    # Metrics returned to callers (e.g. the k-fold CV orchestrator).
+    results: dict = {
+        f"val/best_{args.early_stopping_metric}": best_metric,
+    }
     eval_metrics: dict = {}
     if args.eval_test:
         if finetune:
@@ -511,8 +521,14 @@ def main(args: argparse.Namespace) -> None:
             test_emb_ds = EmbeddingDataset(test_emb, test_age, test_sex, test_lbl)
             test_loader = DataLoader(test_emb_ds, batch_size=args.batch_size, shuffle=False)
         test_loss, _, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
-        eval_metrics.update(report_eval(
-            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+        test_metrics = report_eval(
+            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test")
+        eval_metrics.update(test_metrics)
+        results.update(test_metrics)
+        # raw per-sample predictions for pooled out-of-fold CV scoring
+        # (consumed by downstream_cv.py; ignored by single-run callers)
+        results["test/_preds"]  = test_preds.tolist()
+        results["test/_labels"] = test_labels.tolist()
 
         if args.btxrd_manifest:
             print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
@@ -526,9 +542,11 @@ def main(args: argparse.Namespace) -> None:
                 EmbeddingDataset(b_emb, b_age, b_sex, b_lbl),
                 batch_size=args.batch_size, shuffle=False)
             btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(head, btxrd_loader, criterion, device)
-            eval_metrics.update(report_eval(
+            btxrd_metrics = report_eval(
                 "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
-                idx_to_label, num_classes, prefix="btxrd"))
+                idx_to_label, num_classes, prefix="btxrd")
+            eval_metrics.update(btxrd_metrics)
+            results.update(btxrd_metrics)
     else:
         print("\nSkipping held-out test / BTXRD evaluation (--eval_test not set).")
 
@@ -539,6 +557,7 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
     print(f"Checkpoints saved to: {run_dir}")
+    return results
 
 
 if __name__ == "__main__":

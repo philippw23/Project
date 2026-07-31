@@ -25,7 +25,7 @@ ibot:
 
 train:
   batch_size_per_gpu: 14
-  dataset_path: "BoneTumor:splits=/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+  dataset_path: "BoneTumor:splits=/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json"
   centering: sinkhorn_knopp
   OFFICIAL_EPOCH_LENGTH: 2500
   early_stopping_patience: 5
@@ -57,8 +57,8 @@ evaluation:
   eval_period_iterations: 5000
 
 lora:
-  lora_layers: 0   # last N real ViT blocks for LoRA (0 = disabled)
-  r: 4             # rank
+  lora_layers: 4   # last N real ViT blocks for LoRA (0 = disabled)
+  r: 32            # rank
   alpha: 16.0      # scaling factor
   head_mode: unfreeze_after          # frozen | unfreeze_after | train
   head_unfreeze_epoch: 10            # only used with head_mode: unfreeze_after

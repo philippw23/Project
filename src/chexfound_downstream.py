@@ -32,8 +32,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import (balanced_accuracy_score, classification_report, confusion_matrix,
-                              f1_score, precision_recall_fscore_support)
+from sklearn.metrics import (balanced_accuracy_score, precision_recall_fscore_support)
 from torch.utils.data import DataLoader
 
 try:
@@ -218,6 +217,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--ldam_scale",      type=float, default=30.0)
 
     # ── Misc ──────────────────────────────────────────────────────────────────
+    parser.add_argument("--run_name",      default=None,
+                        help="Override the run identifier used for the checkpoint filename "
+                             "(best_head_<run_name>.pt); e.g. per-fold naming in CV mode. "
+                             "Default: the active W&B run id, or 'local'.")
     parser.add_argument("--seed",          type=int, default=42)
     parser.add_argument("--wandb",         action="store_true")
     parser.add_argument("--wandb_project", default="chexfound-downstream")
@@ -245,7 +248,7 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
         args.hidden_dims = list(cfg["hidden_dims"])
 
 
-def main(args: argparse.Namespace) -> None:
+def main(args: argparse.Namespace) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -344,7 +347,7 @@ def main(args: argparse.Namespace) -> None:
 
     out_dir = Path(args.out_dir) / "chexfound_downstream"
     out_dir.mkdir(parents=True, exist_ok=True)
-    run_id    = (wandb.run.id if use_wandb and wandb.run else None) or "local"
+    run_id    = args.run_name or (wandb.run.id if use_wandb and wandb.run else None) or "local"
     ckpt_path = out_dir / f"best_head_{run_id}.pt"
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -407,11 +410,21 @@ def main(args: argparse.Namespace) -> None:
     )
 
     # ── Held-out test / external BTXRD evaluation (opt-in via --eval_test) ─────
+    # Metrics returned to callers (e.g. the k-fold CV orchestrator).
+    results: dict = {
+        f"val/best_{args.early_stopping_metric}": best_metric,
+    }
     eval_metrics: dict = {}
     if args.eval_test:
         test_loss, _, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
-        eval_metrics.update(report_eval(
-            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+        test_metrics = report_eval(
+            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test")
+        eval_metrics.update(test_metrics)
+        results.update(test_metrics)
+        # raw per-sample predictions for pooled out-of-fold CV scoring
+        # (consumed by downstream_cv.py; ignored by single-run callers)
+        results["test/_preds"]  = test_preds.tolist()
+        results["test/_labels"] = test_labels.tolist()
 
         if args.btxrd_manifest:
             print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
@@ -425,9 +438,11 @@ def main(args: argparse.Namespace) -> None:
                 EmbeddingDataset(b_emb, b_age, b_sex, b_lbl),
                 batch_size=args.batch_size, shuffle=False)
             btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(head, btxrd_loader, criterion, device)
-            eval_metrics.update(report_eval(
+            btxrd_metrics = report_eval(
                 "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
-                idx_to_label, num_classes, prefix="btxrd"))
+                idx_to_label, num_classes, prefix="btxrd")
+            eval_metrics.update(btxrd_metrics)
+            results.update(btxrd_metrics)
     else:
         print("\nSkipping held-out test / BTXRD evaluation (--eval_test not set).")
 
@@ -438,6 +453,7 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
     print(f"Checkpoints saved to: {out_dir}")
+    return results
 
 
 if __name__ == "__main__":

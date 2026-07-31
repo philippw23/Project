@@ -30,8 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import (balanced_accuracy_score, classification_report,
-                              confusion_matrix, f1_score, precision_recall_fscore_support)
+from sklearn.metrics import balanced_accuracy_score, f1_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader
 
 try:
@@ -46,7 +45,7 @@ from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
 from biomedclip.data.transforms import build_preprocess_val
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import LinearHead, MalignancyMLP
-from biomedclip.utils.downstream_eval import require_binary_for_btxrd
+from biomedclip.utils.downstream_eval import require_binary_for_btxrd, report_eval
 from biomedclip.utils.misc import DEFAULT_OUT_DIR
 from LACE.data.transforms import build_train_transform_lace
 from LACE.models.downstream import LACEv2Classifier
@@ -264,70 +263,6 @@ def _precompute_repr_loader(
         batch_size=args.batch_size, shuffle=False,
     )
     return loader, len(ds)
-
-
-def _report_eval(
-    name: str,
-    preds: np.ndarray,
-    labels: np.ndarray,
-    loss: float,
-    idx_to_label: dict[int, str],
-    num_classes: int,
-    prefix: str,
-) -> dict:
-    """Print a results block for an evaluated set and return a flat metrics dict
-    keyed by `prefix` (e.g. 'test' or 'btxrd')."""
-    import pandas as pd
-
-    label_names   = [idx_to_label[i] for i in range(num_classes)]
-    present       = sorted(set(labels.tolist()) | set(preds.tolist()))
-    present_names = [label_names[i] for i in present]
-
-    acc = float((preds == labels).mean())
-    bal = balanced_accuracy_score(labels, preds)
-    f1m = f1_score(labels, preds, average="macro")
-    wprec, wrec, _, _ = precision_recall_fscore_support(
-        labels, preds, average="weighted", zero_division=0
-    )
-
-    print("\n" + "=" * 60)
-    print(f"{name} RESULTS")
-    print("=" * 60)
-    print(f"Loss: {loss:.4f}  |  Accuracy: {acc:.3f}")
-    print(f"Balanced accuracy: {bal:.3f}")
-    print(f"Macro F1: {f1m:.3f}")
-    print(f"Weighted Precision: {wprec:.3f}  |  Weighted Recall: {wrec:.3f}")
-    print()
-    print(classification_report(
-        labels, preds, labels=present, target_names=present_names,
-        digits=3, zero_division=0,
-    ))
-    print("Confusion matrix (rows=true, cols=pred):")
-    print(pd.DataFrame(
-        confusion_matrix(labels, preds, labels=present),
-        index=present_names, columns=present_names,
-    ).to_string())
-
-    prec, rec, _, _ = precision_recall_fscore_support(
-        labels, preds, average="macro", zero_division=0
-    )
-    pc_prec, pc_rec, pc_f1, _ = precision_recall_fscore_support(
-        labels, preds, labels=present, zero_division=0
-    )
-    metrics = {
-        f"{prefix}/loss": loss, f"{prefix}/acc": acc,
-        f"{prefix}/balanced_acc":  bal,
-        f"{prefix}/precision_macro":    prec,
-        f"{prefix}/recall_macro":       rec,
-        f"{prefix}/precision_weighted": wprec,
-        f"{prefix}/recall_weighted":    wrec,
-        f"{prefix}/f1_macro":           f1m,
-    }
-    for i, nm in enumerate(present_names):
-        metrics[f"{prefix}/precision_{nm}"] = pc_prec[i]
-        metrics[f"{prefix}/recall_{nm}"]    = pc_rec[i]
-        metrics[f"{prefix}/f1_{nm}"]        = pc_f1[i]
-    return metrics
 
 
 # ── Training / evaluation ─────────────────────────────────────────────────────
@@ -634,7 +569,7 @@ def main(args: argparse.Namespace) -> dict:
         test_loss, _, test_preds, test_labels = evaluate(
             trainable_model, test_loader, criterion, device
         )
-        test_metrics = _report_eval(
+        test_metrics = report_eval(
             "TEST", test_preds, test_labels, test_loss,
             idx_to_label, num_classes, prefix="test",
         )
@@ -649,7 +584,7 @@ def main(args: argparse.Namespace) -> dict:
         btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(
             trainable_model, btxrd_loader, criterion, device
         )
-        btxrd_metrics = _report_eval(
+        btxrd_metrics = report_eval(
             "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
             idx_to_label, num_classes, prefix="btxrd",
         )

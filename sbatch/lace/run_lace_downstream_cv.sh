@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_lace_downstream_cv.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -34,12 +34,12 @@ VISUAL_MODE=cls          # cls | fg | cls_fg
 # CV-mode pretrain run dir: one fold<N>/{split.json,best_retrieval_checkpoint.pt}
 # per fold. Each fold's checkpoint + split are picked up together from there —
 # update this to the CV pretrain run you want to evaluate.  run_20260724_221040
-CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260724_205525
-PATTERN="fold*/split.json"
+CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260728_191929
+PATTERN="binary_fold*/split.json"
 CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
-BINARY=false
+BINARY=true
 
 EPOCHS=100
 PATIENCE=10
@@ -57,7 +57,8 @@ SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test and --checkpoint are managed per fold by the orchestrator.
-python $home_dir/Project/src/lace_downstream_cv.py \
+python $home_dir/Project/src/downstream_cv.py \
+    --baseline               lace \
     --version                $VERSION \
     --image_size             $IMAGE_SIZE \
     --downstream_visual_mode $VISUAL_MODE \
@@ -82,5 +83,4 @@ python $home_dir/Project/src/lace_downstream_cv.py \
     --wandb \
     --wandb_project lace-downstream \
     --wandb_entity  philipp-wiese \
-    --sweep
-    # --btxrd_manifest         $BTXRD_MANIFEST \
+    --btxrd_manifest         $BTXRD_MANIFEST \

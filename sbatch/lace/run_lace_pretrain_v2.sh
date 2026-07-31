@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_lacev2.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2.out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
 
@@ -14,9 +14,9 @@
 # run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
 # a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR= # e.g. $home_dir/Project/data/internal_dataset/cv_binary
+CV_DIR= #$home_dir/Project/data/internal_dataset/cv_binary
 CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
-SPLITS=$home_dir/Project/data/internal_dataset/cv/split_binary_fold9.json  # ignored when CV_DIR is set
+SPLITS=$home_dir/Project/data/internal_dataset/split_final.json  # ignored when CV_DIR is set
 
 # ── Image encoder ─────────────────────────────────────────────────────────────
 IMAGE_ENCODER=biomedclip   # biomedclip | chexfound
@@ -55,8 +55,8 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # Standard is 0.15
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
-STAGE1_EPOCHS=20           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 10
-EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 16
+STAGE1_EPOCHS=20           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
+EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 20
 PATIENCE=20
 
 # ── Optimisation ──────────────────────────────────────────────────────────────

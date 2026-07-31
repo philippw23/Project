@@ -27,9 +27,11 @@ parameters:
   loss:
     values: [focal, cb_focal]
   class_weighting:
-    values: [inverse, effective]
+    values: [sqrt, inverse, effective]
   focal_gamma:
-    values: [2.0, 3.0, 3.25]
+    distribution: uniform
+    min: 2.5
+    max: 3.5
   cb_beta:
     values: [0.9, 0.99]
 
@@ -43,9 +45,11 @@ command:
   - --wandb_entity
   - philipp-wiese
   - --checkpoint
-  - results/chexfound_pretrain_sweep/1cjaztbq/checkpoint_best.pth
+  - results/chexfound_pretrain_sweep/o98dx8kf/checkpoint_last.pth
   - --splits
-  - data/internal_dataset/split.json
+  - data/internal_dataset/split_final.json
+  - --binary
+  - "false"
   - --out_dir
   - results
   - --use_mask
@@ -56,4 +60,5 @@ command:
   - --seed
   - "42"
   - --sweep
+  - --eval_test
   - ${args}

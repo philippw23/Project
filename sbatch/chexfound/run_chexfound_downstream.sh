@@ -11,22 +11,22 @@
 
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 # Set CHECKPOINT to a continued-pretrain .pth path, or "none" to use frozen original weights
-CHECKPOINT="none"
+CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/chexfound_pretrain_sweep/o98dx8kf/checkpoint_last.pth"
 CHEXFOUND_WEIGHTS="/mnt/nfs/homedirs/philippw/Project/src/chexfound/data/teacher_checkpoint.pth"
-IMAGE_SIZE=224   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
+IMAGE_SIZE=512   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json"
 BINARY="false"  # true | false
 HEAD="mlp_no_meta"   # linear | mlp | mlp_no_meta
 BATCH_SIZE=16
-LR=0.0003946323640213164
-DROPOUT=0.4
-HIDDEN_DIMS="64"
+LR=0.0001851273023136428
+DROPOUT=0.2
+HIDDEN_DIMS="128"
 META_EMBED_DIM=16
-WEIGHT_DECAY=0.1
+WEIGHT_DECAY=0.01
 EPOCHS=50
 LOSS="cb_focal"  # ce | wce | ce_smooth | focal | cb_focal | ldam | balanced_softmax
-FOCAL_GAMMA=4.0
-CLASS_WEIGHTING="inverse"  # none | inverse | sqrt | effective
+FOCAL_GAMMA=3.0
+CLASS_WEIGHTING="effective"  # none | inverse | sqrt | effective
 CB_BETA=0.99  # only active for cb_focal
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -34,7 +34,7 @@ home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
 
-LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_chexfound_downstream.out"
+LOG_FILE="$home_dir/Project/logs/chexfound/slurm-${SLURM_JOBID}_chexfound_downstream.out"
 exec > "$LOG_FILE" 2>&1
 
 echo "Starting job ${SLURM_JOBID}"
@@ -74,6 +74,5 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfou
     --wandb_project chexfound-downstream \
     --wandb_entity  philipp-wiese \
     --binary        $BINARY \
+    --sweep \
     --eval_test
-    
-

@@ -12,7 +12,8 @@ LACE:
                              normalising age with train-derived stats (so external
                              sets like BTXRD use the same statistics as training)
 * `report_eval`            — print a results block and return a flat `{prefix}/...`
-                             metrics dict (mirrors LACE's `_report_eval`)
+                             metrics dict (the single shared implementation, used by
+                             LACE and every other baseline downstream script)
 
 BTXRD is binary-only by construction (benign / malignant), so a comparable BTXRD
 number requires the baseline to run in `--binary` mode; `require_binary_for_btxrd`

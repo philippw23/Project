@@ -48,10 +48,7 @@ parameters:
   same_image_boost:
     values: [5.0, 10.0, 15.0]
 
-  # ── Prototype / mask capacity ────────────────────────────────────────────────
-  n_prototypes:
-    values: [32, 48, 64]
-
+  # ── mask capacity ────────────────────────────────────────────────
   n_mask_heads:
     values: [8, 16, 24]
 

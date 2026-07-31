@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --time=00:10:00
 #SBATCH --exclude=aioserver2
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir

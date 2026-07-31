@@ -16,9 +16,9 @@
 # run (results land under run_<name>/fold0/, fold1/, ...). Leave empty for a
 # normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR=                                             # e.g. $home_dir/Project/data/internal_dataset/cv_binary
+CV_DIR=$home_dir/Project/data/internal_dataset/cv   # e.g. $home_dir/Project/data/internal_dataset/cv_binary
 CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
-SPLITS=$home_dir/Project/data/internal_dataset/split.json   # ignored when CV_DIR is set
+SPLITS=$home_dir/Project/data/internal_dataset/split_final.json   # ignored when CV_DIR is set
 
 # ── Training parameters (edit here) ──────────────────────────────────────────
 BATCH_SIZE=128
@@ -26,9 +26,11 @@ NO_LORA=true       # true → unfreeze blocks, false → LoRA
 LORA_LAYERS=4
 LORA_R=32
 UNFREEZE_BLOCKS=2
-LR_BLOCKS=7.12952265879182e-05
-LR_PROJ=0.0003727751781632684
+LR_BLOCKS=8.092711688332708e-05
+LR_PROJ=0.00048819265833317647
 LR_LORA=1e-5
+WEIGHT_DECAY=0.04296442145644197
+EPOCHS=55
 # ─────────────────────────────────────────────────────────────────────────────
 
 export HOME=$home_dir
@@ -40,7 +42,7 @@ else
     tune_tag="lora${LORA_LAYERS}"
 fi
 
-LOG_FILE="$home_dir/Project/logs/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}_lr${LR}.out"
+LOG_FILE="$home_dir/Project/logs/biomedclip/slurm-${SLURM_JOBID}_bs${BATCH_SIZE}_${tune_tag}_lr${LR}.out"
 exec > "$LOG_FILE" 2>&1
 
 echo Starting job ${SLURM_JOBID}
@@ -68,9 +70,10 @@ if [ "$NO_LORA" = true ]; then
         --no_lora \
         --unfreeze_blocks $UNFREEZE_BLOCKS \
         --batch_size $BATCH_SIZE \
-        --epochs 100 \
+        --epochs $EPOCHS \
         --lr_blocks $LR_BLOCKS \
         --lr_proj $LR_PROJ \
+        --weight_decay $WEIGHT_DECAY \
         --seed 42 \
         --wandb \
         --wandb_project biomedclip-pretrain \

@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=00:30:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 cd "${SLURM_SUBMIT_DIR:-$home_dir/Project}"
