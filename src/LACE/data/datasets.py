@@ -365,6 +365,8 @@ class InternalTripleDataset(Dataset):
                 has_mask     = True
 
         def _mask_pil(mask_arr_, ref_pil):
+            """Binarize a mask array to an "L" PIL image (0/255), or an all-zero
+            mask of ref_pil's size if mask_arr_ is None (no mask available)."""
             if mask_arr_ is None:
                 return Image.new("L", ref_pil.size, 0)
             return Image.fromarray((mask_arr_ > 0).astype(np.uint8) * 255, mode="L")
@@ -383,10 +385,12 @@ class InternalTripleDataset(Dataset):
         else:
             full_image = self.preprocess(img_pil)
             crop_image = self.preprocess(crop_pil)
+            # Recalculate patch labels from the (possibly cropped) mask so they stay aligned with the 196 ViT patch positions used by MaskTokenModule.
             patch_labels = (
                 mask_to_patch_labels(global_mask, self.image_size) if has_mask
                 else torch.zeros(self.n_patches, dtype=torch.float32)
             )
+            # Recalculate patch labels from crops
             crop_patch_labels = (
                 mask_to_patch_labels(crop_mask, self.image_size) if has_mask
                 else torch.zeros(self.n_patches, dtype=torch.float32)

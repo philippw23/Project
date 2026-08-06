@@ -38,7 +38,7 @@ parameters:
 
   # ── t2i ──────────────────────────────────────────────────────────────────────
   t2i_mode:
-    value: "image_image"
+    value: "text_text"
   lambda_t2i:
     value: 0.5
   same_image_boost:
@@ -104,31 +104,18 @@ command:
   - "0.03"
   - --sim_attn_tau
   - "0.05"
-  # ── Evidence prototype space ─────────────────────────────────────────────────
-  - --n_prototypes
-  - "32"
-  - --tau_proto
-  - "0.1"
-  - --lambda_mu
-  - "0.01"
   # ── Curriculum (authoritative loss/stage assignment) ─────────────────────────
   - --loss_stages
   - "dice:1,2"
   - "ortho:1,2"
   - "ita:2"
   - "sim:2"
-  - "rec:none"
-  - "evid:none"
   - --learn_loss_weights
   - --lambda_sim
   - "1"
   - --lambda_ortho
   - "1"
   - --lambda_dice
-  - "1"
-  - --lambda_rec
-  - "1"
-  - --lambda_evid
   - "1"
   # ── Soft-target / t2i (non-swept) ────────────────────────────────────────────
   - --reweight_by_n_phrases

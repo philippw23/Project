@@ -103,9 +103,9 @@ Note: several dated/backup variants of the dataset JSON and split/report files l
   1. **L_ITA** — global image-text alignment with soft phrase-phrase targets
   2. **L_sim** — local lesion-phrase alignment via attention pooling over a tight, lesion-centred crop
   3. **L_ortho** — orthogonality regularization on the BTXRD dataset
-- **v2** — [src/LACE/train/pretrain_v2.py](src/LACE/train/pretrain_v2.py): adds a `MaskTokenDecoder` (lesion segmentation, `L_dice`), a prototype/evidential space (`L_evid_p`), and a reconstruction loss (`L_rec`), with a fully configurable 2-stage curriculum (`--loss_stages`, e.g. `ita:2 sim:none`) — by default stage 1 warms up the mask decoder + prototypes (`dice + ortho + rec`), stage 2 adds everything.
+- **v2** — [src/LACE/train/pretrain_v2.py](src/LACE/train/pretrain_v2.py): adds a `MaskTokenDecoder` (lesion segmentation, `L_dice`), with a fully configurable 2-stage curriculum (`--loss_stages`, e.g. `ita:2 sim:none`) — by default stage 1 warms up the mask decoder (`dice + ortho`), stage 2 adds everything.
 
-Encoders in [src/LACE/models/encoders.py](src/LACE/models/encoders.py): `SharedViT`, `BiomedCLIPTextEncoder`, `ProjectionHead`. Downstream heads/training in [src/LACE/train/downstream.py](src/LACE/train/downstream.py) and [src/LACE/models/downstream.py](src/LACE/models/downstream.py); k-fold CV orchestration (internal folds + frozen BTXRD test) in `src/lace_downstream_cv.py`. Design docs: [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md), [src/LACE/CV_EVAL_PLAN.md](src/LACE/CV_EVAL_PLAN.md), [src/LACE/EVIDENCE_PROTOTYPE_PLAN.md](src/LACE/EVIDENCE_PROTOTYPE_PLAN.md).
+Encoders in [src/LACE/models/encoders.py](src/LACE/models/encoders.py): `SharedViT`, `BiomedCLIPTextEncoder`, `ProjectionHead`. Downstream heads/training in [src/LACE/train/downstream.py](src/LACE/train/downstream.py) and [src/LACE/models/downstream.py](src/LACE/models/downstream.py); k-fold CV orchestration (internal folds + frozen BTXRD test) in `src/lace_downstream_cv.py`. Design docs: [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md), [src/LACE/CV_EVAL_PLAN.md](src/LACE/CV_EVAL_PLAN.md).
 
 ### CheXFound
 

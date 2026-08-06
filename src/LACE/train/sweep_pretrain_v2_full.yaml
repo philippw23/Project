@@ -52,10 +52,6 @@ parameters:
   n_mask_heads:
     values: [8, 16, 24]
 
-  # Optional, but useful if you can afford the extra variation.
-  lambda_mu:
-    value: 0.01
-
 command:
   - ${env}
   - ${interpreter}
@@ -120,28 +116,18 @@ command:
   - --sim_attn_tau
   - "0.05"
 
-  # ── Evidence prototype space ─────────────────────────────────────────────────
-  - --tau_proto
-  - "0.1"
-
   # ── Curriculum / losses ──────────────────────────────────────────────────────
   - --loss_stages
   - "dice:1,2"
   - "ortho:1,2"
   - "ita:2"
   - "sim:2"
-  - "rec:none"
-  - "evid:none"
   - --learn_loss_weights
   - --lambda_sim
   - "1"
   - --lambda_ortho
   - "1"
   - --lambda_dice
-  - "1"
-  - --lambda_rec
-  - "1"
-  - --lambda_evid
   - "1"
 
   # ── Soft-target / t2i fixed flags ────────────────────────────────────────────

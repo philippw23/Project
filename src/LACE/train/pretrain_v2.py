@@ -1,13 +1,13 @@
 """LACE v2 pretraining: MaskTokenDecoder with a configurable 2-stage curriculum.
 
 Which loss is active in which stage is fully configurable. By default:
-  Stage 1: L_dice + L_ortho + L_rec   (mask decoder + prototype warm-up)
-  Stage 2: everything (L_ITA + L_sim/L_evid_p + L_dice + L_ortho + L_rec)
+  Stage 1: L_dice + L_ortho   (mask decoder warm-up)
+  Stage 2: everything (L_ITA + L_sim + L_dice + L_ortho)
 
 Override per loss with --loss_stages, e.g.
-  --loss_stages dice:1,2 ortho:1,2 rec:1 ita:2 evid:2 sim:none
+  --loss_stages dice:1,2 ortho:1,2 ita:2 sim:none
 assigns each loss to specific stages (or none). Stageable keys are
-ita, sim, ortho, dice, rec (=L_rec), evid (=L_evid_p).
+ita, sim, ortho, dice.
 
 Set --stage1_epochs 0 to disable the curriculum split and run every configured
 loss's stage-2 set from epoch 1.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import itertools
 import json
 import math
 import random
@@ -48,7 +49,6 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.data.splits import build_stratified_splits
 from biomedclip.data.transforms import crop_around_mask_pair, pad_to_square
 from biomedclip.utils.misc import (
     DEFAULT_DATASET_JSON,
@@ -67,7 +67,6 @@ from LACE.eval.retrieval import evaluate_retrieval_lace
 from LACE.eval.knn_probe import evaluate_knn_probe
 from LACE.loss.objectives import (
     compute_l_dice_ce,
-    evidence_prototype_loss,
     gloria_local_loss,
     ortho_loss,
     select_fg_token,
@@ -75,7 +74,6 @@ from LACE.loss.objectives import (
 )
 from LACE.models.encoders import BiomedCLIPTextEncoder, CheXFoundSharedViT, SharedViT
 from LACE.models.mask_tokens import MaskPredictionHead, MaskTokenDecoder
-from LACE.models.prototypes import PrototypeBank
 
 DEFAULT_BTXRD_IMAGES = ROOT_DIR / "data" / "BTXRD" / "images"
 DEFAULT_BTXRD_ANNOTS = ROOT_DIR / "data" / "BTXRD" / "Annotations"
@@ -97,22 +95,19 @@ def make_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-_STAGEABLE_LOSSES = ("ita", "sim", "ortho", "dice", "rec", "evid")
+_STAGEABLE_LOSSES = ("ita", "sim", "ortho", "dice")
 
-# Default 2-stage curriculum, used when --loss_stages is not given. 'rec' warms
-# the prototype space from stage 1; image-side terms (ita/sim/evid) wait for
-# stage 2 once the mask decoder is dice-grounded.
+# Default 2-stage curriculum, used when --loss_stages is not given. Image-side
+# terms (ita/sim) wait for stage 2 once the mask decoder is dice-grounded.
 _DEFAULT_LOSS_STAGES = {
     "ita":   {2},
     "sim":   {2},
     "ortho": {1, 2},
     "dice":  {1, 2},
-    "rec":   {1, 2},
-    "evid":  {2},
 }
 
 # Losses active by default (when --loss_stages is not given), each using its
-# _DEFAULT_LOSS_STAGES assignment; rec/evid stay off.
+# _DEFAULT_LOSS_STAGES assignment.
 _DEFAULT_ACTIVE_LOSSES = ("ita", "sim", "ortho", "dice")
 
 
@@ -121,14 +116,13 @@ def build_loss_stage_map(
 ) -> dict[str, set[int]]:
     """Map each stageable loss to the set of curriculum stages it is active in.
 
-    Keys: ita, sim, ortho, dice, rec (=L_rec), evid (=L_evid_p). An empty set
-    disables the loss in every stage.
+    Keys: ita, sim, ortho, dice. An empty set disables the loss in every stage.
 
     ``loss_stages`` assigns each loss explicitly — each token is "NAME:STAGES"
     (or NAME=STAGES) where STAGES is a comma/space list drawn from {1, 2}, or
     0/none to disable; unlisted losses are off. When ``loss_stages`` is not
     given, the default 2-stage curriculum is used (ita/sim in stage 2,
-    ortho/dice in stages 1+2, rec/evid off).
+    ortho/dice in stages 1+2).
     """
     m: dict[str, set[int]] = {k: set() for k in _STAGEABLE_LOSSES}
     if loss_stages:
@@ -171,14 +165,12 @@ def _phrase_to_image(phrase_mask: torch.Tensor) -> torch.Tensor:
     idx = torch.arange(b_size, device=phrase_mask.device).unsqueeze(1).expand(-1, j_size)
     return idx[phrase_mask]
 
-
 def _infinite(loader: DataLoader):
     """Repeat a DataLoader indefinitely, re-iterating (and reshuffling) it on
     every wraparound — unlike itertools.cycle, which caches the first pass's
     batches and replays that frozen, unshuffled set for all later cycles."""
     while True:
         yield from loader
-
 
 def _encode_beur(
     batch: dict,
@@ -232,7 +224,6 @@ def train_one_epoch(
     text_enc: BiomedCLIPTextEncoder,
     mask_decoder: MaskTokenDecoder,
     mask_head: MaskPredictionHead,
-    mask_bank: PrototypeBank,
     internal_loader: DataLoader,
     btxrd_loader: DataLoader | None,
     optimizer: torch.optim.Optimizer,
@@ -242,13 +233,11 @@ def train_one_epoch(
     log_lambda_sim: nn.Parameter,
     log_lambda_ortho: nn.Parameter,
     log_lambda_dice: nn.Parameter,
-    log_lambda_rec: nn.Parameter,
-    log_lambda_evid: nn.Parameter,
     trainable_params: list,
     device: torch.device,
     stage: int,                       # curriculum stage (1 or 2)
     learn_loss_weights: bool,
-    loss_stage_map: dict[str, set[int]],  # {loss_name: {stages}} over ita/sim/ortho/dice/rec/evid
+    loss_stage_map: dict[str, set[int]],  # {loss_name: {stages}} over ita/sim/ortho/dice
     text_mode: str = "phrase",
     max_grad_norm: float = 1.0,
     τ_s_beur: float = 0.015,
@@ -259,19 +248,16 @@ def train_one_epoch(
     reweight_by_n_phrases: bool = False,
     t2i_mode: str = "image_image",
     lambda_t2i: float = 1.0,
-    lambda_mu: float = 0.01,
 ) -> dict[str, float]:
     vit.train()
     text_enc.train()
     mask_decoder.train()
     mask_head.train()
-    mask_bank.train()
 
     active_losses = {k for k, v in loss_stage_map.items() if v}
     stage_losses  = {k for k, v in loss_stage_map.items() if stage in v}
 
     total_ita = total_sim = total_sim_i2t = total_sim_t2i = total_ortho = total_dice = total_dice_only = total_bce = total_hard_neg = total_total = 0.0
-    total_rec = total_evid = total_proto_ent = 0.0
     n_batches = 0
 
     btxrd_cycle = _infinite(btxrd_loader) if btxrd_loader is not None else None
@@ -287,7 +273,6 @@ def train_one_epoch(
 
         l_ita = l_sim = l_sim_i2t = l_sim_t2i = zero
         loss_ita_val = 0.0
-
 
         # ── Pass 1: L_ITA (stage 2 only) ─────────────────────────────────────
         if "ita" in stage_losses:
@@ -306,10 +291,6 @@ def train_one_epoch(
                 )
                 l_ita    = l_ita_i2t + lambda_t2i * l_ita_t2i
                 loss_ita = log_lambda_ita.exp() * l_ita
-                if learn_loss_weights:
-                    # Kendall-style counter-penalty: without -log_lambda, gradient
-                    # descent on exp(log_lambda) * L trivially drives lambda -> 0.
-                    loss_ita = loss_ita - log_lambda_ita
             scaler.scale(loss_ita).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=max_grad_norm)
@@ -317,15 +298,12 @@ def train_one_epoch(
             scaler.update()
             loss_ita_val = loss_ita.item()
 
-        # ── Pass 2: L_sim + L_dice + L_ortho + L_rec/L_evid_p ────────────────
+        # ── Pass 2: L_sim + L_dice + L_ortho ─────────────────────────────────
         l_dice = l_dice_only = l_bce = l_hard_neg = zero
         l_ortho = zero
         l_sim = l_sim_i2t = l_sim_t2i = zero
-        l_rec = l_evid = zero
-        proto_ent_val = 0.0
-        dice_active = ortho_active = sim_active = rec_active = evid_active = False
+
         optimizer.zero_grad()
-        
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             cls_raw2, patch_feat = vit.forward_all(img)
             z_img2      = vit.img_proj(cls_raw2)
@@ -336,14 +314,9 @@ def train_one_epoch(
                 l_dice, l_dice_only, l_bce, l_hard_neg = compute_l_dice_ce(
                     mask_logits[has_mask], plabels[has_mask],
                 )
-                dice_active = True
-
-            # Befund phrases feed both L_sim and the evidence prototype terms.
-            z_bef_phrases = bef_pmask = None
-            if {"sim", "rec", "evid"} & stage_losses:
-                z_bef_phrases, bef_pmask = _encode_bef(batch, text_enc, device, text_mode)
 
             if "sim" in stage_losses:
+                z_bef_phrases, bef_pmask = _encode_bef(batch, text_enc, device, text_mode)
                 sim_valid = has_mask & has_bef
                 if sim_valid.sum() >= 2:
                     P_proj        = F.normalize(vit.patch_proj(patch_feat[sim_valid]), dim=-1)
@@ -361,29 +334,9 @@ def train_one_epoch(
                         img_cls_features=z_img2[sim_valid],
                         patch_mask=plabels[sim_valid].bool(),
                     )
-                    sim_active = True
-
-            # Evidence prototypes: L_rec ('rec' key) and L_evid_p ('evid' key),
-            # each gated to its own configured stage set.
-            compute_rec    = "rec"  in stage_losses
-            compute_evid_p = "evid" in stage_losses
-            if (compute_rec or compute_evid_p) and bef_pmask is not None:
-                p2i_evid   = _phrase_to_image(bef_pmask)
-                evid_valid = has_mask & has_bef
-                l_rec, l_evid, proto_ent = evidence_prototype_loss(
-                    z_bef_phrases, bef_pmask, p2i_evid, tokens, mask_bank,
-                    evid_valid=evid_valid,
-                    compute_rec=compute_rec,
-                    compute_evid_p=compute_evid_p,
-                    lambda_mu=lambda_mu,
-                )
-                proto_ent_val = proto_ent.item()
-                rec_active  = compute_rec
-                evid_active = compute_evid_p
 
             if "ortho" in stage_losses and has_mask.any():
                 l_ortho = ortho_loss(patch_feat[has_mask], plabels[has_mask])
-                ortho_active = True
 
             # ── BTXRD: extra L_dice + L_ortho ────────────────────────────────
             if btxrd_cycle is not None:
@@ -401,30 +354,12 @@ def train_one_epoch(
                     l_dice_only = l_dice_only + btxrd_dice_only
                     l_bce       = l_bce       + btxrd_bce
                     l_hard_neg  = l_hard_neg  + btxrd_hard_neg
-                    dice_active = True
                 if "ortho" in stage_losses:
                     l_ortho = l_ortho + ortho_loss(btxrd_patches, btxrd_labels)
-                    ortho_active = True
 
             loss_seg = (log_lambda_sim.exp()   * l_sim
                       + log_lambda_ortho.exp() * l_ortho
-                      + log_lambda_dice.exp()  * l_dice
-                      + log_lambda_rec.exp()   * l_rec
-                      + log_lambda_evid.exp()  * l_evid)
-
-            if learn_loss_weights:
-                # Counter-penalty per active term (see pass 1): prevents
-                # gradient descent from collapsing every lambda toward 0.
-                if sim_active:
-                    loss_seg = loss_seg - log_lambda_sim
-                if ortho_active:
-                    loss_seg = loss_seg - log_lambda_ortho
-                if dice_active:
-                    loss_seg = loss_seg - log_lambda_dice
-                if rec_active:
-                    loss_seg = loss_seg - log_lambda_rec
-                if evid_active:
-                    loss_seg = loss_seg - log_lambda_evid
+                      + log_lambda_dice.exp()  * l_dice)
 
         scaler.scale(loss_seg).backward()
         scaler.unscale_(optimizer)
@@ -442,9 +377,6 @@ def train_one_epoch(
         total_dice_only += l_dice_only.item()
         total_bce       += l_bce.item()
         total_hard_neg  += l_hard_neg.item()
-        total_rec       += l_rec.item()
-        total_evid      += l_evid.item()
-        total_proto_ent += proto_ent_val
         total_total     += loss_total
         n_batches       += 1
         pbar.set_postfix(
@@ -465,15 +397,10 @@ def train_one_epoch(
         "train/l_dice_only":  total_dice_only / d if "dice"  in active_losses else 50.0,
         "train/l_bce":        total_bce       / d if "dice"  in active_losses else 50.0,
         "train/l_hard_neg":   total_hard_neg  / d if "dice"  in active_losses else 50.0,
-        "train/l_rec":        total_rec       / d if "rec"   in active_losses else 50.0,
-        "train/l_evid":       total_evid      / d if "evid"  in active_losses else 50.0,
-        "train/proto_entropy": total_proto_ent / d if {"rec", "evid"} & active_losses else 0.0,
         "train/lambda_ita":   log_lambda_ita.exp().item(),
         "train/lambda_sim":   log_lambda_sim.exp().item(),
         "train/lambda_ortho": log_lambda_ortho.exp().item(),
         "train/lambda_dice":  log_lambda_dice.exp().item(),
-        "train/lambda_rec":   log_lambda_rec.exp().item(),
-        "train/lambda_evid":  log_lambda_evid.exp().item(),
         "train/tau":          τ.item(),
     }
 
@@ -484,15 +411,12 @@ def evaluate(
     text_enc: BiomedCLIPTextEncoder,
     mask_decoder: MaskTokenDecoder,
     mask_head: MaskPredictionHead,
-    mask_bank: PrototypeBank,
     val_loader: DataLoader,
     τ: nn.Parameter,
     log_lambda_ita: nn.Parameter,
     log_lambda_sim: nn.Parameter,
     log_lambda_ortho: nn.Parameter,
     log_lambda_dice: nn.Parameter,
-    log_lambda_rec: nn.Parameter,
-    log_lambda_evid: nn.Parameter,
     device: torch.device,
     loss_stage_map: dict[str, set[int]],
     stage: int = 2,               # mirrors the train curriculum for this epoch
@@ -505,20 +429,17 @@ def evaluate(
     reweight_by_n_phrases: bool = False,
     t2i_mode: str = "image_image",
     lambda_t2i: float = 1.0,
-    lambda_mu: float = 0.01,
 ) -> dict[str, float]:
     vit.eval()
     text_enc.eval()
     mask_decoder.eval()
     mask_head.eval()
-    mask_bank.eval()
 
     # Mirror training: only compute losses active for this stage
     active_losses = {k for k, v in loss_stage_map.items() if v}
     stage_losses  = {k for k, v in loss_stage_map.items() if stage in v}
 
     total_ita = total_sim = total_sim_i2t = total_sim_t2i = total_ortho = total_dice = total_dice_only = total_bce = total_hard_neg = total_total = 0.0
-    total_rec = total_evid = total_proto_ent = 0.0
     n_batches = 0
     zero = torch.zeros(1, device=device)[0]
 
@@ -572,22 +493,6 @@ def evaluate(
                         patch_mask=plabels[sim_valid].bool(),
                     )
 
-            l_rec = l_evid = zero
-            proto_ent_val = 0.0
-            compute_rec    = "rec"  in stage_losses
-            compute_evid_p = "evid" in stage_losses
-            if compute_rec or compute_evid_p:
-                p2i_evid   = _phrase_to_image(bef_pmask)
-                evid_valid = has_mask & has_bef
-                l_rec, l_evid, proto_ent = evidence_prototype_loss(
-                    z_bef_phrases, bef_pmask, p2i_evid, tokens, mask_bank,
-                    evid_valid=evid_valid,
-                    compute_rec=compute_rec,
-                    compute_evid_p=compute_evid_p,
-                    lambda_mu=lambda_mu,
-                )
-                proto_ent_val = proto_ent.item()
-
             l_ortho = zero
             if "ortho" in stage_losses and has_mask.any():
                 l_ortho = ortho_loss(patch_feat[has_mask], plabels[has_mask])
@@ -604,9 +509,7 @@ def evaluate(
             loss = (log_lambda_ita.exp()   * l_ita
                   + log_lambda_sim.exp()   * l_sim
                   + log_lambda_ortho.exp() * l_ortho
-                  + log_lambda_dice.exp()  * l_dice
-                  + log_lambda_rec.exp()   * l_rec
-                  + log_lambda_evid.exp()  * l_evid)
+                  + log_lambda_dice.exp()  * l_dice)
 
         total_ita       += l_ita.item()
         total_sim       += l_sim.item()
@@ -617,9 +520,6 @@ def evaluate(
         total_dice_only += l_dice_only.item()
         total_bce       += l_bce.item()
         total_hard_neg  += l_hard_neg.item()
-        total_rec       += l_rec.item()
-        total_evid      += l_evid.item()
-        total_proto_ent += proto_ent_val
         total_total     += loss.item()
         n_batches       += 1
 
@@ -635,9 +535,6 @@ def evaluate(
         "val/l_dice_only": total_dice_only / d if "dice"  in active_losses else 50.0,
         "val/l_bce":       total_bce       / d if "dice"  in active_losses else 50.0,
         "val/l_hard_neg":  total_hard_neg  / d if "dice"  in active_losses else 50.0,
-        "val/l_rec":       total_rec       / d if "rec"   in active_losses else 50.0,
-        "val/l_evid":      total_evid      / d if "evid"  in active_losses else 50.0,
-        "val/proto_entropy": total_proto_ent / d if {"rec", "evid"} & active_losses else 0.0,
     }
 
 
@@ -808,30 +705,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--patience",     type=int,   default=20)
 
     # ── Loss weights ──────────────────────────────────────────────────────────
+    parser.add_argument("--lambda_ita",   type=float, default=1.0)
     parser.add_argument("--lambda_sim",   type=float, default=1.0)
     parser.add_argument("--lambda_ortho", type=float, default=0.1)
     parser.add_argument("--lambda_dice",  type=float, default=1.0)
-    parser.add_argument("--lambda_rec",   type=float, default=1.0)
-    parser.add_argument("--lambda_evid",  type=float, default=1.0)
     parser.add_argument("--learn_loss_weights", action="store_true", default=False,
                         help="Make all log-lambda weights learnable parameters.")
     parser.add_argument("--loss_stages", nargs="+", default=None,
                         help="Per-loss stage assignment. Tokens are NAME:STAGES (or "
                              "NAME=STAGES) where NAME is one of ita, sim, ortho, dice, "
-                             "rec (=L_rec), evid (=L_evid_p), and STAGES is a comma/space "
-                             "list from {1,2} or 0/none to disable. Unlisted losses are off. "
-                             "When omitted, the default curriculum is used (ita/sim in "
-                             "stage 2, ortho/dice in stages 1+2, rec/evid off). Example: "
-                             "--loss_stages dice:1,2 ortho:1,2 rec:1 ita:2 evid:2")
-
-    # ── Evidence prototype space (LGDEA-style) ─────────────────────────────────
-    parser.add_argument("--n_prototypes", type=int,   default=32,
-                        help="Number of diagnostic prototypes K in the evidence space.")
-    parser.add_argument("--tau_proto",    type=float, default=0.1,
-                        help="Shared soft-assignment temperature for phrase and mask-token "
-                             "prototype assignment (LGDEA Eq. 4/6).")
-    parser.add_argument("--lambda_mu",    type=float, default=0.01,
-                        help="Weight of the prototype-norm shrinkage term in L_rec (Eq. 5).")
+                             "and STAGES is a comma/space list from {1,2} or 0/none to "
+                             "disable. Unlisted losses are off. When omitted, the default "
+                             "curriculum is used (ita/sim in stage 2, ortho/dice in "
+                             "stages 1+2). Example: --loss_stages dice:1,2 ortho:1,2 ita:2")
 
     # ── Soft-target / t2i settings ────────────────────────────────────────────
     parser.add_argument("--t2i_mode", default="image_image",
@@ -931,12 +817,6 @@ def main(args: argparse.Namespace) -> None:
             vit_dim=vit_dim,
         ).to(device)
         mask_head = MaskPredictionHead(tau=args.mask_head_tau, vit_dim=vit_dim).to(device)
-        mask_bank = PrototypeBank(
-            n_prototypes=args.n_prototypes,
-            dim=args.embed_dim,
-            vit_dim=vit_dim,
-            tau=args.tau_proto,
-        ).to(device)
 
         τ = nn.Parameter(torch.tensor(0.07, device=device))
 
@@ -945,22 +825,22 @@ def main(args: argparse.Namespace) -> None:
         log_lambda_sim   = nn.Parameter(torch.zeros([], device=device))
         log_lambda_ortho = nn.Parameter(torch.zeros([], device=device))
         log_lambda_dice  = nn.Parameter(torch.zeros([], device=device))
-        log_lambda_rec   = nn.Parameter(torch.zeros([], device=device))
-        log_lambda_evid  = nn.Parameter(torch.zeros([], device=device))
+
+        # Initialize from the CLI args regardless of whether the weights are
+        # learned — --learn_loss_weights only controls whether they move from
+        # this starting point, not what the starting point is.
+        log_lambda_ita.data.fill_(math.log(args.lambda_ita))
+        log_lambda_sim.data.fill_(math.log(args.lambda_sim))
+        log_lambda_ortho.data.fill_(math.log(args.lambda_ortho))
+        log_lambda_dice.data.fill_(math.log(args.lambda_dice))
 
         if args.learn_loss_weights:
-            lambda_params = [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-                             log_lambda_rec, log_lambda_evid]
+            # Add the weights to the optimizer so they are learnable
+            lambda_params = [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice]
         else:
-            log_lambda_ita.data.fill_(0.0)
-            log_lambda_sim.data.fill_(math.log(args.lambda_sim))
-            log_lambda_ortho.data.fill_(math.log(args.lambda_ortho))
-            log_lambda_dice.data.fill_(math.log(args.lambda_dice))
-            log_lambda_rec.data.fill_(math.log(args.lambda_rec))
-            log_lambda_evid.data.fill_(math.log(args.lambda_evid))
+            # Disable gradients so they stay fixed
             lambda_params = []
-            for p in [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-                      log_lambda_rec, log_lambda_evid]:
+            for p in [log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice]:
                 p.requires_grad_(False)
 
         # ── Data ──────────────────────────────────────────────────────────────
@@ -1013,7 +893,7 @@ def main(args: argparse.Namespace) -> None:
                 continue
             img_path = Path(s["image"])
             img_arr = np.array(Image.open(img_path).convert("RGB"))
-            if args.context_fraction >= 0:
+            if args.context_fraction > 0:
                 img_crop_arr, crop_mask_arr = crop_around_mask_pair(
                     img_arr, mask_arr, context_fraction=args.context_fraction,
                 )
@@ -1078,24 +958,20 @@ def main(args: argparse.Namespace) -> None:
         txt_decay,  txt_nd  = _split_params(text_enc)
         dec_decay,  dec_nd  = _split_params(mask_decoder)
         hd_decay,   hd_nd   = _split_params(mask_head)
-        # φ (img_proj) gets weight decay; raw prototypes do not (shrinkage handled by λ_µ).
-        bank_decay = [p for n, p in mask_bank.named_parameters()
-                      if p.requires_grad and n != "prototypes"]
-        bank_nd    = [mask_bank.prototypes] if mask_bank.prototypes.requires_grad else []
 
         # ── Optimizer groups: decay vs no-decay ───────────────────────────────
         optimizer = torch.optim.AdamW(
             [
-                {"params": vit_decay + txt_decay + dec_decay + hd_decay + bank_decay,
+                {"params": vit_decay + txt_decay + dec_decay + hd_decay,
                  "weight_decay": args.weight_decay},
-                {"params": vit_nd + txt_nd + dec_nd + hd_nd + bank_nd + [τ] + lambda_params,
+                {"params": vit_nd + txt_nd + dec_nd + hd_nd + [τ] + lambda_params,
                  "weight_decay": 0.0},
             ],
             lr=args.lr, betas=(0.9, 0.98), eps=1e-6,
         )
         trainable_params = (
-            vit_decay + txt_decay + dec_decay + hd_decay + bank_decay
-            + vit_nd + txt_nd + dec_nd + hd_nd + bank_nd
+            vit_decay + txt_decay + dec_decay + hd_decay
+            + vit_nd + txt_nd + dec_nd + hd_nd
             + [τ] + lambda_params
         )
 
@@ -1165,7 +1041,6 @@ def main(args: argparse.Namespace) -> None:
             reweight_by_n_phrases=args.reweight_by_n_phrases,
             t2i_mode=args.t2i_mode,
             lambda_t2i=args.lambda_t2i,
-            lambda_mu=args.lambda_mu,
         )
 
         stage2_epochs = args.epochs - stage1_end
@@ -1193,20 +1068,18 @@ def main(args: argparse.Namespace) -> None:
                 epochs_no_improve = 0
 
             train_metrics = train_one_epoch(
-                vit, text_enc, mask_decoder, mask_head, mask_bank,
+                vit, text_enc, mask_decoder, mask_head,
                 internal_loader, btxrd_loader,
                 optimizer, scaler, τ,
                 log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-                log_lambda_rec, log_lambda_evid,
                 trainable_params, device,
                 stage=stage,
                 learn_loss_weights=args.learn_loss_weights,
                 **shared_kwargs,
             )
             val_metrics = evaluate(
-                vit, text_enc, mask_decoder, mask_head, mask_bank, val_loader, τ,
+                vit, text_enc, mask_decoder, mask_head, val_loader, τ,
                 log_lambda_ita, log_lambda_sim, log_lambda_ortho, log_lambda_dice,
-                log_lambda_rec, log_lambda_evid,
                 device, stage=stage, **shared_kwargs,
             )
             retrieval_metrics = evaluate_retrieval_lace(
@@ -1237,8 +1110,6 @@ def main(args: argparse.Namespace) -> None:
                 f"train={train_metrics['train/loss']:.4f} | val={val_loss:.4f} | "
                 f"ita={val_metrics['val/l_ita']:.4f} | "
                 f"sim={val_metrics['val/l_sim']:.4f} | "
-                f"rec={val_metrics['val/l_rec']:.4f} evid={val_metrics['val/l_evid']:.4f} "
-                f"(H={val_metrics['val/proto_entropy']:.2f}) | "
                 f"ortho={val_metrics['val/l_ortho']:.4f} | "
                 f"dice={val_metrics['val/l_dice']:.4f} "
                 f"(d={val_metrics['val/l_dice_only']:.4f} bce={val_metrics['val/l_bce']:.4f}) | "
@@ -1256,20 +1127,10 @@ def main(args: argparse.Namespace) -> None:
                 f"k20={knn_metrics.get('knn/f1_k20', float('nan')):.3f}"
             )
 
-            # Early stopping keys on retrieval mean_r1 (higher is better). Updated
-            # before logging so "retrieval/best_mean_r1" reflects this epoch too.
-            is_new_best_r1 = mean_r1 > best_mean_r1
-            if is_new_best_r1:
-                best_mean_r1      = mean_r1
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-
             if use_wandb:
                 wandb.log(
                     {**train_metrics, **val_metrics, **retrieval_metrics, **knn_metrics,
-                     "epoch": epoch, "stage": stage, "train/lr": lr_current,
-                     "retrieval/best_mean_r1": best_mean_r1},
+                     "epoch": epoch, "stage": stage, "train/lr": lr_current},
                     step=epoch,
                 )
 
@@ -1282,20 +1143,15 @@ def main(args: argparse.Namespace) -> None:
                 "n_mask_tokens":        args.n_mask_tokens,
                 "n_mask_heads":         args.n_mask_heads,
                 "gauss_sigma":          args.gauss_sigma,
-                "n_prototypes":         args.n_prototypes,
-                "tau_proto":            args.tau_proto,
                 "vit_state":            vit.state_dict(),
                 "text_enc_state":       text_enc.state_dict(),
                 "mask_decoder_state":   mask_decoder.state_dict(),
                 "mask_head_state":      mask_head.state_dict(),
-                "mask_bank_state":      mask_bank.state_dict(),
                 "tau":                  τ.data,
                 "log_lambda_ita":       log_lambda_ita.data,
                 "log_lambda_sim":       log_lambda_sim.data,
                 "log_lambda_ortho":     log_lambda_ortho.data,
                 "log_lambda_dice":      log_lambda_dice.data,
-                "log_lambda_rec":       log_lambda_rec.data,
-                "log_lambda_evid":      log_lambda_evid.data,
                 "optimizer_state":      optimizer.state_dict(),
             }
 
@@ -1303,8 +1159,13 @@ def main(args: argparse.Namespace) -> None:
                 best_val_loss = val_loss
                 torch.save(checkpoint, this_run_dir / "best_checkpoint.pt")
 
-            if is_new_best_r1:
+            # Early stopping keys on retrieval mean_r1 (higher is better).
+            if mean_r1 > best_mean_r1:
+                best_mean_r1      = mean_r1
+                epochs_no_improve = 0
                 torch.save(checkpoint, this_run_dir / "best_retrieval_checkpoint.pt")
+            else:
+                epochs_no_improve += 1
 
             if args.patience > 0 and epochs_no_improve >= args.patience:
                 print(f"\nEarly stopping at epoch {epoch} "
@@ -1320,7 +1181,7 @@ def main(args: argparse.Namespace) -> None:
             wandb.finish()
 
         # Fold's model/optimizer must not leak into the next fold's GPU memory.
-        del vit, text_enc, mask_decoder, mask_head, mask_bank, optimizer, scheduler, scaler, checkpoint
+        del vit, text_enc, mask_decoder, mask_head, optimizer, scheduler, scaler, checkpoint
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

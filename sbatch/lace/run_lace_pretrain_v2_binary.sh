@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_A6_binary.out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
 
@@ -14,9 +14,9 @@
 # run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
 # a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
-CV_PATTERN="split_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
-SPLITS=$home_dir/Project/data/internal_dataset/split_final.json  # ignored when CV_DIR is set
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary   # empty = single-split run using SPLITS below (binary pretraining, no CV)
+CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
+SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json  # ignored when CV_DIR is set
 
 # ── Image encoder ─────────────────────────────────────────────────────────────
 IMAGE_ENCODER=biomedclip   # biomedclip | chexfound
@@ -48,36 +48,36 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # Standard is 0.15
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
-STAGE1_EPOCHS=20          # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
+STAGE1_EPOCHS=0          # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
 EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 20
 PATIENCE=20
 
 # ── Optimisation ──────────────────────────────────────────────────────────────
 # overfit: LR=1e-3 SCHEDULER=constant
-LR=8e-5
+LR=1.4896056170303424e-05
 SCHEDULER=cosine
-WEIGHT_DECAY=0.001
+WEIGHT_DECAY=0.0016152051597015087
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
 #LOSSES="ita ortho dice"
 # Optional per-loss stage control; OVERRIDES $LOSSES when non-empty. Space-separated
 # NAME:STAGES tokens over ita/sim/ortho/dice, stages from {1,2} or 0/none.
 # e.g. LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:none"
-LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:2"
+LOSS_STAGES="dice:2 ortho:2 ita:none sim:none"
 LEARN_LOSS_WEIGHTS=true
-LAMBDA_ITA=1.0
+LAMBDA_ITA=1.0           # starting point; adjusted by training when LEARN_LOSS_WEIGHTS=true
 LAMBDA_SIM=1.0
 LAMBDA_ORTHO=1.0
 LAMBDA_DICE=1.0
 
 # ── Soft-target / t2i ────────────────────────────────────────────────────────
-TAU_S_BEUR=0.0325
-TAU_S_BEF=0.038
-TAU_S_IMG_FULL=0.028
+TAU_S_BEUR=0.03791519112854219
+TAU_S_BEF=0.04499106175557882
+TAU_S_IMG_FULL=0.034073730854390624
 LAMBDA_T2I=0.5
-SAME_IMAGE_BOOST=10.0
+SAME_IMAGE_BOOST=15
 REWEIGHT_BY_N_PHRASES=true
-T2I_MODE=image_image  #image_image | "text_text" | "descriptor" | "infonce"
+T2I_MODE=text_text  #image_image | "text_text" | "descriptor" | "infonce"
 
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
