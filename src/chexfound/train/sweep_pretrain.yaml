@@ -12,10 +12,10 @@ parameters:
     distribution: log_uniform_values
     min: 1.0e-6
     max: 2.0e-4
-  lora_r:
-    values: [8, 16, 32]
-  lora_layers:
-    values: [2, 4, 6]
+  # lora_r:
+  #   values: [8, 16, 32]
+  # lora_layers:
+  #   values: [2, 4, 6]
   momentum_teacher:
     distribution: uniform
     min: 0.990

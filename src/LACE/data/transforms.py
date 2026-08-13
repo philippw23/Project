@@ -8,10 +8,76 @@ from torchvision.transforms import functional as TF
 from torchvision.transforms import InterpolationMode
 import torch
 
-from biomedclip.data.transforms import build_train_transform, _compute_crop_1d
+from biomedclip.data.transforms import build_train_transform, _compute_crop_1d, _crop_side
 
 PATCH_SIZE = 16
 RESAMPLE_BICUBIC = getattr(getattr(Image, "Resampling", Image), "BICUBIC")
+
+
+def pad_to_square(arr: np.ndarray, pad_value: float = 0.0) -> np.ndarray:
+    """Pad a (H, W) or (H, W, C) array symmetrically to a square."""
+    H, W = arr.shape[:2]
+    if H == W:
+        return arr
+    side = max(H, W)
+    pad_h, pad_w = side - H, side - W
+    pt, pb = pad_h // 2, pad_h - pad_h // 2
+    pl, pr = pad_w // 2, pad_w - pad_w // 2
+    pad_width = ((pt, pb), (pl, pr)) if arr.ndim == 2 else ((pt, pb), (pl, pr), (0, 0))
+    return np.pad(arr, pad_width, constant_values=pad_value)
+
+def crop_around_mask_pair(
+    image_arr: np.ndarray,
+    mask: np.ndarray,
+    context_fraction: float = 0.15,
+    context_mode: str = "image",
+    min_crop_size: int = 0,
+    pad_value: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Crop both image and mask to the same square region around the lesion.
+
+    Uses identical geometry to :func:`biomedclip.data.transforms.crop_around_mask`
+    (bbox + context margin, padded to a square when the region extends past the
+    image boundary; see :func:`_crop_side` for context_mode="image" vs. "lesion"
+    and min_crop_size). The returned image and mask crops are always square with
+    the same side length.
+
+    Falls back to returning the original arrays when the mask is empty.
+    """
+    binary_mask = mask > 0
+    if not np.any(binary_mask):
+        return image_arr, mask
+
+    rows, cols = np.where(binary_mask)
+    r_min, r_max = int(rows.min()), int(rows.max())
+    c_min, c_max = int(cols.min()), int(cols.max())
+
+    box_h = r_max - r_min + 1
+    box_w = c_max - c_min + 1
+
+    H, W = image_arr.shape[:2]
+    side = _crop_side(box_h, box_w, H, W, context_fraction, context_mode, min_crop_size)
+
+    cy = (r_min + r_max) / 2
+    cx = (c_min + c_max) / 2
+
+    r_start, r_end, pad_top,  pad_bottom = _compute_crop_1d(cy, side, H)
+    c_start, c_end, pad_left, pad_right  = _compute_crop_1d(cx, side, W)
+
+    img_crop  = image_arr[r_start:r_end, c_start:c_end]
+    mask_crop = mask[r_start:r_end, c_start:c_end]
+
+    if pad_top or pad_bottom or pad_left or pad_right:
+        img_pad = (
+            ((pad_top, pad_bottom), (pad_left, pad_right))
+            if image_arr.ndim == 2
+            else ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0))
+        )
+        img_crop  = np.pad(img_crop, img_pad, mode="constant", constant_values=pad_value)
+        mask_crop = np.pad(mask_crop, ((pad_top, pad_bottom), (pad_left, pad_right)),
+                           mode="constant", constant_values=0)
+
+    return img_crop, mask_crop
 
 
 def extract_centered_crop(

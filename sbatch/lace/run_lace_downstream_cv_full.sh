@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv_only_dice_ortho_full.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv_Full LACE v2 full stage 2 only mean_r1.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -34,9 +34,9 @@ VISUAL_MODE=cls
 # CV-mode pretrain run dir: one fold<N>/{split.json,best_retrieval_checkpoint.pt}
 # per fold. Each fold's checkpoint + split are picked up together from there —
 # update this to the CV pretrain run you want to evaluate.  run_20260724_221040
-CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260804_143606
+CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260810_142655
 PATTERN="fold*/split.json"
-CHECKPOINT_FILENAME=best_checkpoint.pt #best_retrieval_checkpoint.pt
+CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt #best_retrieval_checkpoint.pt
 
 BINARY=false
 

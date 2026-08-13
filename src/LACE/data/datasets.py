@@ -14,8 +14,9 @@ from LACE.data.transforms import (
     rasterize_shapes,
     mask_to_patch_labels,
     synchronized_train_transform,
+    crop_around_mask_pair,
+    pad_to_square,
 )
-from biomedclip.data.transforms import crop_around_mask_pair, pad_to_square
 
 
 # Malignancy GT label → int, shared by the downstream and k-NN proxy metric.
@@ -63,6 +64,8 @@ class InternalDatasetV2(Dataset):
         phrase_tok_len: int = 32,
         max_beur_text_len: int = 256,
         context_fraction: float = 0.15,
+        context_mode: str = "image",
+        min_crop_size: int = 0,
     ) -> None:
         self.preprocess        = preprocess
         self.image_size        = _image_size_from_preprocess(preprocess)
@@ -75,6 +78,8 @@ class InternalDatasetV2(Dataset):
         self.phrase_tok_len    = phrase_tok_len
         self.max_beur_text_len = max_beur_text_len
         self.context_fraction  = context_fraction
+        self.context_mode      = context_mode
+        self.min_crop_size     = min_crop_size
 
         if text_mode == "phrase":
             # phrase mode uses befund phrases (L_sim) AND beurteilung phrases (L_ITA).
@@ -148,6 +153,8 @@ class InternalDatasetV2(Dataset):
                 img_arr, crop_mask = crop_around_mask_pair(
                     np.array(image), mask_arr,
                     context_fraction=self.context_fraction,
+                    context_mode=self.context_mode,
+                    min_crop_size=self.min_crop_size,
                 )
                 image    = Image.fromarray(img_arr)
                 mask_arr = crop_mask
@@ -247,6 +254,8 @@ class InternalTripleDataset(Dataset):
         phrase_tok_len: int = 32,
         global_context_fraction: float = 0.4,
         context_fraction: float = 0.15,
+        context_mode: str = "image",
+        min_crop_size: int = 0,
         max_beur_text_len: int = 256,
         descriptor_vectors: dict[str, list[int]] | None = None,
         is_train: bool = False,
@@ -269,6 +278,8 @@ class InternalTripleDataset(Dataset):
         self.phrase_tok_len          = phrase_tok_len
         self.global_context_fraction = global_context_fraction
         self.context_fraction        = context_fraction
+        self.context_mode            = context_mode
+        self.min_crop_size           = min_crop_size
         self.max_beur_text_len       = max_beur_text_len
         self.descriptor_vectors      = descriptor_vectors or {}
 
@@ -355,12 +366,22 @@ class InternalTripleDataset(Dataset):
             if np.any(mask_arr > 0):
                 img_arr = np.array(image)
                 if self.context_fraction >= 0:
-                    img_crop_arr, crop_mask = crop_around_mask_pair(img_arr, mask_arr, context_fraction=self.context_fraction)
+                    img_crop_arr, crop_mask = crop_around_mask_pair(
+                        img_arr, mask_arr,
+                        context_fraction=self.context_fraction,
+                        context_mode=self.context_mode,
+                        min_crop_size=self.min_crop_size,
+                    )
                     crop_pil  = Image.fromarray(img_crop_arr)
                 else:
                     crop_pil  = Image.fromarray(pad_to_square(img_arr))
                     crop_mask = mask_arr  # full image → mask unchanged
-                global_arr, global_mask = crop_around_mask_pair(img_arr, mask_arr, context_fraction=self.global_context_fraction)
+                global_arr, global_mask = crop_around_mask_pair(
+                    img_arr, mask_arr,
+                    context_fraction=self.global_context_fraction,
+                    context_mode=self.context_mode,
+                    min_crop_size=self.min_crop_size,
+                )
                 img_pil      = Image.fromarray(global_arr)
                 has_mask     = True
 

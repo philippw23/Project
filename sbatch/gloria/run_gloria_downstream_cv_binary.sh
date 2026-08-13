@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=imagenet_img_downstream_cv
+#SBATCH --job-name=gloria_downstream_cv
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_imagenet_img_downstream_cv.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_gloria_downstream_cv.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -26,45 +26,53 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # ── Fixed hyperparameters (winning sweep config) ───────────────────────────────
+# GLoRIA has no CV-mode pretraining (no per-fold checkpoints) — the same fixed
+# pretrained checkpoint is used, frozen, across every fold. --cv_dir therefore
+# points straight at the raw fold split pool, not a pretrain run's fold<N>/ dirs.
+CHECKPOINT="$home_dir/Project/src/gloria/pretrained/chexpert_resnet50.ckpt"
+USE_PROJECTION=""   # leave unset for 2048-dim pre-projection features; set "1" for 768-dim post-projection
 USE_MASK=true
 
-# ImageNet has no checkpoint concept at all (always vanilla ViT-B/16, frozen) —
-# --frozen just tells the orchestrator to skip its per-fold checkpoint lookup,
-# so --cv_dir points straight at the raw fold split pool.
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
-PATTERN="split_fold*.json"
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
+PATTERN="split_binary_fold*.json"
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 BINARY=true
 
 EPOCHS=100
 PATIENCE=100
-BATCH_SIZE=64
-LR_MLP=3e-4
-WEIGHT_DECAY=0.05
+BATCH_SIZE=32
+LR=7.733403887841309e-05
+WEIGHT_DECAY=0.001
 DROPOUT=0.3
 HEAD=mlp_no_meta
-HIDDEN_DIMS="64"
-META_EMBED_DIM=0
+HIDDEN_DIMS="[128, 64]"
+META_EMBED_DIM=16
 
 LOSS=focal
-CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=2.0
+CLASS_WEIGHTING=effective
+FOCAL_GAMMA=3.0852974730947684
+CB_BETA=0.999
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
+PROJ_FLAG=""
+[ -n "$USE_PROJECTION" ] && PROJ_FLAG="--use_projection"
+
 # Note: --splits, --eval_test and --run_name are managed per fold by the
-# orchestrator; imagenet has no --checkpoint flag at all.
+# orchestrator; --checkpoint stays reserved only when NOT --frozen, so it is
+# passed through here fixed for every fold.
 python $home_dir/Project/src/downstream_cv.py \
-    --baseline               imagenet \
+    --baseline               gloria \
     --frozen \
+    --checkpoint              $CHECKPOINT \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \
-    --out_dir                 $home_dir/Project/results/imagenet_img \
+    --out_dir                 $home_dir/Project/results \
     --epochs                  $EPOCHS \
     --patience                $PATIENCE \
     --batch_size               $BATCH_SIZE \
-    --lr_mlp                  $LR_MLP \
+    --lr                      $LR \
     --weight_decay            $WEIGHT_DECAY \
     --dropout                 $DROPOUT \
     --head                    $HEAD \
@@ -72,11 +80,13 @@ python $home_dir/Project/src/downstream_cv.py \
     --meta_embed_dim          $META_EMBED_DIM \
     --loss                    $LOSS \
     --focal_gamma             $FOCAL_GAMMA \
+    --cb_beta                 $CB_BETA \
     --class_weighting         $CLASS_WEIGHTING \
+    $PROJ_FLAG \
     $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
     --wandb \
-    --wandb_project imagenet-img-downstream \
+    --wandb_project gloria-downstream \
     --wandb_entity  philipp-wiese \
-    #--btxrd_manifest         $BTXRD_MANIFEST \
+    --btxrd_manifest         $BTXRD_MANIFEST \

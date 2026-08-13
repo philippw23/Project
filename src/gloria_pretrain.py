@@ -663,10 +663,4 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.sweep and WANDB_AVAILABLE:
-        wandb.agent(
-            sweep_id=None,
-            function=lambda: main(args),
-        )
-    else:
-        main(args)
+    main(args)

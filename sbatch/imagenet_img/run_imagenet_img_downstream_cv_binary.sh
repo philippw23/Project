@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_imagenet_img_downstream_cv.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_imagenet_img_downstream_cv_binary.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -31,8 +31,8 @@ USE_MASK=true
 # ImageNet has no checkpoint concept at all (always vanilla ViT-B/16, frozen) —
 # --frozen just tells the orchestrator to skip its per-fold checkpoint lookup,
 # so --cv_dir points straight at the raw fold split pool.
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
-PATTERN="split_fold*.json"
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
+PATTERN="split_binary_fold*.json"
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 BINARY=true
@@ -40,16 +40,16 @@ BINARY=true
 EPOCHS=100
 PATIENCE=100
 BATCH_SIZE=64
-LR_MLP=3e-4
-WEIGHT_DECAY=0.05
+LR_MLP=4.833548931673336e-05
+WEIGHT_DECAY=0.09068915929215066
 DROPOUT=0.3
 HEAD=mlp_no_meta
-HIDDEN_DIMS="64"
+HIDDEN_DIMS="[64, 32]"
 META_EMBED_DIM=0
 
 LOSS=focal
-CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=2.0
+CLASS_WEIGHTING=inverse
+FOCAL_GAMMA=3
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -79,4 +79,4 @@ python $home_dir/Project/src/downstream_cv.py \
     --wandb \
     --wandb_project imagenet-img-downstream \
     --wandb_entity  philipp-wiese \
-    #--btxrd_manifest         $BTXRD_MANIFEST \
+    --btxrd_manifest         $BTXRD_MANIFEST \

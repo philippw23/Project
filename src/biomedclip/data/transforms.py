@@ -33,24 +33,53 @@ def _compute_crop_1d(
     return 0, dim_size, pad_before, pad_total - pad_before
 
 
+def _crop_side(
+    box_h: int,
+    box_w: int,
+    H: int,
+    W: int,
+    context_fraction: float,
+    context_mode: str,
+    min_crop_size: int,
+) -> int:
+    """Compute the square crop side for a lesion bbox.
+
+    context_mode="image"  (default): context_px = ceil(min(H, W) * context_fraction)
+        A fixed pixel margin derived from the *image* size — small lesions end up
+        with proportionally more surrounding context than large lesions.
+    context_mode="lesion": context_px = ceil(max(box_h, box_w) * context_fraction)
+        Margin scales with the *lesion* size instead, so every lesion gets the
+        same relative amount of context. min_crop_size then acts as an explicit
+        floor to avoid degenerate crops for very small lesions.
+    """
+    if context_mode == "lesion":
+        context_px = math.ceil(max(box_h, box_w) * context_fraction)
+    elif context_mode == "image":
+        context_px = math.ceil(min(H, W) * context_fraction)
+    else:
+        raise ValueError(f"context_mode must be 'image' or 'lesion', got {context_mode!r}")
+
+    side = max(box_h, box_w) + 2 * context_px
+    if min_crop_size > 0:
+        side = max(side, min_crop_size)
+    return side
+
+
 def crop_around_mask(
     image_arr: np.ndarray,
     mask: np.ndarray,
     enable_crop: bool = True,
     context_fraction: float = 0.15,
+    context_mode: str = "image",
+    min_crop_size: int = 0,
     pad_mode: str = "constant",
     pad_value: float = 0.0,
 ) -> np.ndarray:
     """Crop a square region around the lesion defined by *mask*.
 
-    The crop side is computed as::
-
-        context_px = ceil(min(H, W) * context_fraction)
-        side = max(bbox_height, bbox_width) + 2 * context_px
-
-    Because *context_px* is a fixed number of pixels (derived from image size,
-    not lesion size), small lesions automatically receive proportionally more
-    surrounding context than large lesions.
+    See :func:`_crop_side` for how context_mode="image" vs. "lesion" change the
+    context-margin computation, and min_crop_size for the optional floor on the
+    output side length.
     """
     if not enable_crop:
         return image_arr
@@ -68,8 +97,7 @@ def crop_around_mask(
 
     H, W = image_arr.shape[:2]
 
-    context_px = math.ceil(min(H, W) * context_fraction)
-    side = max(box_h, box_w) + 2 * context_px
+    side = _crop_side(box_h, box_w, H, W, context_fraction, context_mode, min_crop_size)
 
     cy = (r_min + r_max) / 2
     cx = (c_min + c_max) / 2
@@ -89,70 +117,6 @@ def crop_around_mask(
         crop = np.pad(crop, pad_width, mode=pad_mode, **kwargs)
 
     return crop
-
-
-def pad_to_square(arr: np.ndarray, pad_value: float = 0.0) -> np.ndarray:
-    """Pad a (H, W) or (H, W, C) array symmetrically to a square."""
-    H, W = arr.shape[:2]
-    if H == W:
-        return arr
-    side = max(H, W)
-    pad_h, pad_w = side - H, side - W
-    pt, pb = pad_h // 2, pad_h - pad_h // 2
-    pl, pr = pad_w // 2, pad_w - pad_w // 2
-    pad_width = ((pt, pb), (pl, pr)) if arr.ndim == 2 else ((pt, pb), (pl, pr), (0, 0))
-    return np.pad(arr, pad_width, constant_values=pad_value)
-
-
-def crop_around_mask_pair(
-    image_arr: np.ndarray,
-    mask: np.ndarray,
-    context_fraction: float = 0.15,
-    pad_value: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Crop both image and mask to the same square region around the lesion.
-
-    Uses identical geometry to :func:`crop_around_mask` (bbox + context margin,
-    padded to a square when the region extends past the image boundary).  The
-    returned image and mask crops are always square with the same side length.
-
-    Falls back to returning the original arrays when the mask is empty.
-    """
-    binary_mask = mask > 0
-    if not np.any(binary_mask):
-        return image_arr, mask
-
-    rows, cols = np.where(binary_mask)
-    r_min, r_max = int(rows.min()), int(rows.max())
-    c_min, c_max = int(cols.min()), int(cols.max())
-
-    box_h = r_max - r_min + 1
-    box_w = c_max - c_min + 1
-
-    H, W = image_arr.shape[:2]
-    context_px = math.ceil(min(H, W) * context_fraction)
-    side = max(box_h, box_w) + 2 * context_px
-
-    cy = (r_min + r_max) / 2
-    cx = (c_min + c_max) / 2
-
-    r_start, r_end, pad_top,  pad_bottom = _compute_crop_1d(cy, side, H)
-    c_start, c_end, pad_left, pad_right  = _compute_crop_1d(cx, side, W)
-
-    img_crop  = image_arr[r_start:r_end, c_start:c_end]
-    mask_crop = mask[r_start:r_end, c_start:c_end]
-
-    if pad_top or pad_bottom or pad_left or pad_right:
-        img_pad = (
-            ((pad_top, pad_bottom), (pad_left, pad_right))
-            if image_arr.ndim == 2
-            else ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0))
-        )
-        img_crop  = np.pad(img_crop, img_pad, mode="constant", constant_values=pad_value)
-        mask_crop = np.pad(mask_crop, ((pad_top, pad_bottom), (pad_left, pad_right)),
-                           mode="constant", constant_values=0)
-
-    return img_crop, mask_crop
 
 
 def compute_crop_box(

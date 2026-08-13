@@ -1,0 +1,66 @@
+program: src/gloria_pretrain.py
+project: gloria-pretrain
+entity: philipp-wiese
+method: bayes
+run_cap: 30
+metric:
+  name: mean_r1
+  goal: maximize
+
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 5e-6
+    max: 5e-4
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.1
+  n_layers:
+    values: [0, 1, 2, 3]
+  lora_r:
+    values: [4, 8, 16]
+  temp1:
+    values: [4.0, 5.0, 6.0]
+  temp2:
+    values: [4.0, 5.0, 6.0]
+  temp3:
+    values: [5.0, 10.0, 15.0]
+  local_loss_weight:
+    values: [0.5, 1.0, 1.5]
+  global_loss_weight:
+    values: [0.5, 1.0, 1.5]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --checkpoint
+  - /mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt
+  - --splits
+  - /mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json
+  - --out_dir
+  - /mnt/nfs/homedirs/philippw/Project/results
+  - --adapter_mode
+  - lora
+  - --lora_alpha
+  - "16"
+  - --batch_size
+  - "32"
+  - --epochs
+  - "50"
+  - --warmup_epochs
+  - "5"
+  - --patience
+  - "15"
+  - --max_text_len
+  - "97"
+  - --seed
+  - "42"
+  - --wandb
+  - --wandb_project
+  - gloria-pretrain
+  - --wandb_entity
+  - philipp-wiese
+  - --sweep
+  - ${args}

@@ -49,7 +49,6 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.data.transforms import crop_around_mask_pair, pad_to_square
 from biomedclip.utils.misc import (
     DEFAULT_DATASET_JSON,
     DEFAULT_OUT_DIR,
@@ -62,7 +61,12 @@ DEFAULT_CHEXFOUND_CONFIG    = str(_CHEXFOUND_DATA / "config.yaml")
 DEFAULT_CHEXFOUND_WEIGHTS   = str(_CHEXFOUND_DATA / "teacher_checkpoint.pth")
 
 from LACE.data.datasets import BTXRDOrthoDataset, InternalDatasetV2
-from LACE.data.transforms import build_train_transform_lace, mask_to_patch_labels
+from LACE.data.transforms import (
+    build_train_transform_lace,
+    mask_to_patch_labels,
+    crop_around_mask_pair,
+    pad_to_square,
+)
 from LACE.eval.retrieval import evaluate_retrieval_lace
 from LACE.eval.knn_probe import evaluate_knn_probe
 from LACE.loss.objectives import (
@@ -685,6 +689,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--context_fraction",  type=float, default=0.15,
                         help="Context margin around lesion mask for image crop. "
                              "0.0 = full image (no crop).")
+    parser.add_argument("--context_mode", default="image", choices=["image", "lesion"],
+                        help="'image': context_fraction is relative to the full image size "
+                             "(default; small lesions get proportionally more context). "
+                             "'lesion': context_fraction is relative to the lesion bbox size "
+                             "(every lesion gets the same relative context) — use with "
+                             "--min_crop_size to floor tiny-lesion crops.")
+    parser.add_argument("--min_crop_size", type=int, default=224,
+                        help="Minimum crop side in pixels (0 = no floor). Only useful with "
+                             "--context_mode lesion, where small lesions can otherwise produce "
+                             "degenerately tiny crops. Defaults to 224 (the network input "
+                             "resolution) so lesion-relative crops are never upsampled from "
+                             "below native size.")
     parser.add_argument("--no_btxrd", action="store_true",
                         help="Disable BTXRD dataset entirely (useful for ablations).")
     parser.add_argument("--overfit_n", type=int, default=None,
@@ -863,6 +879,8 @@ def main(args: argparse.Namespace) -> None:
             max_bef_phrases=args.max_bef_phrases,
             max_beur_phrases=args.max_beur_phrases,
             context_fraction=args.context_fraction,
+            context_mode=args.context_mode,
+            min_crop_size=args.min_crop_size,
         )
         train_ds = InternalDatasetV2(pretrain_samples, preprocess_train, tokenizer, **ds_kwargs)
         val_ds   = InternalDatasetV2(val_samples,      preprocess_val,   tokenizer, **ds_kwargs)
@@ -896,6 +914,7 @@ def main(args: argparse.Namespace) -> None:
             if args.context_fraction > 0:
                 img_crop_arr, crop_mask_arr = crop_around_mask_pair(
                     img_arr, mask_arr, context_fraction=args.context_fraction,
+                    context_mode=args.context_mode, min_crop_size=args.min_crop_size,
                 )
             else:
                 img_crop_arr = pad_to_square(img_arr)

@@ -16,10 +16,6 @@ parameters:
     distribution: log_uniform_values
     min: 0.001
     max: 0.1
-  n_layers:
-    values: [0, 1, 2, 3]
-  lora_r:
-    values: [4, 8, 16]
   temp1:
     values: [4.0, 5.0, 6.0]
   temp2:
@@ -38,13 +34,13 @@ command:
   - --checkpoint
   - /mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt
   - --splits
-  - /mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json
+  - /mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_binary_final.json
   - --out_dir
   - /mnt/nfs/homedirs/philippw/Project/results
   - --adapter_mode
-  - lora
-  - --lora_alpha
-  - "16"
+  - unfreeze
+  - --n_layers
+  - "4"
   - --batch_size
   - "32"
   - --epochs

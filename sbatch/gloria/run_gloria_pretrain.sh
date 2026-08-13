@@ -11,31 +11,31 @@
 
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt"
-SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split.json"
+SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json"
 
 # Adapter: lora or unfreeze
-ADAPTER_MODE="lora"
+ADAPTER_MODE="unfreeze"
 N_LAYERS=4          # number of last ResNet layer3 blocks to adapt (layer4 always included)
 LORA_R=8
 LORA_ALPHA=16
 
-BATCH_SIZE=128
-LR=1e-4
-WEIGHT_DECAY=0.01
-EPOCHS=50
+BATCH_SIZE=32
+LR=7.469430836442678e-05
+WEIGHT_DECAY=0.001519655652740067
+EPOCHS=150
 WARMUP_EPOCHS=5
 PATIENCE=15
-MAX_TEXT_LEN=256
+MAX_TEXT_LEN=97
 
 # GLoRIA loss temperatures (keep GLoRIA paper defaults)
 # TEMP1=4.0
 # TEMP2=5.0
 # TEMP3=10.0
-TEMP1=0.07 # set all temps to the same value for simplicity; tune this single temp1 for best performance (0.07 worked well in preliminary experiments)
-TEMP2=0.07 
-TEMP3=0.07
-LOCAL_LOSS_WEIGHT=1.0
-GLOBAL_LOSS_WEIGHT=1.0
+TEMP1=5
+TEMP2=4
+TEMP3=15
+LOCAL_LOSS_WEIGHT=1
+GLOBAL_LOSS_WEIGHT=1.5
 # ─────────────────────────────────────────────────────────────────────────────
 
 home_dir="/mnt/nfs/homedirs/$USER"

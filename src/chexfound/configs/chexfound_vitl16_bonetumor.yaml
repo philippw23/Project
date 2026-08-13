@@ -25,7 +25,7 @@ ibot:
 
 train:
   batch_size_per_gpu: 14
-  dataset_path: "BoneTumor:splits=/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json"
+  dataset_path: "BoneTumor:splits=/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_binary_final.json"
   centering: sinkhorn_knopp
   OFFICIAL_EPOCH_LENGTH: 2500
   early_stopping_patience: 5

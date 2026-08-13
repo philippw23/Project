@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=biomedclip_img_text_downstream
+#SBATCH --job-name=lace_img_text_downstream
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
@@ -9,32 +9,35 @@
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
-#$home_dir/Project/results/lace_v2_pretrain/run_20260808_232942
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 home_dir="/mnt/nfs/homedirs/$USER"
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260728_234136/best_retrieval_checkpoint.pt #"$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze2_20260521_200712/best_r1_checkpoint.pt"
-SPLITS="$home_dir/Project/data/internal_dataset/split_binary_final.json"
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260728_234136/best_retrieval_checkpoint.pt
+SPLITS="$home_dir/Project/data/internal_dataset/split_binary_final_img_text.json"
 BINARY=true             # true = benign vs malignant only (requires a split_binary*.json with intermediate excluded)
 
+# Visual mode: cls [512-dim] | fg [512-dim] | cls_fg [1024-dim] — concatenated with 512-dim text
+DOWNSTREAM_VISUAL_MODE="cls_fg"
+MAX_TEXT_LEN=384        # tokenisation length for combined befund_en + beurteilung_en text
+
 BATCH_SIZE=64
-LR=1.2566974219113507e-05
-DROPOUT=0.2124982416168622
-WEIGHT_DECAY=0.033234584146834466
-EPOCHS=200
+LR=1e-3
+DROPOUT=0.3
+WEIGHT_DECAY=0.01
+EPOCHS=100
 PATIENCE=15
 
 # Head mode: mlp (age+sex fusion), mlp_no_meta (no metadata), linear (linear probe)
 HEAD="mlp_no_meta"
-HIDDEN_DIMS="[128, 64]"
+HIDDEN_DIMS="256 128"
 META_EMBED_DIM=0
 USE_MASK=true
 # Loss: ce, wce, ce_smooth, focal, cb_focal, ldam, balanced_softmax
-LOSS="cb_focal"
-FOCAL_GAMMA=3.0630964700908816
-CB_BETA=0.9910913732770436
+LOSS="focal"
+FOCAL_GAMMA=2
+CB_BETA=0.99
 LABEL_SMOOTHING=0
 # Class weighting: none, inverse, sqrt, effective
-CLASS_WEIGHTING="inverse"
+CLASS_WEIGHTING="sqrt"
 # Early stopping metric: val_loss, val_bal_acc
 EARLY_STOPPING_METRIC="val_loss"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,7 +45,7 @@ EARLY_STOPPING_METRIC="val_loss"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
 
-LOG_FILE="$home_dir/Project/logs/biomedclip/slurm-${SLURM_JOBID}_biomedclip_img_text_downstream_${HEAD}_${LOSS}.out"
+LOG_FILE="$home_dir/Project/logs/lace/slurm-${SLURM_JOBID}_lace_img_text_downstream_${HEAD}_${LOSS}.out"
 exec > "$LOG_FILE" 2>&1
 
 echo "Starting job ${SLURM_JOBID}"
@@ -59,10 +62,12 @@ export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python \
-    $home_dir/Project/src/biomedclip_img_text_downstream.py \
+    $home_dir/Project/src/lace_img_text_downstream.py \
     --checkpoint     $CHECKPOINT \
     --splits         $SPLITS \
     --out_dir        $home_dir/Project/results \
+    --downstream_visual_mode $DOWNSTREAM_VISUAL_MODE \
+    --max_text_len   $MAX_TEXT_LEN \
     --head           $HEAD \
     --epochs         $EPOCHS \
     --patience       $PATIENCE \
@@ -82,9 +87,3 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python \
     --binary         $BINARY \
     --seed 42 \
     --eval_test
-    
-    # --wandb \
-    # --wandb_project  biomedclip-img-text-downstream \
-    # --wandb_entity   philipp-wiese
-
-    

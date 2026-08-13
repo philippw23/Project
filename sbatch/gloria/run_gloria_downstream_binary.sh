@@ -12,9 +12,11 @@
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 home_dir="/mnt/nfs/homedirs/$USER"
 #"/mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt"
-CHECKPOINT=$home_dir/Project/results/gloria_pretrain/gloria_pretrain_unfreeze4_20260812_144239/best_retrieval_checkpoint.pt #"/mnt/nfs/homedirs/philippw/Project/results/gloria_pretrain/gloria_pretrain_lora2_r8_20260610_133210/best_retrieval_checkpoint.pt"
-SPLITS="$home_dir/Project/data/internal_dataset/split_final.json"
-BINARY=false
+CHECKPOINT=$home_dir/Project/results/gloria_pretrain/gloria_pretrain_unfreeze4_20260812_215155/best_retrieval_checkpoint.pt #"/mnt/nfs/homedirs/philippw/Project/results/gloria_pretrain/gloria_pretrain_lora2_r8_20260610_133210/best_retrieval_checkpoint.pt"
+SPLITS="$home_dir/Project/data/internal_dataset/split_binary_final.json"
+
+BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
+BINARY=true
 
 BATCH_SIZE=32
 LR=0.0026469369761300088
@@ -81,4 +83,5 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria_
     --wandb \
     --wandb_project gloria-downstream \
     --wandb_entity  philipp-wiese \
-    --eval_test
+    --eval_test \
+    --btxrd_manifest         $BTXRD_MANIFEST \

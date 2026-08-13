@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -158,6 +160,9 @@ def main(argv=None) -> None:
     num_classes  = NUM_CLASSES_BINARY if binary else NUM_CLASSES
 
     # Loop over folds, running the downstream evaluation for each fold's split and checkpoint.
+    # Unique per invocation (SLURM job ID, else PID + start timestamp) so two CV runs sharing
+    # --out_dir / --pattern never overwrite each other's per-fold checkpoint file.
+    run_tag = os.environ.get("SLURM_JOB_ID") or f"pid{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     fold_results: list[dict] = []
     oof_preds:  list[int] = []   # out-of-fold internal-test predictions (each sample once)
     oof_labels: list[int] = []
@@ -168,7 +173,7 @@ def main(argv=None) -> None:
         # Pass through the user-specified hyperparameters, plus the fold-specific flags.
         fold_argv = passthrough + [
             "--splits", str(split_path), "--eval_test",
-            "--run_name", f"cv_fold{fold}_{split_path.stem}",
+            "--run_name", f"cv_fold{fold}_{split_path.stem}_{run_tag}",
         ]
         if known.frozen:
             print("  encoder: frozen (no per-fold checkpoint)")

@@ -28,34 +28,33 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
 # No --image_size here: biomedclip_img_text_downstream.py always uses open_clip's
 # fixed 224×224 preprocessing (unlike biomedclip_downstream.py).
-USE_MASK=true
+USE_MASK=false
 
-# Non-frozen: reuses the per-fold LoRA checkpoints from a biomedclip CV
-# pretraining run (sbatch/biomedclip/run_biomedclip_pretrain.sh with CV_DIR
-# set), which writes fold<N>/{split.json,best_r1_checkpoint.pt} under the run
-# dir. Point CV_DIR at that pretrain run; --checkpoint is injected per fold by
-# the orchestrator next to each fold's split file.
-CV_DIR=$home_dir/Project/results/biomedclip_pretrain/run_.../
-PATTERN="fold*/split.json"
-CHECKPOINT_FILENAME=best_r1_checkpoint.pt
+# Frozen: vanilla BiomedCLIP weights, no LoRA checkpoint — --cv_dir points
+# straight at the raw fold split pool (no fold<N>/best_r1_checkpoint.pt to
+# look up), matching the non-binary 3-class split naming.
+FROZEN=true
+CV_DIR=$home_dir/Project/data/internal_dataset/cv
+PATTERN="split_fold*.json"
 
 # No BTXRD evaluation for this baseline — BTXRD samples carry no report text,
 # so there is nothing for the text-encoder pathway to embed on that dataset.
-BINARY=true
+BINARY=false
 
-EPOCHS=50
-PATIENCE=10
+EPOCHS=200
+PATIENCE=15
 BATCH_SIZE=64
-LR=1e-3
-WEIGHT_DECAY=0.01
-DROPOUT=0.3
+LR=0.0002265090931555067
+WEIGHT_DECAY=0.1
+DROPOUT=0.2
 HEAD=mlp_no_meta
-HIDDEN_DIMS="256 128"
+HIDDEN_DIMS="[64]"
 META_EMBED_DIM=16
 
 LOSS=focal
-CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=2.0
+CLASS_WEIGHTING=effective
+FOCAL_GAMMA=3.25
+CB_BETA=0.999
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -63,9 +62,9 @@ SEED=42
 # fold by the orchestrator.
 python $home_dir/Project/src/downstream_cv.py \
     --baseline               biomedclip_img_text \
+    $( [ "$FROZEN" = "true" ] && echo "--frozen" ) \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \
-    --checkpoint_filename     $CHECKPOINT_FILENAME \
     --out_dir                 $home_dir/Project/results \
     --epochs                  $EPOCHS \
     --patience                $PATIENCE \
@@ -78,8 +77,10 @@ python $home_dir/Project/src/downstream_cv.py \
     --meta_embed_dim          $META_EMBED_DIM \
     --loss                    $LOSS \
     --focal_gamma             $FOCAL_GAMMA \
+    --cb_beta                 $CB_BETA \
     --class_weighting         $CLASS_WEIGHTING \
     $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
+    $( [ "$FROZEN" = "true" ] && echo "--freezed_biomedclip" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
     --wandb \
