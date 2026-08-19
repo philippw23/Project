@@ -57,6 +57,8 @@ from imagenet_img.train.downstream import (main as run_imagenet_downstream,
 from biomedclip.utils.downstream_eval import report_eval
 from LACE.train.downstream import (main as run_lace_downstream,
                                    parse_args as parse_lace_downstream_args)
+from LACE.train.img_text_downstream import (main as run_lace_img_text_downstream,
+                                            parse_args as parse_lace_img_text_downstream_args)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -77,8 +79,8 @@ def parse_args(argv=None) -> tuple[argparse.Namespace, list[str]]:
         add_help=True,
     )
     p.add_argument("--baseline", default="lace",
-                   choices=["lace", "biomedclip", "biomedclip_img_text", "chexfound",
-                            "gloria", "imagenet"],
+                   choices=["lace", "lace_img_text", "biomedclip", "biomedclip_img_text",
+                            "chexfound", "gloria", "imagenet"],
                    help="Baseline for which downstream cv is done in a loop")
     p.add_argument("--frozen", action="store_true",
                    help="Frozen-encoder mode: no per-fold pretrain checkpoint is looked up or "
@@ -196,6 +198,9 @@ def main(argv=None) -> None:
         elif known.baseline == "biomedclip_img_text":
             args = parse_biomedclip_img_text_downstream_args(fold_argv)
             results = run_biomedclip_img_text_downstream(args)
+        elif known.baseline == "lace_img_text":
+            args = parse_lace_img_text_downstream_args(fold_argv)
+            results = run_lace_img_text_downstream(args)
         elif known.baseline == "gloria":
             args = parse_gloria_downstream_args(fold_argv)
             results = run_gloria_downstream(args)

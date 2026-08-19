@@ -19,6 +19,7 @@ import importlib.util as _ilu
 import json
 import math
 import random
+import re
 import shutil
 import sys
 import types as _types
@@ -452,6 +453,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--dataset",     default=str(DEFAULT_DATASET_JSON),
                    help="dataset_full.json, used only when --splits is omitted")
     p.add_argument("--out_dir",     default=str(DEFAULT_OUT_DIR))
+    p.add_argument("--cv_dir", default=None,
+                   help="Directory of fold split files (e.g. data/internal_dataset/cv_binary). "
+                        "If set, runs one full pretraining pass per fold, writing each fold's "
+                        "checkpoints to out_dir/foldN/. Mutually exclusive with --splits/--sweep.")
+    p.add_argument("--cv_pattern", default="split_binary_fold*.json",
+                   help="Glob for fold files inside --cv_dir (sorted; fold index parsed "
+                        "from each filename, e.g. '...fold3...' -> fold3).")
 
     # Adapter
     p.add_argument("--adapter_mode", choices=["lora", "unfreeze"], default="lora",
@@ -514,20 +522,20 @@ def _apply_sweep_config(args: argparse.Namespace) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(args: argparse.Namespace) -> None:
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
-
-    # ── Load GLoRIA modules and loss functions ────────────────────────────────
-    _, _, _, loss_mod = _ensure_gloria_modules()
-    local_loss_fn  = loss_mod.local_loss
-    global_loss_fn = loss_mod.global_loss
+def run_single(
+    args: argparse.Namespace,
+    split_path: Path,
+    run_dir: Path,
+    device: torch.device,
+    local_loss_fn,
+    global_loss_fn,
+    wb_name: str | None,
+    wb_group: str | None,
+) -> None:
+    """Run one full pretraining pass (single split) into run_dir. Used both for a
+    normal single-split run and for one fold of --cv_dir mode."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run directory: {run_dir}")
 
     # ── Load encoders ─────────────────────────────────────────────────────────
     img_encoder, text_encoder, tokenizer, cfg_container = load_gloria_encoders(
@@ -537,25 +545,14 @@ def main(args: argparse.Namespace) -> None:
     img_encoder  = img_encoder.to(device)
     text_encoder = text_encoder.to(device)
 
-    # ── Output directory ──────────────────────────────────────────────────────
-    adapter_tag = (
-        f"lora{args.n_layers}_r{args.lora_r}"
-        if args.adapter_mode == "lora"
-        else f"unfreeze{args.n_layers}"
-    )
-    run_name = f"gloria_pretrain_{adapter_tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir  = Path(args.out_dir) / "gloria_pretrain" / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Run directory: {run_dir}")
-
     # ── Data ──────────────────────────────────────────────────────────────────
-    if Path(args.splits).exists():
-        with open(args.splits, encoding="utf-8") as fh:
+    if split_path is not None and split_path.exists():
+        with open(split_path, encoding="utf-8") as fh:
             split_data = json.load(fh)
-        shutil.copy(args.splits, run_dir / "split.json")
+        shutil.copy(split_path, run_dir / "split.json")
         train_raw = split_data["train"]
         val_raw   = split_data["val"]
-        print(f"Loaded split: {len(train_raw)} train / {len(val_raw)} val samples")
+        print(f"Loaded split from {split_path}: {len(train_raw)} train / {len(val_raw)} val samples")
     else:
         train_raw, val_raw, _ = build_stratified_splits(args, run_dir=run_dir)
 
@@ -590,7 +587,8 @@ def main(args: argparse.Namespace) -> None:
             wandb.init(
                 project=args.wandb_project,
                 entity=args.wandb_entity,
-                name=args.wandb_run or run_name,
+                name=wb_name,
+                group=wb_group,
                 config=vars(args),
             )
 
@@ -659,6 +657,73 @@ def main(args: argparse.Namespace) -> None:
 
     if use_wandb:
         wandb.finish()
+
+    del img_encoder, text_encoder, optimizer, scheduler, scaler
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def main(args: argparse.Namespace) -> None:
+    if args.cv_dir and args.splits not in (None, "", str(DEFAULT_SPLITS)):
+        raise SystemExit("--cv_dir and --splits are mutually exclusive — --splits is managed per fold.")
+    if args.cv_dir and args.sweep:
+        raise SystemExit("--cv_dir and --sweep are mutually exclusive.")
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    # ── Load GLoRIA loss functions (fold-independent) ─────────────────────────
+    _, _, _, loss_mod = _ensure_gloria_modules()
+    local_loss_fn  = loss_mod.local_loss
+    global_loss_fn = loss_mod.global_loss
+
+    # ── Output directory ──────────────────────────────────────────────────────
+    adapter_tag = (
+        f"lora{args.n_layers}_r{args.lora_r}"
+        if args.adapter_mode == "lora"
+        else f"unfreeze{args.n_layers}"
+    )
+    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name  = f"gloria_pretrain_{adapter_tag}_{run_stamp}"
+    run_dir   = Path(args.out_dir) / "gloria_pretrain" / run_name
+
+    # ── Fold targets: 1 entry for a normal run, N for --cv_dir ─────────────────
+    if args.cv_dir:
+        fold_files = sorted(Path(args.cv_dir).glob(args.cv_pattern))
+        if not fold_files:
+            raise SystemExit(f"No fold files matching {args.cv_pattern!r} in {args.cv_dir}")
+        fold_targets = []
+        for fp in fold_files:
+            m = re.search(r"fold(\d+)", fp.stem)
+            if not m:
+                raise SystemExit(f"Could not parse a fold index out of {fp.name!r} (expected '...foldN...')")
+            fold_targets.append((fp, run_dir / f"fold{int(m.group(1))}", int(m.group(1))))
+        print(f"CV mode: {len(fold_targets)} folds from {args.cv_dir}")
+    else:
+        split_path = Path(args.splits) if args.splits else None
+        fold_targets = [(split_path, run_dir, None)]
+
+    for split_path, this_run_dir, fold_idx in fold_targets:
+        if args.cv_dir:
+            print(f"\n{'#' * 70}\n# FOLD {fold_idx} — {split_path.name}\n{'#' * 70}")
+            wb_name  = f"{run_name}_fold{fold_idx}"
+            wb_group = run_name
+        else:
+            wb_name  = args.wandb_run or run_name
+            wb_group = None
+
+        run_single(
+            args, split_path, this_run_dir, device,
+            local_loss_fn, global_loss_fn, wb_name, wb_group,
+        )
 
 
 if __name__ == "__main__":

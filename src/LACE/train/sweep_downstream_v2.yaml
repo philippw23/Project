@@ -9,16 +9,16 @@ run_cap: 50
 
 parameters:
   checkpoint:
-    value: results/lace_v2_pretrain/run_20260801_110512/best_retrieval_checkpoint.pt
+    value: results/lace_v2_pretrain/run_20260815_131104/best_retrieval_checkpoint.pt
 
   downstream_visual_mode:
-    values: [cls_fg, fg]
+    values: [cls_fg, fg, cls]
 
   image_size:
     value: 224
 
   batch_size:
-    values: [32, 64]
+    value: 64
 
   hidden_dims:
     values:
@@ -50,7 +50,7 @@ parameters:
     values: ["focal"]
 
   class_weighting:
-    values: ["none", "sqrt"]
+    values: ["none", "sqrt", "inverse"]
 
   head:
     value: mlp_no_meta
@@ -62,8 +62,7 @@ command:
   - --version
   - v2
   - --splits
-  - data/internal_dataset/split_binary_final.json
-  - --binary
+  - data/internal_dataset/split_final.json
   - --eval_test
   - --use_mask
   - --out_dir

@@ -32,6 +32,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -629,7 +630,8 @@ if __name__ == "__main__":
             base_cfg["train"]["dataset_path"], args.splits)
 
     use_wandb = (args.wandb or args.sweep) and WANDB_AVAILABLE
-    run_dir = Path(args.out_dir)
+    run_stamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    run_dir = Path(args.out_dir) / run_stamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Fold targets: 1 entry for a normal run, N for --cv_dir ────────────────

@@ -1033,6 +1033,8 @@ def main(args: argparse.Namespace) -> None:
                     name=args.wandb_run,
                     config=vars(args),
                 )
+            wandb.define_metric("retrieval/mean_r1", summary="max")
+            wandb.define_metric("retrieval/mean_r5", summary="max")
 
         # ── Training loop ────────────────────────────────────────────────────
         best_val_loss     = float("inf")

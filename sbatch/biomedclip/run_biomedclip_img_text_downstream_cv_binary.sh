@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=chexfound_downstream_cv
+#SBATCH --job-name=biomedclip_img_text_downstream_cv
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=72:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_downstream_cv_full.out"
+#SBATCH --time=12:00:00
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_img_text_downstream_cv.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -26,25 +26,26 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
-IMAGE_SIZE=512   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
+# No --image_size here: biomedclip_img_text_downstream.py always uses open_clip's
+# fixed 224×224 preprocessing (unlike biomedclip_downstream.py).
 USE_MASK=true
 
-# CV-mode continued-pretraining checkpoints (from run_chexfound_pretrain_cv.sh),
-# one fold<N>/{split.json,checkpoint_last.pth} per fold. FROZEN=false tells the
-# orchestrator to pick up each fold's own checkpoint next to its split file.
-CV_DIR=$home_dir/Project/results/chexfound_pretrain_sweep/full_cv
-PATTERN="fold*/split.json"
-CHECKPOINT_FILENAME=checkpoint_last.pth
-FROZEN=false
+# Frozen: vanilla BiomedCLIP weights, no LoRA checkpoint — --cv_dir points
+# straight at the raw fold split pool (no fold<N>/best_r1_checkpoint.pt to
+# look up), matching the non-binary 3-class split naming.
+FROZEN=true
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary_img_text
+PATTERN="split_binary_fold*.json"
 
-# 3-class ("full") CV — no BTXRD comparison (BTXRD is binary-labeled only).
-BINARY=false
+# No BTXRD evaluation for this baseline — BTXRD samples carry no report text,
+# so there is nothing for the text-encoder pathway to embed on that dataset.
+BINARY=true
 
 EPOCHS=50
 PATIENCE=10
-BATCH_SIZE=32
-LR=0.0002799678754176103
-WEIGHT_DECAY=0.01
+BATCH_SIZE=64
+LR=0.0004558893457022544
+WEIGHT_DECAY=0.1
 DROPOUT=0.5
 HEAD=mlp_no_meta
 HIDDEN_DIMS="[128]"
@@ -52,39 +53,36 @@ META_EMBED_DIM=16
 
 LOSS=cb_focal
 CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=2.5860866438596446
+FOCAL_GAMMA=2.0
 CB_BETA=0.99
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Note: --splits, --eval_test and --run_name are managed per fold by the
-# orchestrator; --checkpoint is only reserved (i.e. must not be passed here)
-# when not --frozen — the orchestrator injects it per fold from CHECKPOINT_FILENAME.
+# Note: --splits, --eval_test, --run_name and --checkpoint are managed per
+# fold by the orchestrator.
 python $home_dir/Project/src/downstream_cv.py \
-    --baseline               chexfound \
+    --baseline               biomedclip_img_text \
     $( [ "$FROZEN" = "true" ] && echo "--frozen" ) \
-    --checkpoint_filename     $CHECKPOINT_FILENAME \
-    --image_size              $IMAGE_SIZE \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \
     --out_dir                 $home_dir/Project/results \
     --epochs                  $EPOCHS \
     --patience                $PATIENCE \
-    --batch_size              $BATCH_SIZE \
+    --batch_size               $BATCH_SIZE \
     --lr                      $LR \
     --weight_decay            $WEIGHT_DECAY \
     --dropout                 $DROPOUT \
     --head                    $HEAD \
-    --hidden_dims             $HIDDEN_DIMS \
+    --hidden_dims              $HIDDEN_DIMS \
     --meta_embed_dim          $META_EMBED_DIM \
     --loss                    $LOSS \
     --focal_gamma             $FOCAL_GAMMA \
     --cb_beta                 $CB_BETA \
     --class_weighting         $CLASS_WEIGHTING \
     $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
+    $( [ "$FROZEN" = "true" ] && echo "--freezed_biomedclip" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
     --wandb \
-    --wandb_project chexfound-downstream \
+    --wandb_project biomedclip-img-text-downstream \
     --wandb_entity  philipp-wiese \
-    --sweep \

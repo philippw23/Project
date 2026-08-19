@@ -28,14 +28,14 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
 IMAGE_SIZE=224
 USE_MASK=true
-FREEZED_BIOMEDCLIP=true   # true = vanilla BiomedCLIP weights, no checkpoint / LoRA
+FREEZED_BIOMEDCLIP=false   # true = vanilla BiomedCLIP weights, no checkpoint / LoRA
 
 # Frozen encoder — no pretrain checkpoint to pick up, so --cv_dir points straight
 # at the raw fold split pool instead of a pretrain run's fold<N>/ dirs. Pick the
 # pool matching BINARY below: cv/ (3-class) or cv_binary/ (binary) — both are
 # named split_binary_fold*.json regardless of which classes they actually contain.
-CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
-PATTERN="split_binary_fold*.json"
+CV_DIR=$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze4_20260815_190253
+PATTERN="split_fold*.json"
 CHECKPOINT_FILENAME=best_r1_checkpoint.pt   # unused in --frozen mode
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json

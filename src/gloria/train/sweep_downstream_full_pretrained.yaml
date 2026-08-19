@@ -42,11 +42,11 @@ command:
   - ${interpreter}
   - ${program}
   - --checkpoint
-  - results/gloria_pretrain/gloria_pretrain_unfreeze4_20260812_144239/best_retrieval_checkpoint.pt
+  - results/gloria_pretrain/gloria_pretrain_unfreeze4_20260812_215155/best_retrieval_checkpoint.pt
   - --splits
-  - data/internal_dataset/split_final.json
+  - data/internal_dataset/split_binary_final.json
   - --binary
-  - "false"
+  - "true"
   - --out_dir
   - results
   - --use_mask

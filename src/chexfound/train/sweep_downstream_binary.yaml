@@ -4,40 +4,41 @@ entity: philipp-wiese
 method: bayes
 run_cap: 30
 metric:
-  name: val/loss
-  goal: minimize
+  name: val/balanced_acc
+  goal: maximize
 
 parameters:
   loss:
     value: focal
 
   class_weighting:
-    value: inverse
+    values: [inverse, sqrt]
 
   batch_size:
-    values: [32, 64]
+    value: 64
 
   weight_decay:
-    value: 0.1
+    values: [0.05, 0.1]
 
   hidden_dims:
     values:
       - [64]
       - [64, 32]
+      - [128]
       - [128, 64]
 
   dropout:
-    values: [0.2, 0.3]
+    values: [0.2, 0.3, 0.4]
 
   lr:
     distribution: log_uniform_values
     min: 0.000025
-    max: 0.00008
+    max: 0.0003
 
   focal_gamma:
     distribution: uniform
-    min: 3.3
-    max: 3.8
+    min: 2.5
+    max: 3.5
 
 command:
   - ${env}
@@ -51,9 +52,11 @@ command:
   - --checkpoint
   - results/chexfound_pretrain_sweep/2gx5kqho/checkpoint_best.pth
   - --splits
-  - data/internal_dataset/split_final.json
+  - data/internal_dataset/split_binary_final.json
   - --binary
-  - "false"
+  - "true"
+  - --btxrd_manifest
+  - data/BTXRD/btxrd_downstream_binary.json
   - --out_dir
   - results
   - --use_mask

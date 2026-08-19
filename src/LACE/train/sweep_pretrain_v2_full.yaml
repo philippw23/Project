@@ -22,7 +22,7 @@ parameters:
 
   # Current best full-split run used 20. Search locally around that.
   stage1_epochs:
-    values: [0, 16, 18, 20]
+    values: [16, 18, 20]
 
   # Current run improved until the last logged epoch, so give it more room.
   patience:
@@ -40,7 +40,7 @@ parameters:
 
   # ── t2i ──────────────────────────────────────────────────────────────────────
   t2i_mode:
-    values: ["image_image", "infonce"]
+    values: ["image_image", "text_text"]
 
   lambda_t2i:
     values: [0.25, 0.5, 0.75, 1.0]
@@ -51,6 +51,16 @@ parameters:
   # ── mask capacity ────────────────────────────────────────────────
   n_mask_heads:
     values: [8, 16, 24]
+
+  # -- Loss weights ----
+  lambda_ita:
+    values: [0.5, 1.0, 1.5]
+  lambda_sim:
+    values: [0.5, 1.0, 1.5, 2.0]
+  lambda_ortho:
+    values: [0.5, 1.0, 1.5]
+  lambda_dice:
+    values: [0.5, 1.0, 1.5]
 
 command:
   - ${env}
@@ -123,12 +133,6 @@ command:
   - "ita:2"
   - "sim:2"
   - --learn_loss_weights
-  - --lambda_sim
-  - "1"
-  - --lambda_ortho
-  - "1"
-  - --lambda_dice
-  - "1"
 
   # ── Soft-target / t2i fixed flags ────────────────────────────────────────────
   - --reweight_by_n_phrases

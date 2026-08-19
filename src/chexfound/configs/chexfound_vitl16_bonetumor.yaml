@@ -57,7 +57,7 @@ evaluation:
   eval_period_iterations: 5000
 
 lora:
-  lora_layers: 4   # last N real ViT blocks for LoRA (0 = disabled)
+  lora_layers: 0   # last N real ViT blocks for LoRA (0 = disabled)
   r: 32            # rank
   alpha: 16.0      # scaling factor
   head_mode: unfreeze_after          # frozen | unfreeze_after | train
@@ -65,4 +65,4 @@ lora:
 
 # Full unfreeze of the last N backbone blocks (alternative to LoRA; set lora_layers: 0).
 backbone:
-  unfreeze_blocks: 0    # last N real ViT blocks + norm to fully unfreeze (0 = disabled)
+  unfreeze_blocks: 4    # last N real ViT blocks + norm to fully unfreeze (0 = disabled)

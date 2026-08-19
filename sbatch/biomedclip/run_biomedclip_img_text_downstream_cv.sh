@@ -28,32 +28,32 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
 # No --image_size here: biomedclip_img_text_downstream.py always uses open_clip's
 # fixed 224×224 preprocessing (unlike biomedclip_downstream.py).
-USE_MASK=false
+USE_MASK=true
 
 # Frozen: vanilla BiomedCLIP weights, no LoRA checkpoint — --cv_dir points
 # straight at the raw fold split pool (no fold<N>/best_r1_checkpoint.pt to
 # look up), matching the non-binary 3-class split naming.
 FROZEN=true
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_img_text
 PATTERN="split_fold*.json"
 
 # No BTXRD evaluation for this baseline — BTXRD samples carry no report text,
 # so there is nothing for the text-encoder pathway to embed on that dataset.
 BINARY=false
 
-EPOCHS=200
+EPOCHS=50
 PATIENCE=15
-BATCH_SIZE=64
-LR=0.0002265090931555067
-WEIGHT_DECAY=0.1
-DROPOUT=0.2
+BATCH_SIZE=16
+LR=0.0003337521753115302
+WEIGHT_DECAY=0.01
+DROPOUT=0.6
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[64]"
+HIDDEN_DIMS="[32]"
 META_EMBED_DIM=16
 
 LOSS=focal
 CLASS_WEIGHTING=effective
-FOCAL_GAMMA=3.25
+FOCAL_GAMMA=3
 CB_BETA=0.999
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────

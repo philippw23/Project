@@ -2,9 +2,9 @@
 #SBATCH --job-name=lace_v2_pretrain
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=24:00:00
+#SBATCH --time=96:00:00
 #SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2 .out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
@@ -14,7 +14,7 @@
 # run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
 # a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR= #$home_dir/Project/data/internal_dataset/cv
+CV_DIR=$home_dir/Project/data/internal_dataset/cv
 CV_PATTERN="split_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
 SPLITS=$home_dir/Project/data/internal_dataset/split_final.json  # ignored when CV_DIR is set
 

@@ -31,25 +31,25 @@ IMAGE_SIZE=224          # 224 = default | 512 = CheXFound-equivalent resolution
 USE_MASK=true           # apply lesion-mask cropping to input images (else the full image is just resized)
 VERSION=v2              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
 VISUAL_MODE=cls_fg      # cls [B,512] | fg [B,512] | cls_fg [B,1024]  run_20260721_080616
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260728_234136/best_retrieval_checkpoint.pt
-SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json # run_20260715_101527
-BINARY=true            # true = benign vs malignant only (intermediate skipped)
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260817_182756/best_retrieval_checkpoint.pt
+SPLITS=$home_dir/Project/data/internal_dataset/split_final.json # run_20260715_101527
+BINARY=false            # true = benign vs malignant only (intermediate skipped)
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # # ── Training ──────────────────────────────────────────────────────────────────
-EPOCHS=100
+EPOCHS=200
 PATIENCE=10
 BATCH_SIZE=64
-LR=8.833548931673336e-06
-WEIGHT_DECAY=0.09068915929215066
-DROPOUT=0.3
+LR=4.555143374320362e-06
+WEIGHT_DECAY=0.03809353499198539
+DROPOUT=0.17628065817422953
 HEAD=mlp_no_meta                # linear | mlp (with age/sex meta) | mlp_no_meta
 META_EMBED_DIM=0
-HIDDEN_DIMS="64 32"            # only used for mlp heads
+HIDDEN_DIMS="[256, 128]"            # only used for mlp heads
 
 # # ── Loss ──────────────────────────────────────────────────────────────────────
 LOSS=focal
-CLASS_WEIGHTING=inverse  # none | inverse | sqrt | effective
-FOCAL_GAMMA=3
+CLASS_WEIGHTING=sqrt  # none | inverse | sqrt | effective
+FOCAL_GAMMA=2.7378671997645583
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -74,9 +74,9 @@ python $home_dir/Project/src/lace_downstream.py \
     --class_weighting        $CLASS_WEIGHTING \
     --use_mask               $USE_MASK \
     $( [ "$BINARY" = "true" ] && echo "--binary" ) \
-    --btxrd_manifest         $BTXRD_MANIFEST \
     --seed                   $SEED \
     --wandb \
     --wandb_project lace-downstream \
     --wandb_entity  philipp-wiese \
     --eval_test 
+    # --btxrd_manifest         $BTXRD_MANIFEST \

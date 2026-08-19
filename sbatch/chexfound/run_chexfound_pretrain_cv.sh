@@ -40,8 +40,8 @@ nvidia-smi || echo "WARNING: nvidia-smi failed on $(hostname) (NVML mismatch) â€
 # cv/ (3-class, split_fold*.json) matches split_final.json used below for the
 # single-split equivalent â€” switch to cv_binary/ + split_binary_fold*.json for
 # a binary CV pretrain run.
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
-CV_PATTERN="split_fold*.json"
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
+CV_PATTERN="split_binary_fold*.json"
 
 EPOCHS=30
 BATCH_SIZE=4
