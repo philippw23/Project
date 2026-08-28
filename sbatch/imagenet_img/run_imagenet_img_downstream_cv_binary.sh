@@ -37,11 +37,11 @@ PATTERN="split_binary_fold*.json"
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 BINARY=true
 
-EPOCHS=100
-PATIENCE=100
-BATCH_SIZE=64
-LR_MLP=4.833548931673336e-05
-WEIGHT_DECAY=0.09068915929215066
+EPOCHS=150
+PATIENCE=30
+BATCH_SIZE=32
+LR_MLP=0.0001646564531459077
+WEIGHT_DECAY=0.0835001362514313
 DROPOUT=0.3
 HEAD=mlp_no_meta
 HIDDEN_DIMS="[64, 32]"
@@ -51,6 +51,7 @@ LOSS=focal
 CLASS_WEIGHTING=inverse
 FOCAL_GAMMA=3
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test and --run_name are managed per fold by the
@@ -76,6 +77,7 @@ python $home_dir/Project/src/downstream_cv.py \
     $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
+    --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project imagenet-img-downstream \
     --wandb_entity  philipp-wiese \

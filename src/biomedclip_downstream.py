@@ -196,7 +196,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     # ── Training hyperparameters ─────────────────────────────────────────────
     parser.add_argument("--epochs",         type=int,   default=50)
     parser.add_argument("--patience",       type=int,   default=10)
-    parser.add_argument("--early_stopping_metric", default="val_loss",
+    parser.add_argument("--early_stopping_metric", default="val_bal_acc",
                         choices=["val_loss", "val_bal_acc"],
                         help="Metric to monitor for early stopping and best-checkpoint saving.")
     parser.add_argument("--batch_size",     type=int,   default=64)

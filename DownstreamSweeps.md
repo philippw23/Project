@@ -129,7 +129,7 @@ Maximizes `val/best_f1_macro` (best checkpoint's F1, not final-epoch loss). Chec
 
 | Tuned | Range |
 |---|---|
-| `downstream_visual_mode` | {cls_fg, fg} |
+| `downstream_visual_mode` | {cls, fg, cls_fg} |
 | `batch_size` | {32, 64} |
 | `hidden_dims` | {[128,64],[256,128],[512,256]} |
 | `dropout` | 0.15–0.275 (uniform) |
@@ -139,3 +139,17 @@ Maximizes `val/best_f1_macro` (best checkpoint's F1, not final-epoch loss). Chec
 | `class_weighting` | {none, sqrt} |
 
 `loss` fixed=["focal"], `image_size` fixed=224. Notably tunes `downstream_visual_mode` (choice of visual pooling for the head), which none of the other approaches' downstream sweeps expose.
+
+#### `downstream_visual_mode` logic (`LACEv2Classifier._get_visual`, [downstream.py:165-182](src/LACE/models/downstream.py#L165-L182))
+
+The frozen backbone (ViT + mask decoder + mask head, all `requires_grad_(False)` — only `age_emb`/`sex_emb`/the MLP head are trained) exposes three ways to turn a crop into the visual feature vector fed to the head:
+
+| Mode | Feature | Dim | Construction |
+|---|---|---|---|
+| `cls` | Global image embedding | 512 | `vit.img_proj(cls_raw)` — the CLS token, projected through the same head used for $\mathcal{L}_\text{ITA}$'s image embedding during pretraining. |
+| `fg` | Lesion-localized embedding | 512 | Heatmap-weighted average of projected patch tokens (see below). |
+| `cls_fg` (default) | Both concatenated | 1024 | `cat([cls_repr, fg_repr])`. |
+
+**How `fg` is built:** at inference time the frozen mask decoder + `MaskPredictionHead` produce `mask_logits` for every mask token; since there's no ground truth here, the foreground token is picked via `select_fg_token` — the token with the highest peak-to-mean activation ratio (most spatially concentrated, i.e. most lesion-like rather than uniformly firing over background). That token's 196 patch logits are softmax'd with temperature `sim_attn_tau` into attention weights `w`, which then weight-average the projected patch embeddings (`vit.patch_proj`) into a single 512-d vector — the same mechanism $\mathcal{L}_\text{sim}$'s I2T context vector uses during pretraining ([ARCHITECTURE.md §3.2](src/LACE/ARCHITECTURE.md)), just without the GT-mask restriction (there's no GT mask downstream).
+
+So `cls` gives the classifier CLIP-style global context, `fg` gives it a representation pooled specifically over the (predicted) lesion region, and `cls_fg` lets the MLP head see both and learn how to weigh them — which is why it's the default and why the sweep still searches over the other two rather than assuming `cls_fg` always wins.

@@ -40,12 +40,12 @@ student:
   num_register_tokens: 4
 
 teacher:
-  momentum_teacher: 0.997
+  momentum_teacher: 0.999275110849843
 
 optim:
   epochs: 30
   weight_decay_end: 0.2
-  base_lr: 1.0e-05
+  base_lr: 0.000007825124747138137
   warmup_epochs: 5
   layerwise_decay: 1.0
 
@@ -57,12 +57,12 @@ evaluation:
   eval_period_iterations: 5000
 
 lora:
-  lora_layers: 4   # last N real ViT blocks for LoRA (0 = disabled)
+  lora_layers: 0  # last N real ViT blocks for LoRA (0 = disabled)
   r: 32            # rank
   alpha: 16.0      # scaling factor
-  head_mode: unfreeze_after          # frozen | unfreeze_after | train
+  head_mode: train          # frozen | unfreeze_after | train
   head_unfreeze_epoch: 10            # only used with head_mode: unfreeze_after
 
 # Full unfreeze of the last N backbone blocks (alternative to LoRA; set lora_layers: 0).
 backbone:
-  unfreeze_blocks: 0    # last N real ViT blocks + norm to fully unfreeze (0 = disabled)
+  unfreeze_blocks: 4    # last N real ViT blocks + norm to fully unfreeze (0 = disabled)

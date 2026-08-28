@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_downstream_cv_binary.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_downstream_cv_binary_frozen.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -28,14 +28,12 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
 IMAGE_SIZE=224
 USE_MASK=true
-FREEZED_BIOMEDCLIP=falses   # true = vanilla BiomedCLIP weights, no checkpoint / LoRA
+FREEZED_BIOMEDCLIP=true   # true = vanilla BiomedCLIP weights, no checkpoint / LoRA
 
 # Frozen encoder — no pretrain checkpoint to pick up, so --cv_dir points straight
-# at the raw fold split pool instead of a pretrain run's fold<N>/ dirs. Pick the
-# pool matching BINARY below: cv/ (3-class) or cv_binary/ (binary) — both are
-# named split_binary_fold*.json regardless of which classes they actually contain.
-CV_DIR=$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze4_20260815_190253
-PATTERN="fold*/split.json"
+# at the raw fold split pool instead of a pretrain run's fold<N>/ dirs.
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
+PATTERN="split_binary_fold*.json"
 CHECKPOINT_FILENAME=best_r1_checkpoint.pt   # unused in --frozen mode
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
@@ -43,19 +41,20 @@ BINARY=true
 
 EPOCHS=50
 PATIENCE=10
-BATCH_SIZE=64
-LR=0.00030352604767074797
+BATCH_SIZE=32
+LR=6.313875353441354e-05
 WEIGHT_DECAY=0.01
-DROPOUT=0.5
+DROPOUT=0.2
 HEAD=mlp_no_meta
-HIDDEN_DIMS="64"
+HIDDEN_DIMS="[32]"
 META_EMBED_DIM=16
 
-LOSS=cb_focal
-CLASS_WEIGHTING=sqrt
+LOSS=focal
+CLASS_WEIGHTING=inverse
 FOCAL_GAMMA=4
-CB_BETA=0.99
+CB_BETA=0.999
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 
 FINETUNE_LORA_LAYERS=0
 LR_ENCODER=1e-5
@@ -91,8 +90,8 @@ python $home_dir/Project/src/downstream_cv.py \
     $( [ "$FREEZED_BIOMEDCLIP" = "true" ] && echo "--freezed_biomedclip" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
+    --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project biomedclip-downstream \
     --wandb_entity  philipp-wiese \
-    --sweep \
     --btxrd_manifest         $BTXRD_MANIFEST \

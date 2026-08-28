@@ -55,6 +55,7 @@ CLASS_WEIGHTING=sqrt
 FOCAL_GAMMA=2.5
 CB_BETA=0.99
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test, --run_name and --checkpoint are managed per
@@ -81,6 +82,7 @@ python $home_dir/Project/src/downstream_cv.py \
     --use_mask                $USE_MASK \
     --binary                  $BINARY \
     --seed                   $SEED \
+    --early_stopping_metric  $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project lace-img-text-downstream \
     --wandb_entity  philipp-wiese \

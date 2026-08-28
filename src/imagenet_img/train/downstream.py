@@ -140,6 +140,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     parser.add_argument("--epochs",        type=int,   default=100)
     parser.add_argument("--patience",      type=int,   default=15)
+    parser.add_argument("--early_stopping_metric", default="val_bal_acc",
+                        choices=["val_loss", "val_bal_acc"],
+                        help="Metric to monitor for early stopping and best-checkpoint saving.")
     parser.add_argument("--batch_size",    type=int,   default=32)
     parser.add_argument("--lr_mlp",        type=float, default=3e-4)
     parser.add_argument("--weight_decay",  type=float, default=0.05)
@@ -311,9 +314,11 @@ def main(args: argparse.Namespace) -> dict:
     ckpt_path = out_dir / "best_checkpoint.pt"
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    best_val_loss    = float("inf")
+    maximize_metric  = args.early_stopping_metric == "val_bal_acc"
+    best_metric      = -float("inf") if maximize_metric else float("inf")
     patience_counter = 0
-    print(f"\nTraining for {args.epochs} epochs (patience={args.patience})\n")
+    print(f"\nTraining for {args.epochs} epochs "
+          f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
         train_loss                               = train_one_epoch(encoder, mlp, train_loader,
@@ -344,13 +349,16 @@ def main(args: argparse.Namespace) -> dict:
                 "val/combined_acc":        val_combined_acc,
             }, step=epoch)
 
-        if val_loss < best_val_loss:
-            best_val_loss    = val_loss
+        current_metric = val_bal_acc if maximize_metric else val_loss
+        improved = current_metric > best_metric if maximize_metric else current_metric < best_metric
+        if improved:
+            best_metric      = current_metric
             patience_counter = 0
             torch.save({
                 "epoch": epoch,
                 "mlp_state_dict": mlp.state_dict(),
                 "val_loss": val_loss,
+                "val_bal_acc": val_bal_acc,
                 "args": vars(args),
                 "age_mean": age_mean,
                 "age_std": age_std,
@@ -399,6 +407,6 @@ def main(args: argparse.Namespace) -> dict:
             wandb.log(eval_metrics)
         wandb.finish()
 
-    print(f"\nBest val loss: {best_val_loss:.4f}")
+    print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
     print(f"Checkpoint saved to: {ckpt_path}")
     return eval_metrics

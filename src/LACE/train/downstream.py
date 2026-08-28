@@ -485,14 +485,12 @@ def main(args: argparse.Namespace) -> dict:
     print(f"Head checkpoint → {ckpt_path}")
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    # Checkpoint + early stopping stay on val_loss (smooth, and its confounds —
-    # focal_gamma/class_weighting/label_smoothing/batch_size — are fixed within a
-    # run). val/f1_macro is logged for cross-run selection but does not drive
-    # checkpointing (it is discrete/noisy on a small val set).
-    best_val_loss     = float("inf")
+    maximize_metric   = args.early_stopping_metric == "val_bal_acc"
+    best_metric       = -float("inf") if maximize_metric else float("inf")
     best_val_f1_macro = 0.0
     patience_counter  = 0
-    print(f"\nTraining for {args.epochs} epochs (patience={args.patience})\n")
+    print(f"\nTraining for {args.epochs} epochs "
+          f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
         if args.version == "v1":
@@ -529,13 +527,16 @@ def main(args: argparse.Namespace) -> dict:
             # summary metric the sweep ranks configs by (best epoch's macro-F1)
             wandb.run.summary["val/best_f1_macro"] = best_val_f1_macro
 
-        if val_loss < best_val_loss:
-            best_val_loss    = val_loss
+        current_metric = val_bal_acc if maximize_metric else val_loss
+        improved = current_metric > best_metric if maximize_metric else current_metric < best_metric
+        if improved:
+            best_metric      = current_metric
             patience_counter = 0
             torch.save({
                 "epoch": epoch,
                 "version": args.version,
                 "val_loss": val_loss,
+                "val_bal_acc": val_bal_acc,
                 "run_stamp": run_stamp,
                 "wandb_id": wandb_id,
                 "model_state_dict": trainable_model.state_dict(),
@@ -552,14 +553,14 @@ def main(args: argparse.Namespace) -> dict:
                 print(f"Early stopping at epoch {epoch} (no improvement for {args.patience} epochs).")
                 break
 
-    # ── Restore best-val-loss checkpoint ──────────────────────────────────────
+    # ── Restore best checkpoint ────────────────────────────────────────────────
     trainable_model.load_state_dict(
         torch.load(ckpt_path, map_location=device, weights_only=False)["model_state_dict"]
     )
 
     # Metrics returned to callers (e.g. the k-fold CV orchestrator).
     results: dict = {
-        "val/best_loss":     best_val_loss,
+        f"val/best_{args.early_stopping_metric}": best_metric,
         "val/best_f1_macro": best_val_f1_macro,
     }
 
@@ -596,7 +597,7 @@ def main(args: argparse.Namespace) -> dict:
             wandb.log(log_dict)
         wandb.finish()
 
-    print(f"\nBest val loss: {best_val_loss:.4f} | best val macro-F1: {best_val_f1_macro:.4f}")
+    print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f} | best val macro-F1: {best_val_f1_macro:.4f}")
     print(f"Head checkpoint saved to: {ckpt_path}")
     return results
 
@@ -625,6 +626,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     # ── Training ──────────────────────────────────────────────────────────────
     parser.add_argument("--epochs",         type=int,   default=50)
     parser.add_argument("--patience",       type=int,   default=10)
+    parser.add_argument("--early_stopping_metric", default="val_bal_acc",
+                        choices=["val_loss", "val_bal_acc"],
+                        help="Metric to monitor for early stopping and best-checkpoint saving.")
     parser.add_argument("--batch_size",     type=int,   default=64)
     parser.add_argument("--lr",             type=float, default=1e-3)
     parser.add_argument("--dropout",        type=float, default=0.3,

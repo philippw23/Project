@@ -5,8 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_pretrain_cv.out"
-#SBATCH --error="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_pretrain_cv.err"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_pretrain_cv_binary.out"
 # Note: bump --time above roughly N x a normal single-run time budget — CV runs
 # N folds back to back in a single job (see CV_DIR below).
 
@@ -50,7 +49,7 @@ OUT_DIR=$home_dir/Project/results/chexfound_pretrain_sweep
 # Run the Python script
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python \
     $home_dir/Project/src/chexfound/train/pretrain.py \
-    --config     $home_dir/Project/src/chexfound/configs/chexfound_vitl16_bonetumor.yaml \
+    --config     $home_dir/Project/src/chexfound/configs/chexfound_vitl16_bonetumor_binary.yaml \
     --base_cfg   $home_dir/Project/src/chexfound/data/config.yaml \
     --out_dir    $OUT_DIR \
     --epochs     $EPOCHS \

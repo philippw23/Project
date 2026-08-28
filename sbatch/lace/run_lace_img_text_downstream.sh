@@ -39,7 +39,7 @@ LABEL_SMOOTHING=0
 # Class weighting: none, inverse, sqrt, effective
 CLASS_WEIGHTING="sqrt"
 # Early stopping metric: val_loss, val_bal_acc
-EARLY_STOPPING_METRIC="val_loss"
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 export HOME=$home_dir

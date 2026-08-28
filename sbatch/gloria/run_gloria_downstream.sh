@@ -12,7 +12,7 @@
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 home_dir="/mnt/nfs/homedirs/$USER"
 #"/mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt"
-CHECKPOINT=$home_dir/Project/results/gloria_pretrain/gloria_pretrain_unfreeze4_20260812_144239/best_retrieval_checkpoint.pt #"/mnt/nfs/homedirs/philippw/Project/results/gloria_pretrain/gloria_pretrain_lora2_r8_20260610_133210/best_retrieval_checkpoint.pt"
+CHECKPOINT=$home_dir/Project/results/gloria_pretrain/gloria_pretrain_lora3_r4_20260811_231230/best_retrieval_checkpoint.pt #"/mnt/nfs/homedirs/philippw/Project/results/gloria_pretrain/gloria_pretrain_lora2_r8_20260610_133210/best_retrieval_checkpoint.pt"
 SPLITS="$home_dir/Project/data/internal_dataset/split_final.json"
 BINARY=false
 

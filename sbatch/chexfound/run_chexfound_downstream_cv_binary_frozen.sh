@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=gloria_downstream_cv
+#SBATCH --job-name=chexfound_downstream_cv
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_gloria_downstream_cv.out"
+#SBATCH --time=72:00:00
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_downstream_cv_binary_frozen.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -25,69 +25,69 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
-# ── Fixed hyperparameters (winning sweep config) ───────────────────────────────
-# GLoRIA has no CV-mode pretraining (no per-fold checkpoints) — the same fixed
-# pretrained checkpoint is used, frozen, across every fold. --cv_dir therefore
-# points straight at the raw fold split pool, not a pretrain run's fold<N>/ dirs.
-CHECKPOINT="$home_dir/Project/src/gloria/pretrained/chexpert_resnet50.ckpt"
-USE_PROJECTION=""   # leave unset for 2048-dim pre-projection features; set "1" for 768-dim post-projection
+# ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
+IMAGE_SIZE=512   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
+USE_MASK=true
 
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
-PATTERN="split_fold*.json"
+# Frozen original CheXFound weights (no continued pretraining) — no per-fold
+# checkpoint to look up, so --cv_dir points straight at the raw fold split pool.
+CHEXFOUND_WEIGHTS=$home_dir/Project/src/chexfound/data/teacher_checkpoint.pth
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
+PATTERN="split_binary_fold*.json"
+FROZEN=true
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
-BINARY=false
+BINARY=true
 
-EPOCHS=100
-PATIENCE=100
-BATCH_SIZE=32
-LR=0.0026469369761300088
-WEIGHT_DECAY=0.05
-DROPOUT=0.3
+EPOCHS=50
+PATIENCE=10
+BATCH_SIZE=16
+LR=0.00010159919968375944
+WEIGHT_DECAY=0.1
+DROPOUT=0.2
 HEAD=mlp_no_meta
-HIDDEN_DIMS="256"
+HIDDEN_DIMS="[128]"
 META_EMBED_DIM=16
 
 LOSS=focal
-CLASS_WEIGHTING=effective
-FOCAL_GAMMA=3.2655347210387062
+CLASS_WEIGHTING=sqrt
+FOCAL_GAMMA=4
 CB_BETA=0.99
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
-PROJ_FLAG=""
-[ -n "$USE_PROJECTION" ] && PROJ_FLAG="--use_projection"
-
 # Note: --splits, --eval_test and --run_name are managed per fold by the
-# orchestrator; --checkpoint stays reserved only when NOT --frozen, so it is
-# passed through here fixed for every fold.
+# orchestrator; --checkpoint is passed explicitly below since --frozen leaves
+# it unreserved (no per-fold checkpoint for the orchestrator to inject).
 python $home_dir/Project/src/downstream_cv.py \
-    --baseline               gloria \
-    --frozen \
-    --checkpoint              $CHECKPOINT \
+    --baseline               chexfound \
+    $( [ "$FROZEN" = "true" ] && echo "--frozen" ) \
+    --checkpoint              none \
+    --chexfound_weights       $CHEXFOUND_WEIGHTS \
+    --image_size              $IMAGE_SIZE \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \
     --out_dir                 $home_dir/Project/results \
     --epochs                  $EPOCHS \
     --patience                $PATIENCE \
-    --batch_size               $BATCH_SIZE \
+    --batch_size              $BATCH_SIZE \
     --lr                      $LR \
     --weight_decay            $WEIGHT_DECAY \
     --dropout                 $DROPOUT \
     --head                    $HEAD \
-    --hidden_dims              $HIDDEN_DIMS \
+    --hidden_dims             $HIDDEN_DIMS \
     --meta_embed_dim          $META_EMBED_DIM \
     --loss                    $LOSS \
     --focal_gamma             $FOCAL_GAMMA \
     --cb_beta                 $CB_BETA \
     --class_weighting         $CLASS_WEIGHTING \
-    $PROJ_FLAG \
+    $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
     --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
-    --wandb_project gloria-downstream \
+    --wandb_project chexfound-downstream \
     --wandb_entity  philipp-wiese \
     --sweep \
-    #--btxrd_manifest         $BTXRD_MANIFEST \
+    --btxrd_manifest         $BTXRD_MANIFEST \

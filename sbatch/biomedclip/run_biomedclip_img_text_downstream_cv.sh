@@ -56,6 +56,7 @@ CLASS_WEIGHTING=effective
 FOCAL_GAMMA=3
 CB_BETA=0.999
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test, --run_name and --checkpoint are managed per
@@ -83,6 +84,7 @@ python $home_dir/Project/src/downstream_cv.py \
     $( [ "$FROZEN" = "true" ] && echo "--freezed_biomedclip" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
+    --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project biomedclip-img-text-downstream \
     --wandb_entity  philipp-wiese \

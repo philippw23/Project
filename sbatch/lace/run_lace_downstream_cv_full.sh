@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv_Full LACE v2 full stage 2 only mean_r1.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv_Full LACE v2_3class_A8.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -29,30 +29,31 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 IMAGE_SIZE=224
 USE_MASK=true
 VERSION=v2
-VISUAL_MODE=cls_fg
+VISUAL_MODE=cls
 
 # CV-mode pretrain run dir: one fold<N>/{split.json,best_retrieval_checkpoint.pt}
 # per fold. Each fold's checkpoint + split are picked up together from there —
-# update this to the CV pretrain run you want to evaluate.  run_20260724_221040
-CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260814_205030
+# update this to the CV pretrain run you want to evaluate.  run_20260819_125955 
+CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260823_065304
 PATTERN="fold*/split.json"
 CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt #best_retrieval_checkpoint.pt
 
 BINARY=false
 
-EPOCHS=200
+EPOCHS=100
 PATIENCE=10
-BATCH_SIZE=64
-LR=4.555143374320362e-06
-WEIGHT_DECAY=0.03809353499198539
-DROPOUT=0.17628065817422953
+BATCH_SIZE=16
+LR=5.373534110012835e-06
+WEIGHT_DECAY=0.05
+DROPOUT=0.3
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[256, 128]"
+HIDDEN_DIMS="[128, 64]"
 
 LOSS=focal
-CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=2.7378671997645583
+CLASS_WEIGHTING=effective
+FOCAL_GAMMA=3.224219517589033
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test and --checkpoint are managed per fold by the orchestrator.
@@ -79,7 +80,7 @@ python $home_dir/Project/src/downstream_cv.py \
     --use_mask               $USE_MASK \
     $( [ "$BINARY" = "true" ] && echo "--binary" ) \
     --seed                   $SEED \
+    --early_stopping_metric  $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project lace-downstream \
     --wandb_entity  philipp-wiese \
-    

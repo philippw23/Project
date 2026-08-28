@@ -26,7 +26,7 @@ $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/visuali
     --samples 10 \
     --global_context_fraction $GLOBAL_CONTEXT_FRACTION \
     --context_fraction $CONTEXT_FRACTION \
-    --images 1.2.840.113654.2.70.1.284903771772721556681548306585553485272
+    --images F_OBERSCHENKEL_20200504_160629
 
     #--btxrd \
     #--seed 42

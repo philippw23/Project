@@ -15,41 +15,50 @@ parameters:
   # ── Optimisation ─────────────────────────────────────────────────────────────
   lr:
     distribution: log_uniform_values
-    min: 1e-5
+    min: 1e-6
     max: 5e-4
   weight_decay:
-    distribution: log_uniform_values
-    min: 7e-4
-    max: 2e-3
+    value: 0.001
 
-  # ── Soft-target temperatures ─────────────────────────────────────────────────
+  # ── Soft-target / t2i ───────────────────────────────────────────────────────
   tau_s_beur:
-    distribution: uniform
-    min: 0.030
-    max: 0.040
+    value: 0.0325
   tau_s_bef:
-    distribution: uniform
-    min: 0.035
-    max: 0.045
+    value: 0.038
   tau_s_img_full:
-    distribution: uniform
-    min: 0.025
-    max: 0.035
+    value: 0.028
 
+  lambda_ita:
+    distribution: uniform
+    min: 0.1
+    max: 2.0
+  lambda_sim:
+    distribution: uniform
+    min: 0.1
+    max: 2.0
+  lambda_ortho:
+    distribution: uniform
+    min: 0.1
+    max: 2.0
+  lambda_dice:
+    distribution: uniform
+    min: 0.1
+    max: 2.0
+  
   # ── t2i ──────────────────────────────────────────────────────────────────────
   t2i_mode:
-    value: "text_text"
+    value: "image_image"
   lambda_t2i:
     value: 0.5
   same_image_boost:
-    values: [5.0, 10.0, 15.0, 20.0]
+    value: 10.0
 
   # ─── mask capacity ────────────────────────────────────────────────────────── 
   n_mask_heads:
-    values: [16, 24, 32]
+    value: 16
   # ── Epoch stages ────────────────────────────────────────────────
   stage1_epochs:
-    values: [0, 16, 18, 20]
+    value: 20
 
 command:
   - ${env}
@@ -111,12 +120,6 @@ command:
   - "ita:2"
   - "sim:2"
   - --learn_loss_weights
-  - --lambda_sim
-  - "1"
-  - --lambda_ortho
-  - "1"
-  - --lambda_dice
-  - "1"
   # ── Soft-target / t2i (non-swept) ────────────────────────────────────────────
   - --reweight_by_n_phrases
   # ── Optimisation (non-swept) ─────────────────────────────────────────────────

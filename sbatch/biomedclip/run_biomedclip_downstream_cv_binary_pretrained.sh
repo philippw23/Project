@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_downstream_cv.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_downstream_cv_binary_pretrained.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -30,32 +30,35 @@ IMAGE_SIZE=224
 USE_MASK=true
 FREEZED_BIOMEDCLIP=false   # true = vanilla BiomedCLIP weights, no checkpoint / LoRA
 
-# Frozen encoder — no pretrain checkpoint to pick up, so --cv_dir points straight
-# at the raw fold split pool instead of a pretrain run's fold<N>/ dirs. Pick the
-# pool matching BINARY below: cv/ (3-class) or cv_binary/ (binary) — both are
-# named split_binary_fold*.json regardless of which classes they actually contain.
-CV_DIR=$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze4_20260815_190253
-PATTERN="split_fold*.json"
-CHECKPOINT_FILENAME=best_r1_checkpoint.pt   # unused in --frozen mode
+# Single fixed continued-pretrain checkpoint reused for every fold (not a CV-mode
+# pretrain run with one checkpoint per fold<N>/ dir). CHECKPOINT_FILENAME is given
+# as an absolute path here, which — via Path.__truediv__ — makes the orchestrator's
+# per-fold `split_path.parent / checkpoint_filename` lookup resolve to this same
+# fixed path regardless of fold, so --cv_dir/--pattern still just need to resolve
+# to the raw fold split files.
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
+PATTERN="split_binary_fold*.json"
+CHECKPOINT_FILENAME=$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze4_20260727_234731/best_r1_checkpoint.pt
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 BINARY=true
 
 EPOCHS=50
 PATIENCE=10
-BATCH_SIZE=64
-LR=0.0004558893457022544
+BATCH_SIZE=32
+LR=3.2625216428919816e-05
 WEIGHT_DECAY=0.1
-DROPOUT=0.5
+DROPOUT=0.2
 HEAD=mlp_no_meta
-HIDDEN_DIMS="128"
+HIDDEN_DIMS="[64, 32]"
 META_EMBED_DIM=16
 
-LOSS=cb_focal
-CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=2.0
+LOSS=focal
+CLASS_WEIGHTING=inverse
+FOCAL_GAMMA=2
 CB_BETA=0.99
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 
 FINETUNE_LORA_LAYERS=0
 LR_ENCODER=1e-5
@@ -91,8 +94,8 @@ python $home_dir/Project/src/downstream_cv.py \
     $( [ "$FREEZED_BIOMEDCLIP" = "true" ] && echo "--freezed_biomedclip" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
+    --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project biomedclip-downstream \
     --wandb_entity  philipp-wiese \
-    --sweep \
     --btxrd_manifest         $BTXRD_MANIFEST \

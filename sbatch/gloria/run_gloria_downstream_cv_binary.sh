@@ -56,6 +56,7 @@ CLASS_WEIGHTING=sqrt
 FOCAL_GAMMA=3.4933496942536344
 CB_BETA=0.9999
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 PROJ_FLAG=""
@@ -88,6 +89,7 @@ python $home_dir/Project/src/downstream_cv.py \
     $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
+    --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project gloria-downstream \
     --wandb_entity  philipp-wiese \

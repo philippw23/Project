@@ -16,7 +16,7 @@
 # run (results land under run_<name>/fold0/, fold1/, ...). Leave empty for a
 # normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR= #$home_dir/Project/data/internal_dataset/cv_binary   # e.g. $home_dir/Project/data/internal_dataset/cv_binary
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary   # e.g. $home_dir/Project/data/internal_dataset/cv_binary
 CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
 SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json   # ignored when CV_DIR is set
 
@@ -30,7 +30,7 @@ LR_BLOCKS=8.979701310240665e-05
 LR_PROJ=5.881572458245953e-05
 LR_LORA=1e-5
 WEIGHT_DECAY=0.028159487916330255
-EPOCHS=100
+EPOCHS=55
 # ─────────────────────────────────────────────────────────────────────────────
 
 export HOME=$home_dir

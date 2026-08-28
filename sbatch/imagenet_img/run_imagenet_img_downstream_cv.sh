@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_imagenet_img_downstream_cv.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_imagenet_img_downstream_cv_3class.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -35,10 +35,10 @@ CV_DIR=$home_dir/Project/data/internal_dataset/cv
 PATTERN="split_fold*.json"
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
-BINARY=true
+BINARY=false
 
-EPOCHS=100
-PATIENCE=100
+EPOCHS=150
+PATIENCE=30
 BATCH_SIZE=64
 LR_MLP=3e-4
 WEIGHT_DECAY=0.05
@@ -51,6 +51,7 @@ LOSS=focal
 CLASS_WEIGHTING=sqrt
 FOCAL_GAMMA=2.0
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test and --run_name are managed per fold by the
@@ -76,6 +77,7 @@ python $home_dir/Project/src/downstream_cv.py \
     $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
+    --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project imagenet-img-downstream \
     --wandb_entity  philipp-wiese \

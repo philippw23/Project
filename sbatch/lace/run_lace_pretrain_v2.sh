@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=96:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2 .out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2.out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
 
@@ -14,7 +14,7 @@
 # run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
 # a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
+CV_DIR= #$home_dir/Project/data/internal_dataset/cv
 CV_PATTERN="split_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
 SPLITS=$home_dir/Project/data/internal_dataset/split_final.json  # ignored when CV_DIR is set
 
@@ -27,11 +27,13 @@ LORA_R=8
 LORA_ALPHA=32
 EMBED_DIM=512
 UNFREEZE_LAYERS=4          # 0 = use LoRA | >0 = full fine-tune last N ViT blocks (overrides LoRA, biomedclip only)
+
+# ── Masking / attention ───────────────────────────────────────────────────────
 N_MASK_TOKENS=1
 N_MASK_HEADS=16
 GAUSS_SIGMA=4.5
-MASK_HEAD_TAU=0.03 # shared soft-assignment temp for mask heads; sweep {0.01, 0.03, 0.05}
-SIM_ATTN_TAU=0.05 # shared soft-assignment temp for similarity attention; sweep {0.01, 0.05, 0.1}
+MASK_HEAD_TAU=0.03 # shared soft-assignment temp for mask heads L_dice; sweep {0.01, 0.03, 0.05}
+SIM_ATTN_TAU=0.05 # shared soft-assignment temp for phrase->patch similarity attention L_sim; sweep {0.01, 0.05, 0.1}
 WARM_START_PROJECTIONS=true
 
 # ── Data ──────────────────────────────────────────────────────────────────────
@@ -62,8 +64,8 @@ WEIGHT_DECAY=0.001
 #LOSSES="ita ortho dice"
 # Optional per-loss stage control; OVERRIDES $LOSSES when non-empty. Space-separated
 # NAME:STAGES tokens over ita/sim/ortho/dice, stages from {1,2} or 0/none.
-# e.g. LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:none"
-LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:2"
+# e.g. LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:2"
+LOSS_STAGES="dice:1,2 ortho:none ita:2 sim:2"
 LEARN_LOSS_WEIGHTS=true
 LAMBDA_ITA=1.0
 LAMBDA_SIM=1.0
