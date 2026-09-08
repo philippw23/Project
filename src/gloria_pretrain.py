@@ -249,6 +249,7 @@ def load_gloria_encoders(ckpt_path: Path, adapter_mode: str, n_layers: int,
     # Freeze BERT entirely (text encoder body + projection heads)
     for p in text_encoder.parameters():
         p.requires_grad_(False)
+    text_encoder.eval()
 
     n_img  = lora_mod.count_trainable_params(img_encoder)
     n_tot  = sum(p.numel() for p in img_encoder.parameters())

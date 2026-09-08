@@ -15,8 +15,8 @@ echo SLURM assigned me these nodes:
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 
 MY_CONDA_ENV="master"
-export CONDA_EXE=$home_dir/miniconda3/bin/conda
 source $home_dir/miniconda3/etc/profile.d/conda.sh
+export CONDA_EXE=$home_dir/miniconda3/bin/conda
 conda activate $MY_CONDA_ENV
 echo Environment activated
 
@@ -30,15 +30,15 @@ IMAGE_SIZE=224
 USE_MASK=true
 FREEZED_BIOMEDCLIP=false   # true = vanilla BiomedCLIP weights, no checkpoint / LoRA
 
-# Single fixed continued-pretrain checkpoint reused for every fold (not a CV-mode
-# pretrain run with one checkpoint per fold<N>/ dir). CHECKPOINT_FILENAME is given
-# as an absolute path here, which — via Path.__truediv__ — makes the orchestrator's
-# per-fold `split_path.parent / checkpoint_filename` lookup resolve to this same
-# fixed path regardless of fold, so --cv_dir/--pattern still just need to resolve
-# to the raw fold split files.
-CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
-PATTERN="split_binary_fold*.json"
-CHECKPOINT_FILENAME=$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze4_20260727_234731/best_r1_checkpoint.pt
+# CV-mode continued-pretrain run: one checkpoint per fold<N>/ dir, each trained
+# without seeing that fold's held-out split. --cv_dir/--pattern point at those
+# fold<N>/split.json files (identical splits to data/internal_dataset/cv_binary,
+# just copied alongside each fold's checkpoint at pretrain time), and
+# CHECKPOINT_FILENAME is a bare filename looked up next to each one, so every
+# fold's downstream eval uses its own matching pretrain checkpoint.
+CV_DIR=$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze4_20260828_113706
+PATTERN="fold*/split.json"
+CHECKPOINT_FILENAME=best_r1_checkpoint.pt
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 BINARY=true

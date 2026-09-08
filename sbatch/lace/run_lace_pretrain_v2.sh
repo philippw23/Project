@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=96:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2 cos sim_A8.out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
 
@@ -14,7 +14,7 @@
 # run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
 # a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR= #$home_dir/Project/data/internal_dataset/cv
+CV_DIR=$home_dir/Project/data/internal_dataset/cv
 CV_PATTERN="split_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
 SPLITS=$home_dir/Project/data/internal_dataset/split_final.json  # ignored when CV_DIR is set
 
@@ -30,7 +30,7 @@ UNFREEZE_LAYERS=4          # 0 = use LoRA | >0 = full fine-tune last N ViT block
 
 # ── Masking / attention ───────────────────────────────────────────────────────
 N_MASK_TOKENS=1
-N_MASK_HEADS=16
+N_MASK_HEADS=24
 GAUSS_SIGMA=4.5
 MASK_HEAD_TAU=0.03 # shared soft-assignment temp for mask heads L_dice; sweep {0.01, 0.03, 0.05}
 SIM_ATTN_TAU=0.05 # shared soft-assignment temp for phrase->patch similarity attention L_sim; sweep {0.01, 0.05, 0.1}
@@ -51,33 +51,33 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
 STAGE1_EPOCHS=20          # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
-EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 20
+EPOCHS=160                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 20
 PATIENCE=20
 
 # ── Optimisation ──────────────────────────────────────────────────────────────
 # overfit: LR=1e-3 SCHEDULER=constant
-LR=8e-5
+LR=5.430719898412139e-05
 SCHEDULER=cosine
-WEIGHT_DECAY=0.001
+WEIGHT_DECAY=0.002526095370464355
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
 #LOSSES="ita ortho dice"
 # Optional per-loss stage control; OVERRIDES $LOSSES when non-empty. Space-separated
 # NAME:STAGES tokens over ita/sim/ortho/dice, stages from {1,2} or 0/none.
 # e.g. LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:2"
-LOSS_STAGES="dice:1,2 ortho:none ita:2 sim:2"
+LOSS_STAGES="dice:none ortho:none ita:1,2 sim:none"
 LEARN_LOSS_WEIGHTS=true
-LAMBDA_ITA=1.0
-LAMBDA_SIM=1.0
-LAMBDA_ORTHO=1.0
-LAMBDA_DICE=1.0
+LAMBDA_ITA=1.5
+LAMBDA_SIM=2
+LAMBDA_ORTHO=1.5
+LAMBDA_DICE=0.5
 
 # ── Soft-target / t2i ────────────────────────────────────────────────────────
-TAU_S_BEUR=0.0325
+TAU_S_BEUR=0.035
 TAU_S_BEF=0.038
-TAU_S_IMG_FULL=0.028
-LAMBDA_T2I=0.5
-SAME_IMAGE_BOOST=10.0
+TAU_S_IMG_FULL=0.032
+LAMBDA_T2I=0.25
+SAME_IMAGE_BOOST=15
 REWEIGHT_BY_N_PHRASES=true
 T2I_MODE=image_image  #image_image | "text_text" | "descriptor" | "infonce"
 

@@ -12,7 +12,7 @@
 #$home_dir/Project/results/lace_v2_pretrain/run_20260808_232942
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 home_dir="/mnt/nfs/homedirs/$USER"
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260728_234136/best_retrieval_checkpoint.pt #"$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze2_20260521_200712/best_r1_checkpoint.pt"
+CHECKPOINT=$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze4_20260903_155346/best_r1_checkpoint.pt #"$home_dir/Project/results/biomedclip_pretrain/run_bs128_unfreeze2_20260521_200712/best_r1_checkpoint.pt"
 SPLITS="$home_dir/Project/data/internal_dataset/split_binary_final.json"
 BINARY=true             # true = benign vs malignant only (requires a split_binary*.json with intermediate excluded)
 
@@ -42,7 +42,7 @@ EARLY_STOPPING_METRIC="val_bal_acc"
 export HOME=$home_dir
 cd ${SLURM_SUBMIT_DIR}
 
-LOG_FILE="$home_dir/Project/logs/biomedclip/slurm-${SLURM_JOBID}_biomedclip_img_text_downstream_${HEAD}_${LOSS}.out"
+LOG_FILE="$home_dir/Project/logs/img_text/slurm-${SLURM_JOBID}_biomedclip_img_text_downstream_${HEAD}_${LOSS}.out"
 exec > "$LOG_FILE" 2>&1
 
 echo "Starting job ${SLURM_JOBID}"

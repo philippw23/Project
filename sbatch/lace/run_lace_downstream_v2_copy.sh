@@ -30,27 +30,28 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 IMAGE_SIZE=224          # 224 = default | 512 = CheXFound-equivalent resolution
 USE_MASK=true           # apply lesion-mask cropping to input images (else the full image is just resized)
 VERSION=v2              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
-VISUAL_MODE=cls_fg      # cls [B,512] | fg [B,512] | cls_fg [B,1024]  run_20260721_080616
+VISUAL_MODE=cls         # cls [B,512] | fg [B,512] | cls_fg [B,1024]  run_20260721_080616
 CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260831_174119/best_retrieval_checkpoint.pt
 SPLITS=$home_dir/Project/data/internal_dataset/split_final.json # run_20260715_101527
 BINARY=false            # true = benign vs malignant only (intermediate skipped)
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # # ── Training ──────────────────────────────────────────────────────────────────
-EPOCHS=200
+EPOCHS=100
 PATIENCE=10
-BATCH_SIZE=64
-LR=4.555143374320362e-06
-WEIGHT_DECAY=0.03809353499198539
-DROPOUT=0.17628065817422953
+BATCH_SIZE=16
+LR=1.1228171532697646e-05
+WEIGHT_DECAY=0.1
+DROPOUT=0.4
 HEAD=mlp_no_meta                # linear | mlp (with age/sex meta) | mlp_no_meta
 META_EMBED_DIM=0
-HIDDEN_DIMS="[256, 128]"            # only used for mlp heads
+HIDDEN_DIMS="[128, 64]"            # only used for mlp heads
 
 # # ── Loss ──────────────────────────────────────────────────────────────────────
 LOSS=focal
-CLASS_WEIGHTING=sqrt  # none | inverse | sqrt | effective
-FOCAL_GAMMA=2.7378671997645583
+CLASS_WEIGHTING=effective  # none | inverse | sqrt | effective
+FOCAL_GAMMA=3.1826533968814985
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 python $home_dir/Project/src/lace_downstream.py \
@@ -75,6 +76,7 @@ python $home_dir/Project/src/lace_downstream.py \
     --use_mask               $USE_MASK \
     $( [ "$BINARY" = "true" ] && echo "--binary" ) \
     --seed                   $SEED \
+    --early_stopping_metric  $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project lace-downstream \
     --wandb_entity  philipp-wiese \

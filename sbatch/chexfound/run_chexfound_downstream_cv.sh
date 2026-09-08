@@ -29,12 +29,13 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 IMAGE_SIZE=512   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
 USE_MASK=true
 
-# Frozen original CheXFound weights (no continued pretraining) — no per-fold
-# checkpoint to look up, so --cv_dir points straight at the raw fold split pool.
-CHEXFOUND_WEIGHTS=$home_dir/Project/src/chexfound/data/teacher_checkpoint.pth
-CV_DIR=$home_dir/Project/data/internal_dataset/cv
-PATTERN="split_fold*.json"
-FROZEN=true
+# CV-mode continued-pretraining checkpoints (from run_chexfound_pretrain_cv.sh),
+# one fold<N>/{split.json,checkpoint_best.pth} per fold. FROZEN=false tells the
+# orchestrator to pick up each fold's own checkpoint next to its split file.
+CV_DIR=$home_dir/Project/results/chexfound_pretrain_sweep/run_20260828_184339
+PATTERN="fold*/split.json"
+CHECKPOINT_FILENAME=checkpoint_best.pth
+FROZEN=false
 
 # 3-class ("full") CV — no BTXRD comparison (BTXRD is binary-labeled only).
 BINARY=false
@@ -42,29 +43,28 @@ BINARY=false
 EPOCHS=50
 PATIENCE=10
 BATCH_SIZE=32
-LR=0.00044214003519007426
-WEIGHT_DECAY=0.01
-DROPOUT=0.2
+LR=0.0004718800200308377
+WEIGHT_DECAY=0.1
+DROPOUT=0.4
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[32]"
+HIDDEN_DIMS="[64, 32]"
 META_EMBED_DIM=16
 
-LOSS=cb_focal
+LOSS=focal
 CLASS_WEIGHTING=inverse
-FOCAL_GAMMA=4
-CB_BETA=0.999
+FOCAL_GAMMA=3.2187805897655695
+CB_BETA=0.9
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test and --run_name are managed per fold by the
-# orchestrator; --checkpoint is passed explicitly below since --frozen leaves
-# it unreserved (no per-fold checkpoint for the orchestrator to inject).
+# orchestrator; --checkpoint is reserved (must not be passed here) when NOT
+# --frozen — the orchestrator injects it per fold from CHECKPOINT_FILENAME.
 python $home_dir/Project/src/downstream_cv.py \
     --baseline               chexfound \
     $( [ "$FROZEN" = "true" ] && echo "--frozen" ) \
-    --checkpoint              none \
-    --chexfound_weights       $CHEXFOUND_WEIGHTS \
+    --checkpoint_filename     $CHECKPOINT_FILENAME \
     --image_size              $IMAGE_SIZE \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \
@@ -89,4 +89,3 @@ python $home_dir/Project/src/downstream_cv.py \
     --wandb \
     --wandb_project chexfound-downstream \
     --wandb_entity  philipp-wiese \
-    --sweep \

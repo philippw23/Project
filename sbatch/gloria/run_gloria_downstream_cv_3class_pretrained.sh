@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=biomedclip_img_text_downstream_cv
+#SBATCH --job-name=gloria_downstream_cv
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_img_text_downstream_cv.out"
+#SBATCH --time=48:00:00
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_gloria_downstream_cv.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -25,45 +25,49 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
-# ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
-# No --image_size here: biomedclip_img_text_downstream.py always uses open_clip's
-# fixed 224×224 preprocessing (unlike biomedclip_downstream.py).
+# ── Fixed hyperparameters (winning sweep config) ───────────────────────────────
+# CV-mode continued-pretraining checkpoints (from run_gloria_pretrain_cv.sh),
+# one fold<N>/{split.json,best_retrieval_checkpoint.pt} per fold. FROZEN=false
+# tells the orchestrator to pick up each fold's own checkpoint next to its
+# split file, instead of a single fixed checkpoint used across every fold.
+CV_DIR=$home_dir/Project/results/gloria_pretrain/gloria_pretrain_unfreeze4_20260903_120512
+PATTERN="fold*/split.json"
+CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt
+FROZEN=false
+
+USE_PROJECTION=""   # leave unset for 2048-dim pre-projection features; set "1" for 768-dim post-projection
 USE_MASK=true
 
-# Frozen: vanilla BiomedCLIP weights, no LoRA checkpoint — --cv_dir points
-# straight at the raw fold split pool (no fold<N>/best_r1_checkpoint.pt to
-# look up), matching the non-binary 3-class split naming.
-FROZEN=true
-CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary_img_text
-PATTERN="split_binary_fold*.json"
+BINARY=false
 
-# No BTXRD evaluation for this baseline — BTXRD samples carry no report text,
-# so there is nothing for the text-encoder pathway to embed on that dataset.
-BINARY=true
-
-EPOCHS=50
-PATIENCE=10
+EPOCHS=100
+PATIENCE=20
 BATCH_SIZE=64
-LR=0.0004558893457022544
-WEIGHT_DECAY=0.1
-DROPOUT=0.5
+LR=5.916488970477679e-05
+WEIGHT_DECAY=0.001
+DROPOUT=0.2
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[128]"
+HIDDEN_DIMS="[512]"
 META_EMBED_DIM=16
 
 LOSS=cb_focal
-CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=2.0
-CB_BETA=0.99
+CLASS_WEIGHTING=inverse
+FOCAL_GAMMA=2.9311938242286892
+CB_BETA=0.9999
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Note: --splits, --eval_test, --run_name and --checkpoint are managed per
-# fold by the orchestrator.
+PROJ_FLAG=""
+[ -n "$USE_PROJECTION" ] && PROJ_FLAG="--use_projection"
+
+# Note: --splits, --eval_test and --run_name are managed per fold by the
+# orchestrator; --checkpoint is reserved (must not be passed here) when NOT
+# --frozen — the orchestrator injects it per fold from CHECKPOINT_FILENAME.
 python $home_dir/Project/src/downstream_cv.py \
-    --baseline               biomedclip_img_text \
+    --baseline               gloria \
     $( [ "$FROZEN" = "true" ] && echo "--frozen" ) \
+    --checkpoint_filename     $CHECKPOINT_FILENAME \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \
     --out_dir                 $home_dir/Project/results \
@@ -80,11 +84,11 @@ python $home_dir/Project/src/downstream_cv.py \
     --focal_gamma             $FOCAL_GAMMA \
     --cb_beta                 $CB_BETA \
     --class_weighting         $CLASS_WEIGHTING \
+    $PROJ_FLAG \
     $( [ "$USE_MASK" = "true" ] && echo "--use_mask" ) \
-    $( [ "$FROZEN" = "true" ] && echo "--freezed_biomedclip" ) \
     --binary                  $BINARY \
     --seed                    $SEED \
     --early_stopping_metric   $EARLY_STOPPING_METRIC \
     --wandb \
-    --wandb_project biomedclip-img-text-downstream \
+    --wandb_project gloria-downstream \
     --wandb_entity  philipp-wiese \

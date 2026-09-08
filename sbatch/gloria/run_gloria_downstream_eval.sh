@@ -28,12 +28,12 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 # read from the head checkpoint itself. Optional: --btxrd_manifest to also score
 # BTXRD (requires the head to have been trained with --binary); --checkpoint to
 # override the GLoRIA backbone path if the pretrain checkpoint has moved.
-HEAD_CHECKPOINT=$home_dir/Project/results/gloria_downstream/run_.../best_head.pt   # <-- set this
-SPLITS=$home_dir/Project/data/internal_dataset/split_binary.json
+HEAD_CHECKPOINT=$home_dir/Project/results/gloria_downstream/run_mlp_no_meta_cb_focal_inverse_20260904_022657/best_head.pt   # <-- set this
+SPLITS=$home_dir/Project/data/internal_dataset/split_final.json
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # ─────────────────────────────────────────────────────────────────────────────
 
 python $home_dir/Project/src/gloria_downstream_eval.py \
     --head_checkpoint $HEAD_CHECKPOINT \
     --splits          $SPLITS \
-    --btxrd_manifest  $BTXRD_MANIFEST
+    #--btxrd_manifest  $BTXRD_MANIFEST

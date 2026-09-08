@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_img_text_downstream_cv.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/img_text/slurm-%j_biomedclip_img_text_downstream_cv_binary_frozen.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -34,27 +34,27 @@ USE_MASK=true
 # straight at the raw fold split pool (no fold<N>/best_r1_checkpoint.pt to
 # look up), matching the non-binary 3-class split naming.
 FROZEN=true
-CV_DIR=$home_dir/Project/data/internal_dataset/cv_img_text
-PATTERN="split_fold*.json"
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary_img_text
+PATTERN="split_binary_fold*.json"
 
 # No BTXRD evaluation for this baseline — BTXRD samples carry no report text,
 # so there is nothing for the text-encoder pathway to embed on that dataset.
-BINARY=false
+BINARY=true
 
-EPOCHS=50
-PATIENCE=15
-BATCH_SIZE=16
-LR=0.0003337521753115302
-WEIGHT_DECAY=0.01
-DROPOUT=0.6
+EPOCHS=200
+PATIENCE=50
+BATCH_SIZE=64
+LR=4.345951297920797e-06
+WEIGHT_DECAY=0.1854286135892815
+DROPOUT=0.1734547468499004
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[32]"
+HIDDEN_DIMS="[512, 256]"
 META_EMBED_DIM=16
 
 LOSS=focal
 CLASS_WEIGHTING=effective
-FOCAL_GAMMA=3
-CB_BETA=0.999
+FOCAL_GAMMA=2.7294357983793884
+CB_BETA=0.99567647698647
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,4 +88,3 @@ python $home_dir/Project/src/downstream_cv.py \
     --wandb \
     --wandb_project biomedclip-img-text-downstream \
     --wandb_entity  philipp-wiese \
-    --sweep \

@@ -12,8 +12,8 @@
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 #run_bs128_unfreeze11_20260516_125128
 #run_bs128_lora11_20260516_125104
-#run_bs128_lora4_20260516_125103
-CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_pretrain/run_bs128_unfreeze2_20260726_115246/best_r1_checkpoint.pt"
+#run_bs128_lora4_20260516_125103 #biomedclip_pretrain/run_bs128_unfreeze2_20260726_115246
+CHECKPOINT="/mnt/nfs/homedirs/philippw/Project/results/biomedclip_gloria_pretrain/run_bs32_lora4_20260905_083320/best_r1_checkpoint.pt"
 SPLITS="/mnt/nfs/homedirs/philippw/Project/data/internal_dataset/split_final.json"
 BINARY=false            # true = benign vs malignant only (intermediate skipped)
 IMAGE_SIZE=224   # 224 = default BiomedCLIP | 512 = CheXFound-equivalent resolution

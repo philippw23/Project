@@ -28,17 +28,13 @@ parameters:
   batch_size:
     values: [16, 32, 64]
   loss:
-    values: [focal, cb_focal]
+    value: focal
   class_weighting:
     values: [inverse, effective] 
   focal_gamma:
     distribution: uniform
     min: 2.7
     max: 3.2
-  cb_beta:
-    distribution: uniform
-    min: 0.99
-    max: 0.999
 
 command:
   - ${env}
@@ -54,7 +50,8 @@ command:
   - --binary
   - "true"
   - --use_mask
-  - --freezed_biomedclip
+  - --checkpoint
+  - results/biomedclip_pretrain/run_bs128_unfreeze4_20260903_155346/best_r1_checkpoint.pt
   - --out_dir
   - results
   - --head

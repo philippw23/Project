@@ -1,0 +1,68 @@
+program: src/gloria_downstream.py
+project: gloria-downstream
+entity: philipp-wiese
+method: bayes
+run_cap: 60
+metric:
+  name: val/balanced_acc
+  goal: maximize
+
+parameters:
+  lr:
+    distribution: log_uniform_values
+    min: 1e-6
+    max: 1e-4
+  dropout:
+    values: [0.1, 0.2, 0.3]
+  weight_decay:
+    values: [0.001, 0.01, 0.05, 0.1]
+  hidden_dims:
+    values:
+      - [128]
+      - [256]
+      - [128, 64]
+      - [512]
+      - [256, 128]
+  batch_size:
+    values: [16, 32, 64]
+  loss:
+    value: cb_focal
+  cb_beta:
+    value: 0.9999
+  class_weighting:           # ignored by cb_focal (uses effective weighting internally via cb_beta)
+    values: [sqrt, inverse, effective]
+  focal_gamma:               # only active for focal and cb_focal
+    distribution: uniform
+    min: 2.5
+    max: 3.5
+  patience:
+    value: 20
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --checkpoint
+  - results/gloria_pretrain/gloria_pretrain_unfreeze4_20260827_191943/best_retrieval_checkpoint.pt
+  - --splits
+  - data/internal_dataset/split_final.json
+  - --binary
+  - "false"
+  - --out_dir
+  - results
+  - --use_mask
+  - --head
+  - mlp_no_meta
+  - --epochs
+  - "100"
+  - --seed
+  - "42"
+  - --early_stopping_metric
+  - val_bal_acc
+  - --wandb
+  - --wandb_project
+  - gloria-downstream
+  - --wandb_entity
+  - philipp-wiese
+  - --sweep
+  - ${args}

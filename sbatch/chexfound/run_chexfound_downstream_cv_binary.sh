@@ -32,7 +32,7 @@ USE_MASK=true
 # CV-mode continued-pretraining checkpoints (from run_chexfound_pretrain_cv.sh),
 # one fold<N>/{split.json,checkpoint_last.pth} per fold. FROZEN=false tells the
 # orchestrator to pick up each fold's own checkpoint next to its split file.
-CV_DIR=$home_dir/Project/results/chexfound_pretrain_sweep/run_20260817_181515
+CV_DIR=$home_dir/Project/results/chexfound_pretrain_sweep/run_20260828_192047
 PATTERN="fold*/split.json"
 CHECKPOINT_FILENAME=checkpoint_best.pth
 FROZEN=false
@@ -43,16 +43,16 @@ BINARY=true
 EPOCHS=50
 PATIENCE=10
 BATCH_SIZE=64
-LR=0.00017324861135542443
+LR=5.66491101369006e-05
 WEIGHT_DECAY=0.05
-DROPOUT=0.3
+DROPOUT=0.4
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[64]"
+HIDDEN_DIMS="[128, 64]"
 META_EMBED_DIM=16
 
 LOSS=focal
 CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=3.370370483256543
+FOCAL_GAMMA=3.1708578423141462
 CB_BETA=0.99
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"

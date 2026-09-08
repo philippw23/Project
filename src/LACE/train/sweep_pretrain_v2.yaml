@@ -15,47 +15,41 @@ parameters:
   # ── Optimisation ─────────────────────────────────────────────────────────────
   lr:
     distribution: log_uniform_values
-    min: 1e-6
-    max: 5e-4
+    min: 4e-5
+    max: 1.5e-4
   weight_decay:
-    value: 0.001
+    distribution: log_uniform_values
+    max: 0.003
+    min: 0.0003
 
   # ── Soft-target / t2i ───────────────────────────────────────────────────────
   tau_s_beur:
-    value: 0.0325
+    value: 0.035
   tau_s_bef:
     value: 0.038
   tau_s_img_full:
-    value: 0.028
+    value: 0.032
 
   lambda_ita:
-    distribution: uniform
-    min: 0.1
-    max: 2.0
+    values: [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
   lambda_sim:
-    distribution: uniform
-    min: 0.1
-    max: 2.0
+    values: [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
   lambda_ortho:
-    distribution: uniform
-    min: 0.1
-    max: 2.0
+    values: [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
   lambda_dice:
-    distribution: uniform
-    min: 0.1
-    max: 2.0
-  
+    values: [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+
   # ── t2i ──────────────────────────────────────────────────────────────────────
   t2i_mode:
     value: "image_image"
   lambda_t2i:
-    value: 0.5
+    values: [0.25, 0.5, 0.75, 1.0]
   same_image_boost:
-    value: 10.0
+    value: 20.0
 
   # ─── mask capacity ────────────────────────────────────────────────────────── 
   n_mask_heads:
-    value: 16
+    values: [8, 16, 24]
   # ── Epoch stages ────────────────────────────────────────────────
   stage1_epochs:
     value: 20

@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_gloria_downstream_cv.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/slurm-%j_gloria_downstream_cv_binary_frozen.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -26,14 +26,16 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # ── Fixed hyperparameters (winning sweep config) ───────────────────────────────
-# CV-mode continued-pretraining checkpoints (from run_gloria_pretrain_cv.sh),
-# one fold<N>/{split.json,best_retrieval_checkpoint.pt} per fold. FROZEN=false
-# tells the orchestrator to pick up each fold's own checkpoint next to its
-# split file, instead of a single fixed checkpoint used across every fold.
-CV_DIR=$home_dir/Project/results/gloria_pretrain/gloria_pretrain_unfreeze4_20260817_175909
-PATTERN="fold*/split.json"
-CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt
-FROZEN=false
+# Frozen original GLoRIA (CheXpert-pretrained ResNet50) weights — no per-fold
+# checkpoint to look up, so --cv_dir points straight at the raw fold split
+# pool instead of a continued-pretrain run's fold<N>/ dirs. In --frozen mode
+# the orchestrator skips its per-fold checkpoint injection entirely, so the
+# fixed checkpoint is passed explicitly below via --checkpoint (unreserved
+# when --frozen is set) instead of through CHECKPOINT_FILENAME.
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary
+PATTERN="split_binary_fold*.json"
+CHECKPOINT=$home_dir/Project/src/gloria/pretrained/chexpert_resnet50.ckpt
+FROZEN=true
 
 USE_PROJECTION=""   # leave unset for 2048-dim pre-projection features; set "1" for 768-dim post-projection
 USE_MASK=true
@@ -44,17 +46,17 @@ BINARY=true
 EPOCHS=100
 PATIENCE=100
 BATCH_SIZE=64
-LR=8.798667104698612e-05
-WEIGHT_DECAY=0.1
+LR=0.0003508471195179458
+WEIGHT_DECAY=0.05
 DROPOUT=0.2
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[64]"
+HIDDEN_DIMS="[128, 64]"
 META_EMBED_DIM=16
 
-LOSS=focal
-CLASS_WEIGHTING=sqrt
-FOCAL_GAMMA=3.4933496942536344
-CB_BETA=0.9999
+LOSS=cb_focal
+CLASS_WEIGHTING=effective
+FOCAL_GAMMA=3.4470850178287873
+CB_BETA=0.999
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,12 +65,12 @@ PROJ_FLAG=""
 [ -n "$USE_PROJECTION" ] && PROJ_FLAG="--use_projection"
 
 # Note: --splits, --eval_test and --run_name are managed per fold by the
-# orchestrator; --checkpoint is reserved (must not be passed here) when NOT
-# --frozen — the orchestrator injects it per fold from CHECKPOINT_FILENAME.
+# orchestrator; --checkpoint is passed explicitly below since --frozen leaves
+# it unreserved (no per-fold checkpoint for the orchestrator to inject).
 python $home_dir/Project/src/downstream_cv.py \
     --baseline               gloria \
     $( [ "$FROZEN" = "true" ] && echo "--frozen" ) \
-    --checkpoint_filename     $CHECKPOINT_FILENAME \
+    --checkpoint              $CHECKPOINT \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \
     --out_dir                 $home_dir/Project/results \

@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=lace_downstream_cv
+#SBATCH --job-name=lacev2_downstream
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=24:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv_A0_binary_balacc.out"
+#SBATCH --time=08:00:00
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_downstream.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -25,48 +25,41 @@ export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
-# ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
-IMAGE_SIZE=224
-USE_MASK=true
-VERSION=v2
-VISUAL_MODE=cls # cls_fg #fg          # cls | fg | cls_fg
-
-# CV-mode pretrain run dir: one fold<N>/{split.json,best_retrieval_checkpoint.pt}
-# per fold. Each fold's checkpoint + split are picked up together from there —
-# update this to the CV pretrain run you want to evaluate.  run_20260724_221040
-CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260903_075245
-PATTERN="fold*/split.json"
-CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt #best_retrieval_checkpoint.pt #
-
+# ── Model ─────────────────────────────────────────────────────────────────────
+# Reproduction of sweep run: cls_fg / run_20260707_164235 / split_binary.json
+IMAGE_SIZE=224          # 224 = default | 512 = CheXFound-equivalent resolution
+USE_MASK=true           # apply lesion-mask cropping to input images (else the full image is just resized)
+VERSION=v2              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
+VISUAL_MODE=cls_fg      # cls [B,512] | fg [B,512] | cls_fg [B,1024]  run_20260721_080616
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260827_115704/best_retrieval_checkpoint.pt
+SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json
+BINARY=true            # true = benign vs malignant only (intermediate skipped)
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
-BINARY=true
-
+# # ── Training ──────────────────────────────────────────────────────────────────
 EPOCHS=100
-PATIENCE=25
+PATIENCE=10
 BATCH_SIZE=16
 LR=2.1612235726471097e-05
 WEIGHT_DECAY=0.45
 DROPOUT=0.35
-HEAD=mlp_no_meta
-HIDDEN_DIMS="[256, 128]"
+HEAD=mlp_no_meta                # linear | mlp (with age/sex meta) | mlp_no_meta
+META_EMBED_DIM=0
+HIDDEN_DIMS="[256, 128]"            # only used for mlp heads
 
+# # ── Loss ──────────────────────────────────────────────────────────────────────
 LOSS=focal
-CLASS_WEIGHTING=none
+CLASS_WEIGHTING=none  # none | inverse | sqrt | effective
 FOCAL_GAMMA=3.1543303978419135
 CB_BETA=0.99
 SEED=42
-EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Note: --splits, --eval_test and --checkpoint are managed per fold by the orchestrator.
-python $home_dir/Project/src/downstream_cv.py \
-    --baseline               lace \
+python $home_dir/Project/src/lace_downstream.py \
     --version                $VERSION \
     --image_size             $IMAGE_SIZE \
     --downstream_visual_mode $VISUAL_MODE \
-    --cv_dir                 $CV_DIR \
-    --pattern                "$PATTERN" \
-    --checkpoint_filename    $CHECKPOINT_FILENAME \
+    --checkpoint             $CHECKPOINT \
+    --splits                 $SPLITS \
     --out_dir                $home_dir/Project/results \
     --epochs                 $EPOCHS \
     --patience               $PATIENCE \
@@ -75,6 +68,7 @@ python $home_dir/Project/src/downstream_cv.py \
     --weight_decay           $WEIGHT_DECAY \
     --dropout                $DROPOUT \
     --head                   $HEAD \
+    --meta_embed_dim         $META_EMBED_DIM \
     --hidden_dims            $HIDDEN_DIMS \
     --loss                   $LOSS \
     --focal_gamma            $FOCAL_GAMMA \
@@ -83,8 +77,8 @@ python $home_dir/Project/src/downstream_cv.py \
     --use_mask               $USE_MASK \
     $( [ "$BINARY" = "true" ] && echo "--binary" ) \
     --seed                   $SEED \
-    --early_stopping_metric  $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project lace-downstream \
     --wandb_entity  philipp-wiese \
+    --eval_test \
     --btxrd_manifest         $BTXRD_MANIFEST \

@@ -4,8 +4,8 @@ entity: philipp-wiese
 method: bayes
 run_cap: 60
 metric:
-  name: val/loss
-  goal: minimize
+  name: val/balanced_acc
+  goal: maximize
 
 parameters:
   lr:
@@ -13,13 +13,12 @@ parameters:
     min: 1e-6
     max: 1e-4
   dropout:
-    values: [0.2, 0.3, 0.4, 0.5]
+    values: [0.1, 0.2, 0.3]
   weight_decay:
     values: [0.001, 0.01, 0.05, 0.1]
   hidden_dims:
     values:
       - [64]
-      - [32]
       - [128]
       - [256]
       - [128, 64]
@@ -27,26 +26,24 @@ parameters:
   batch_size:
     values: [16, 32, 64]
   loss:
-    values: [focal, cb_focal]
+    value: focal
   class_weighting:           # ignored by cb_focal (uses effective weighting internally via cb_beta)
     values: [sqrt, inverse, effective]
   focal_gamma:               # only active for focal and cb_focal
     distribution: uniform
     min: 2.5
     max: 3.5
-  cb_beta:                   # only active for cb_focal
-    values: [0.99, 0.999, 0.9999]
 
 command:
   - ${env}
   - ${interpreter}
   - ${program}
   - --checkpoint
-  - results/gloria_pretrain/gloria_pretrain_unfreeze4_20260812_215155/best_retrieval_checkpoint.pt
+  - src/gloria/pretrained/chexpert_resnet50.ckpt
   - --splits
-  - data/internal_dataset/split_binary_final.json
+  - data/internal_dataset/split_final.json
   - --binary
-  - "true"
+  - "false"
   - --out_dir
   - results
   - --use_mask
@@ -61,6 +58,5 @@ command:
   - gloria-downstream
   - --wandb_entity
   - philipp-wiese
-  - --eval_test
   - --sweep
   - ${args}
