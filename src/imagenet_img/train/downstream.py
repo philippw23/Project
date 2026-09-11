@@ -25,7 +25,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import (balanced_accuracy_score, precision_recall_fscore_support)
+from sklearn.metrics import (balanced_accuracy_score, f1_score, precision_recall_fscore_support)
 from torch.utils.data import DataLoader
 
 try:
@@ -41,7 +41,7 @@ from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
 from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_OUT_DIR
 from biomedclip.utils.downstream_eval import (
     resolve_label_maps, require_binary_for_btxrd, load_btxrd_samples,
-    build_downstream_loader, report_eval,
+    build_downstream_loader, report_eval, compute_auroc, safe_wandb_log,
 )
 from imagenet_img.data.transforms import build_train_transform, build_val_transform
 from imagenet_img.models.encoders import build_encoder
@@ -85,11 +85,11 @@ def evaluate_cached(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-) -> tuple[float, float, np.ndarray, np.ndarray]:
+) -> tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
     """Evaluate on pre-computed embeddings (no encoder forward pass)."""
     mlp.eval()
     total_loss = 0.0
-    all_preds, all_labels = [], []
+    all_preds, all_labels, all_probs = [], [], []
     for emb, age, sex, labels in loader:
         emb    = emb.to(device)
         age    = age.to(device)
@@ -100,11 +100,13 @@ def evaluate_cached(
         total_loss += criterion(logits, labels).item()
         all_preds.append(logits.argmax(dim=1).cpu())
         all_labels.append(labels.cpu())
+        all_probs.append(F.softmax(logits, dim=-1).cpu())
 
     preds  = torch.cat(all_preds).numpy()
     labels = torch.cat(all_labels).numpy()
+    probs  = torch.cat(all_probs).numpy()
     acc    = float((preds == labels).mean())
-    return total_loss / len(loader), acc, preds, labels
+    return total_loss / len(loader), acc, preds, labels, probs
 
 
 # ── Argparse ──────────────────────────────────────────────────────────────────
@@ -317,16 +319,21 @@ def main(args: argparse.Namespace) -> dict:
     maximize_metric  = args.early_stopping_metric == "val_bal_acc"
     best_metric      = -float("inf") if maximize_metric else float("inf")
     patience_counter = 0
+    # Val metrics of the checkpoint actually saved/restored below (set inside
+    # `if improved:`), not a running max/last-epoch value.
+    best_val_bal_acc = best_val_acc = best_val_f1_macro = best_val_auroc = None
     print(f"\nTraining for {args.epochs} epochs "
           f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss                               = train_one_epoch(encoder, mlp, train_loader,
+        train_loss                                                 = train_one_epoch(encoder, mlp, train_loader,
                                                                     optimizer, criterion, device)
-        val_loss, val_acc, val_preds, val_labels = evaluate_cached(mlp, val_emb_loader,
+        val_loss, val_acc, val_preds, val_labels, val_probs = evaluate_cached(mlp, val_emb_loader,
                                                                      criterion, device)
 
         val_bal_acc       = balanced_accuracy_score(val_labels, val_preds)
+        val_f1_macro      = f1_score(val_labels, val_preds, average="macro")
+        val_auroc         = compute_auroc(val_labels, val_probs, num_classes)
         val_weighted_prec, val_weighted_rec, _, _ = precision_recall_fscore_support(
             val_labels, val_preds, average="weighted", zero_division=0
         )
@@ -336,7 +343,8 @@ def main(args: argparse.Namespace) -> dict:
             f"Epoch {epoch:03d}/{args.epochs} | "
             f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
             f"val_acc={val_acc:.3f} | val_bal_acc={val_bal_acc:.3f} | "
-            f"val_combined_acc={val_combined_acc:.3f}"
+            f"val_combined_acc={val_combined_acc:.3f} | "
+            f"val_f1_macro={val_f1_macro:.3f} | val_auroc={val_auroc:.3f}"
         )
         if use_wandb:
             wandb.log({
@@ -347,6 +355,8 @@ def main(args: argparse.Namespace) -> dict:
                 "val/precision_weighted":  val_weighted_prec,
                 "val/recall_weighted":     val_weighted_rec,
                 "val/combined_acc":        val_combined_acc,
+                "val/f1_macro":            val_f1_macro,
+                "val/auroc":               val_auroc,
             }, step=epoch)
 
         current_metric = val_bal_acc if maximize_metric else val_loss
@@ -354,6 +364,15 @@ def main(args: argparse.Namespace) -> dict:
         if improved:
             best_metric      = current_metric
             patience_counter = 0
+            best_val_bal_acc  = val_bal_acc
+            best_val_acc      = val_acc
+            best_val_f1_macro = val_f1_macro
+            best_val_auroc    = val_auroc
+            if use_wandb:
+                wandb.run.summary["val/best_balanced_acc"] = val_bal_acc
+                wandb.run.summary["val/best_acc"]          = val_acc
+                wandb.run.summary["val/best_f1_macro"]     = val_f1_macro
+                wandb.run.summary["val/best_auroc"]        = val_auroc
             torch.save({
                 "epoch": epoch,
                 "mlp_state_dict": mlp.state_dict(),
@@ -375,14 +394,21 @@ def main(args: argparse.Namespace) -> dict:
     mlp.load_state_dict(ckpt["mlp_state_dict"])
 
     # ── Held-out test / external BTXRD evaluation (opt-in via --eval_test) ─────
-    eval_metrics: dict = {}
+    eval_metrics: dict = {
+        "val/balanced_acc": best_val_bal_acc,
+        "val/acc":          best_val_acc,
+        "val/f1_macro":     best_val_f1_macro,
+        "val/auroc":        best_val_auroc,
+    }
     if args.eval_test:
-        test_loss, _, test_preds, test_labels = evaluate_cached(mlp, test_emb_loader,
+        test_loss, _, test_preds, test_labels, test_probs = evaluate_cached(mlp, test_emb_loader,
                                                                  criterion, device)
         eval_metrics.update(report_eval(
-            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes,
+            prefix="test", probs=test_probs, use_wandb=use_wandb))
         eval_metrics["test/_preds"]  = test_preds.tolist()
         eval_metrics["test/_labels"] = test_labels.tolist()
+        eval_metrics["test/_probs"]  = test_probs.tolist()
 
         if args.btxrd_manifest:
             print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
@@ -394,17 +420,18 @@ def main(args: argparse.Namespace) -> dict:
             b_emb, b_age, b_sex, b_lbl = extract_embeddings(encoder, btxrd_raw, device)
             btxrd_emb_loader = DataLoader(EmbeddingDataset(b_emb, b_age, b_sex, b_lbl),
                                           shuffle=False, **emb_loader_kwargs)
-            btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate_cached(
+            btxrd_loss, _, btxrd_preds, btxrd_labels, btxrd_probs = evaluate_cached(
                 mlp, btxrd_emb_loader, criterion, device)
             eval_metrics.update(report_eval(
                 "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
-                idx_to_label, num_classes, prefix="btxrd"))
+                idx_to_label, num_classes, prefix="btxrd", probs=btxrd_probs,
+                use_wandb=use_wandb))
     else:
         print("\nSkipping held-out test / BTXRD evaluation (--eval_test not set).")
 
     if use_wandb:
         if eval_metrics:
-            wandb.log(eval_metrics)
+            safe_wandb_log(eval_metrics)
         wandb.finish()
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")

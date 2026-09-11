@@ -3,13 +3,13 @@ project: lace-downstream
 entity: philipp-wiese
 method: bayes
 metric:
-  name: val/best_f1_macro   # statt val/f1_macro, falls du das beste Checkpoint-Modell auswählst
+  name: val/best_balanced_acc   # statt val/f1_macro, falls du das beste Checkpoint-Modell auswählst
   goal: maximize
 run_cap: 50
 
 parameters:
   checkpoint:
-    value: results/lace_v2_pretrain/run_20260815_131104/best_retrieval_checkpoint.pt
+    value: results/lace_v2_pretrain/run_20260831_174119/best_retrieval_checkpoint.pt
 
   downstream_visual_mode:
     values: [cls_fg, fg, cls]
@@ -54,6 +54,9 @@ parameters:
 
   head:
     value: mlp_no_meta
+  
+  early_stopping_metric:
+    value: val_bal_acc
 
 command:
   - ${env}
@@ -63,14 +66,13 @@ command:
   - v2
   - --splits
   - data/internal_dataset/split_final.json
-  - --eval_test
   - --use_mask
   - --out_dir
   - results
   - --epochs
   - "200"
   - --patience
-  - "10"
+  - "20"
   - --seed
   - "42"
   - --wandb

@@ -53,7 +53,7 @@ Every baseline follows the same `<name>_downstream.py` (trains a head, saves a c
 ```bash
 python src/biomedclip_pretrain.py [args]
 python src/LACE/train/pretrain_v2.py [args]
-python src/lace_downstream_cv.py --version v2 --checkpoint <ckpt> --cv_dir data/internal_dataset/cv [args]
+python src/downstream_cv.py --baseline lace --version v2 --checkpoint <ckpt> --cv_dir data/internal_dataset/cv [args]
 python src/gloria/run.py [config_path]
 ```
 
@@ -68,7 +68,7 @@ Four-stage pipeline before training:
 3. **Phrase extraction** — LLM (Qwen2.5-7B): `src/llm_extractor.py` (or `src/llm_extractor_seperated.py` for befund/beurteilung split separately)
 4. **Dataset assembly** — `src/build_dataset_json.py`
 
-Downstream of that: `src/create_split.py` builds the stratified train/val/test manifest, and `src/create_cv_splits.py` derives a patient-grouped 10-fold CV pool from it (kept in `data/internal_dataset/cv/`) for `lace_downstream_cv.py`-style fold evaluation. `src/build_btxrd_downstream.py` converts the external **BTXRD** dataset into the same sample-dict manifest format, used as a frozen external test set (binary benign/malignant only).
+Downstream of that: `src/create_split.py` builds the stratified train/val/test manifest, and `src/create_cv_splits.py` derives a patient-grouped 10-fold CV pool from it (kept in `data/internal_dataset/cv/`) for `downstream_cv.py`-style fold evaluation. `src/build_btxrd_downstream.py` converts the external **BTXRD** dataset into the same sample-dict manifest format, used as a frozen external test set (binary benign/malignant only).
 
 Default data paths (hardcoded in [src/biomedclip/utils/misc.py](src/biomedclip/utils/misc.py)):
 
@@ -105,7 +105,7 @@ Note: several dated/backup variants of the dataset JSON and split/report files l
   3. **L_ortho** — orthogonality regularization on the BTXRD dataset
 - **v2** — [src/LACE/train/pretrain_v2.py](src/LACE/train/pretrain_v2.py): adds a `MaskTokenDecoder` (lesion segmentation, `L_dice`), with a fully configurable 2-stage curriculum (`--loss_stages`, e.g. `ita:2 sim:none`) — by default stage 1 warms up the mask decoder (`dice + ortho`), stage 2 adds everything.
 
-Encoders in [src/LACE/models/encoders.py](src/LACE/models/encoders.py): `SharedViT`, `BiomedCLIPTextEncoder`, `ProjectionHead`. Downstream heads/training in [src/LACE/train/downstream.py](src/LACE/train/downstream.py) and [src/LACE/models/downstream.py](src/LACE/models/downstream.py); k-fold CV orchestration (internal folds + frozen BTXRD test) in `src/lace_downstream_cv.py`. Design docs: [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md), [src/LACE/CV_EVAL_PLAN.md](src/LACE/CV_EVAL_PLAN.md).
+Encoders in [src/LACE/models/encoders.py](src/LACE/models/encoders.py): `SharedViT`, `BiomedCLIPTextEncoder`, `ProjectionHead`. Downstream heads/training in [src/LACE/train/downstream.py](src/LACE/train/downstream.py) and [src/LACE/models/downstream.py](src/LACE/models/downstream.py); k-fold CV orchestration (internal folds + frozen BTXRD test) in `src/downstream_cv.py`. Design docs: [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md), [src/LACE/CV_EVAL_PLAN.md](src/LACE/CV_EVAL_PLAN.md).
 
 ### CheXFound
 

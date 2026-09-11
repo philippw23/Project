@@ -32,7 +32,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import (balanced_accuracy_score, precision_recall_fscore_support)
+from sklearn.metrics import (balanced_accuracy_score, f1_score, precision_recall_fscore_support)
 from torch.utils.data import DataLoader
 
 try:
@@ -50,6 +50,7 @@ from biomedclip.loss.classification import build_classification_loss, compute_cl
 from biomedclip.models.classifier import LinearHead, MalignancyMLP, extract_embeddings
 from biomedclip.utils.downstream_eval import (
     require_binary_for_btxrd, load_btxrd_samples, build_downstream_loader, report_eval,
+    compute_auroc, safe_wandb_log,
 )
 
 _CHEXFOUND_DATA = ROOT_DIR / "src" / "chexfound" / "data"
@@ -145,20 +146,22 @@ def evaluate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-) -> tuple[float, float, np.ndarray, np.ndarray]:
+) -> tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
     head.eval()
     total_loss = 0.0
-    all_preds, all_labels = [], []
+    all_preds, all_labels, all_probs = [], [], []
     for emb, age, sex, lbl in loader:
         emb, age, sex, lbl = emb.to(device), age.to(device), sex.to(device), lbl.to(device)
         logits = head(emb, age, sex)
         total_loss += criterion(logits, lbl).item()
         all_preds.append(logits.argmax(dim=1).cpu())
         all_labels.append(lbl.cpu())
+        all_probs.append(F.softmax(logits, dim=-1).cpu())
 
     preds  = torch.cat(all_preds).numpy()
     labels = torch.cat(all_labels).numpy()
-    return total_loss / len(loader), float((preds == labels).mean()), preds, labels
+    probs  = torch.cat(all_probs).numpy()
+    return total_loss / len(loader), float((preds == labels).mean()), preds, labels, probs
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -354,13 +357,18 @@ def main(args: argparse.Namespace) -> dict:
     maximize_metric  = args.early_stopping_metric == "val_bal_acc"
     best_metric      = -float("inf") if maximize_metric else float("inf")
     patience_counter = 0
+    # Val metrics of the checkpoint actually saved/restored below (set inside
+    # `if improved:`), not a running max/last-epoch value.
+    best_val_bal_acc = best_val_acc = best_val_f1_macro = best_val_auroc = None
     print(f"\nTraining {args.head} head for {args.epochs} epochs "
           f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
-        train_loss                               = train_one_epoch(head, encoder, train_loader, optimizer, criterion, device)
-        val_loss, val_acc, val_preds, val_labels = evaluate(head, val_loader, criterion, device)
+        train_loss                                              = train_one_epoch(head, encoder, train_loader, optimizer, criterion, device)
+        val_loss, val_acc, val_preds, val_labels, val_probs = evaluate(head, val_loader, criterion, device)
         val_bal_acc       = balanced_accuracy_score(val_labels, val_preds)
+        val_f1_macro      = f1_score(val_labels, val_preds, average="macro")
+        val_auroc         = compute_auroc(val_labels, val_probs, num_classes)
         val_weighted_prec, val_weighted_rec, _, _ = precision_recall_fscore_support(
             val_labels, val_preds, average="weighted", zero_division=0
         )
@@ -369,7 +377,8 @@ def main(args: argparse.Namespace) -> dict:
         print(
             f"Epoch {epoch:03d}/{args.epochs} | "
             f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | "
-            f"val_acc={val_acc:.3f} | val_bal_acc={val_bal_acc:.3f} | val_combined_acc={val_combined_acc:.3f}"
+            f"val_acc={val_acc:.3f} | val_bal_acc={val_bal_acc:.3f} | val_combined_acc={val_combined_acc:.3f} | "
+            f"val_f1_macro={val_f1_macro:.3f} | val_auroc={val_auroc:.3f}"
         )
         if use_wandb:
             wandb.log({
@@ -380,6 +389,8 @@ def main(args: argparse.Namespace) -> dict:
                 "val/precision_weighted":  val_weighted_prec,
                 "val/recall_weighted":     val_weighted_rec,
                 "val/combined_acc":        val_combined_acc,
+                "val/f1_macro":            val_f1_macro,
+                "val/auroc":               val_auroc,
             }, step=epoch)
 
         current_metric = val_bal_acc if maximize_metric else val_loss
@@ -387,6 +398,15 @@ def main(args: argparse.Namespace) -> dict:
         if improved:
             best_metric      = current_metric
             patience_counter = 0
+            best_val_bal_acc  = val_bal_acc
+            best_val_acc      = val_acc
+            best_val_f1_macro = val_f1_macro
+            best_val_auroc    = val_auroc
+            if use_wandb:
+                wandb.run.summary["val/best_balanced_acc"] = val_bal_acc
+                wandb.run.summary["val/best_acc"]          = val_acc
+                wandb.run.summary["val/best_f1_macro"]     = val_f1_macro
+                wandb.run.summary["val/best_auroc"]        = val_auroc
             torch.save({
                 "epoch": epoch,
                 "head_state_dict": head.state_dict(),
@@ -412,19 +432,24 @@ def main(args: argparse.Namespace) -> dict:
     # ── Held-out test / external BTXRD evaluation (opt-in via --eval_test) ─────
     # Metrics returned to callers (e.g. the k-fold CV orchestrator).
     results: dict = {
-        f"val/best_{args.early_stopping_metric}": best_metric,
+        "val/balanced_acc": best_val_bal_acc,
+        "val/acc":          best_val_acc,
+        "val/f1_macro":     best_val_f1_macro,
+        "val/auroc":        best_val_auroc,
     }
     eval_metrics: dict = {}
     if args.eval_test:
-        test_loss, _, test_preds, test_labels = evaluate(head, test_loader, criterion, device)
+        test_loss, _, test_preds, test_labels, test_probs = evaluate(head, test_loader, criterion, device)
         test_metrics = report_eval(
-            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test")
+            "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes,
+            prefix="test", probs=test_probs, use_wandb=use_wandb)
         eval_metrics.update(test_metrics)
         results.update(test_metrics)
-        # raw per-sample predictions for pooled out-of-fold CV scoring
+        # raw per-sample predictions/probabilities for pooled out-of-fold CV scoring
         # (consumed by downstream_cv.py; ignored by single-run callers)
         results["test/_preds"]  = test_preds.tolist()
         results["test/_labels"] = test_labels.tolist()
+        results["test/_probs"]  = test_probs.tolist()
 
         if args.btxrd_manifest:
             print(f"Pre-computing BTXRD embeddings from {args.btxrd_manifest}...")
@@ -437,10 +462,11 @@ def main(args: argparse.Namespace) -> dict:
             btxrd_loader = DataLoader(
                 EmbeddingDataset(b_emb, b_age, b_sex, b_lbl),
                 batch_size=args.batch_size, shuffle=False)
-            btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(head, btxrd_loader, criterion, device)
+            btxrd_loss, _, btxrd_preds, btxrd_labels, btxrd_probs = evaluate(head, btxrd_loader, criterion, device)
             btxrd_metrics = report_eval(
                 "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
-                idx_to_label, num_classes, prefix="btxrd")
+                idx_to_label, num_classes, prefix="btxrd", probs=btxrd_probs,
+                use_wandb=use_wandb)
             eval_metrics.update(btxrd_metrics)
             results.update(btxrd_metrics)
     else:
@@ -448,7 +474,7 @@ def main(args: argparse.Namespace) -> dict:
 
     if use_wandb:
         if eval_metrics:
-            wandb.log(eval_metrics)
+            safe_wandb_log(eval_metrics)
         wandb.finish()
 
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")

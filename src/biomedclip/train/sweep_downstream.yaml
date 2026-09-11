@@ -4,8 +4,8 @@ entity: philipp-wiese
 method: bayes
 run_cap: 30
 metric:
-  name: val/loss
-  goal: minimize
+  name: val/best_balanced_acc
+  goal: maximize
 
 parameters:
   batch_size:
@@ -57,15 +57,15 @@ command:
   - philipp-wiese
   - --splits
   - data/internal_dataset/split_final.json
-  - --freezed_biomedclip
+  - --checkpoint
+  - results/biomedclip_pretrain/run_bs128_unfreeze2_20260828_114112/best_r1_checkpoint.pt
   - --out_dir
   - results
   - --use_mask
   - --binary
   - "false"
-  - --eval_test
   - --epochs
-  - "50"
+  - "100"
   - --seed
   - "42"
   - --sweep

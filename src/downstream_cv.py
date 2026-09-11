@@ -15,7 +15,8 @@ writes fold<N>/{split.json,best_retrieval_checkpoint.pt} under the run dir.
 Point --cv_dir/--pattern at those fold<N> dirs; each fold's checkpoint is
 picked up next to its split file (see --checkpoint_filename to override the
 filename looked up):
-    python src/lace_downstream_cv.py \\
+    python src/downstream_cv.py \\
+        --baseline lace \\
         --version v2 \\
         --cv_dir results/lace_v2_pretrain/run_.../ \\
         --pattern "fold*/split.json" \\
@@ -68,8 +69,9 @@ _RESERVED = {"--splits", "--eval_test", "--run_name", "--checkpoint"}
 
 # Per-fold metrics summarized as the secondary (stability) block.
 _PERFOLD = [
-    "test/f1_macro", "test/balanced_acc", "test/acc",
-    "btxrd/f1_macro", "btxrd/balanced_acc", "btxrd/acc", "btxrd/loss",
+    "val/f1_macro", "val/balanced_acc", "val/acc", "val/auroc",
+    "test/f1_macro", "test/balanced_acc", "test/acc", "test/auroc",
+    "btxrd/f1_macro", "btxrd/balanced_acc", "btxrd/acc", "btxrd/auroc", "btxrd/loss",
 ]
 
 
@@ -168,6 +170,7 @@ def main(argv=None) -> None:
     fold_results: list[dict] = []
     oof_preds:  list[int] = []   # out-of-fold internal-test predictions (each sample once)
     oof_labels: list[int] = []
+    oof_probs:  list[list[float]] = []
     for fold, split_path in enumerate(fold_files):
         print("\n" + "#" * 70)
         print(f"# FOLD {fold} — {split_path.name}")
@@ -210,6 +213,12 @@ def main(argv=None) -> None:
         # peel off the raw per-sample predictions (kept out of scalar aggregation)
         oof_preds  += results.pop("test/_preds",  [])
         oof_labels += results.pop("test/_labels", [])
+        oof_probs  += results.pop("test/_probs",  [])
+        # drop non-numeric entries (e.g. {prefix}/roc_curve, a wandb CustomChart
+        # object added by report_eval(..., use_wandb=True)) — not aggregable and
+        # not JSON-serializable, so they can't go into fold_results/summary_json.
+        results = {k: v for k, v in results.items()
+                   if isinstance(v, (int, float, np.integer, np.floating))}
         fold_results.append(results)
         if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -221,9 +230,10 @@ def main(argv=None) -> None:
     if oof_labels:
         pp = np.array(oof_preds)
         pl = np.array(oof_labels)
+        pb = np.array(oof_probs)
         pooled = report_eval(
             "POOLED OUT-OF-FOLD TEST (primary — every internal sample scored once)",
-            pp, pl, float("nan"), idx_to_label, num_classes, prefix="test_pooled",
+            pp, pl, float("nan"), idx_to_label, num_classes, prefix="test_pooled", probs=pb,
         )
         pooled.pop("test_pooled/loss", None)  # no single loss across folds
         pooled["test_pooled/n"] = int(len(pl))

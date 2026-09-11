@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_downstream_cv_3class.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/biomedclip/slurm-%j_biomedclip_downstream_cv_3class_frozen.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -40,18 +40,25 @@ CHECKPOINT_FILENAME=best_r1_checkpoint.pt   # unused in --frozen mode
 BINARY=false
 
 EPOCHS=50
-PATIENCE=20
+#EPOCHS=100
+#PATIENCE=20
 BATCH_SIZE=16
+#BATCH_SIZE=64
 LR=4.973766440357406e-05
+#LR=3.1805704415443494e-05
 WEIGHT_DECAY=0.01
+#WEIGHT_DECAY=0.1957370680853576
 DROPOUT=0.5
+#DROPOUT=0.17191021624718292
 HEAD=mlp_no_meta
 HIDDEN_DIMS="[32]"
+#HIDDEN_DIMS="[512, 256]"
 META_EMBED_DIM=16
 
 LOSS=focal
 CLASS_WEIGHTING=inverse
 FOCAL_GAMMA=3.441216155058626
+#FOCAL_GAMMA=2.949553925848543
 CB_BETA=0.99
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"

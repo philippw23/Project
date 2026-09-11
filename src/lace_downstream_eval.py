@@ -143,9 +143,10 @@ def main(cli: argparse.Namespace) -> dict:
         args, extractor, device, label_to_idx,
     )
     print(f"Test samples: {n_test}")
-    test_loss, _, test_preds, test_labels = evaluate(trainable_model, test_loader, criterion, device)
+    test_loss, _, test_preds, test_labels, test_probs = evaluate(trainable_model, test_loader, criterion, device)
     results.update(report_eval(
-        "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes, prefix="test"))
+        "TEST", test_preds, test_labels, test_loss, idx_to_label, num_classes,
+        prefix="test", probs=test_probs))
 
     # ── BTXRD external test (optional) ────────────────────────────────────────
     if args.btxrd_manifest:
@@ -157,11 +158,11 @@ def main(cli: argparse.Namespace) -> dict:
             args, extractor, device, label_to_idx,
         )
         print(f"BTXRD samples: {n_btxrd}")
-        btxrd_loss, _, btxrd_preds, btxrd_labels = evaluate(
+        btxrd_loss, _, btxrd_preds, btxrd_labels, btxrd_probs = evaluate(
             trainable_model, btxrd_loader, criterion, device)
         results.update(report_eval(
             "BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
-            idx_to_label, num_classes, prefix="btxrd"))
+            idx_to_label, num_classes, prefix="btxrd", probs=btxrd_probs))
 
     return results
 

@@ -28,7 +28,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (balanced_accuracy_score, classification_report,
-                             confusion_matrix, f1_score, precision_recall_fscore_support)
+                             confusion_matrix, f1_score, precision_recall_fscore_support,
+                             roc_auc_score)
 from torch.utils.data import DataLoader
 
 from biomedclip.data.datasets import (
@@ -96,6 +97,17 @@ def build_downstream_loader(
     return loader, len(ds)
 
 
+def compute_auroc(labels: np.ndarray, probs: np.ndarray, num_classes: int) -> float:
+    """AUROC over `probs` (softmax output, shape `(n, num_classes)`): binary mode
+    scores the malignant-class column directly; 3-class mode uses one-vs-rest
+    with macro averaging (same averaging convention as f1_macro/precision_macro/
+    recall_macro in `report_eval`). Requires every class to have at least one
+    positive example in `labels`, same as the rest of this pipeline's CV splits."""
+    if num_classes == 2:
+        return roc_auc_score(labels, probs[:, 1])
+    return roc_auc_score(labels, probs, multi_class="ovr", average="macro")
+
+
 def report_eval(
     name: str,
     preds: np.ndarray,
@@ -104,9 +116,19 @@ def report_eval(
     idx_to_label: dict,
     num_classes: int,
     prefix: str,
+    probs: np.ndarray,
+    use_wandb: bool = False,
 ) -> dict:
     """Print a results block for an evaluated set and return a flat metrics dict
-    keyed by `prefix` (e.g. 'test' or 'btxrd')."""
+    keyed by `prefix` (e.g. 'test' or 'btxrd'). `probs` is the per-sample
+    class-probability array (softmax output, shape `(n, num_classes)`) used for
+    AUROC — see `compute_auroc`.
+
+    `use_wandb=True` additionally adds a `{prefix}/roc_curve` entry holding a
+    `wandb.plot.roc_curve` object (one curve per class, one-vs-rest) — pass the
+    resulting dict straight to `wandb.log(...)` as callers already do for the
+    rest of these metrics. Only import wandb when actually requested, since
+    this module is also used in environments without wandb installed."""
     label_names   = [idx_to_label[i] for i in range(num_classes)]
     present       = sorted(set(labels.tolist()) | set(preds.tolist()))
     present_names = [label_names[i] for i in present]
@@ -117,6 +139,7 @@ def report_eval(
     wprec, wrec, _, _ = precision_recall_fscore_support(
         labels, preds, average="weighted", zero_division=0
     )
+    auroc = compute_auroc(labels, probs, num_classes)
 
     print("\n" + "=" * 60)
     print(f"{name} RESULTS")
@@ -124,6 +147,7 @@ def report_eval(
     print(f"Loss: {loss:.4f}  |  Accuracy: {acc:.3f}")
     print(f"Balanced accuracy: {bal:.3f}")
     print(f"Macro F1: {f1m:.3f}")
+    print(f"AUROC: {auroc:.3f}")
     print(f"Weighted Precision: {wprec:.3f}  |  Weighted Recall: {wrec:.3f}")
     print()
     print(classification_report(
@@ -150,9 +174,40 @@ def report_eval(
         f"{prefix}/precision_weighted": wprec,
         f"{prefix}/recall_weighted":    wrec,
         f"{prefix}/f1_macro":           f1m,
+        f"{prefix}/auroc":              auroc,
     }
     for i, nm in enumerate(present_names):
         metrics[f"{prefix}/precision_{nm}"] = pc_prec[i]
         metrics[f"{prefix}/recall_{nm}"]    = pc_rec[i]
         metrics[f"{prefix}/f1_{nm}"]        = pc_f1[i]
+
+    if use_wandb:
+        import wandb
+        # label_names (not present_names): probs has one column per class
+        # regardless of which classes actually occur in this labels/preds pair.
+        metrics[f"{prefix}/roc_curve"] = wandb.plot.roc_curve(
+            labels, probs, labels=label_names)
     return metrics
+
+
+def safe_wandb_log(metrics: dict) -> None:
+    """`wandb.log(metrics)`, tolerating a known wandb race in artifact-type
+    resolution that can raise instead of logging the first time a process
+    uploads a wandb Table/Artifact — which is exactly what a `{prefix}/roc_curve`
+    chart from `report_eval(..., use_wandb=True)` is (wandb's generated GQL model
+    construction intermittently trips over `inspect.getmodule` under thread
+    contention from wandb's own background service thread; happens more reliably
+    under a real training job's DataLoader/CUDA thread load than in a bare
+    script). Losing the chart is a shame; losing an in-progress multi-hour,
+    multi-fold CV run over it is not acceptable, so on failure this retries with
+    every non-scalar entry (the chart) dropped, keeping the real metrics."""
+    import wandb
+    try:
+        wandb.log(metrics)
+    except Exception as e:
+        scalars = {k: v for k, v in metrics.items()
+                   if isinstance(v, (int, float, np.integer, np.floating))}
+        dropped = sorted(set(metrics) - set(scalars))
+        print(f"wandb.log failed ({e!r}); retrying without non-scalar entries {dropped}.")
+        if scalars:
+            wandb.log(scalars)

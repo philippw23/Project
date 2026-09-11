@@ -133,7 +133,7 @@ def main(cli: argparse.Namespace) -> dict:
         beta=args.cb_beta, device=device)
     criterion = build_classification_loss(args, label_counts, num_classes, class_weights, device)
 
-    def _score(samples: list[dict]) -> tuple[float, np.ndarray, np.ndarray]:
+    def _score(samples: list[dict]) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
         raw, n = build_downstream_loader(
             samples, age_mean, age_std, preprocess_val, args.use_mask,
             args.batch_size, label_to_idx, device)
@@ -141,20 +141,20 @@ def main(cli: argparse.Namespace) -> dict:
         emb, age, sex, lbl = extract_embeddings(encoder, raw, device)
         loader = DataLoader(EmbeddingDataset(emb, age, sex, lbl),
                             batch_size=args.batch_size, shuffle=False)
-        loss, _, preds, labels = evaluate(head, loader, criterion, device)
-        return loss, preds, labels
+        loss, _, preds, labels, probs = evaluate(head, loader, criterion, device)
+        return loss, preds, labels, probs
 
     results: dict = {}
     print("Scoring internal test...")
-    test_loss, test_preds, test_labels = _score(splits["test"])
+    test_loss, test_preds, test_labels, test_probs = _score(splits["test"])
     results.update(report_eval("TEST", test_preds, test_labels, test_loss,
-                               idx_to_label, num_classes, prefix="test"))
+                               idx_to_label, num_classes, prefix="test", probs=test_probs))
 
     if args.btxrd_manifest:
         print(f"Scoring BTXRD from {args.btxrd_manifest}...")
-        btxrd_loss, btxrd_preds, btxrd_labels = _score(load_btxrd_samples(args.btxrd_manifest))
+        btxrd_loss, btxrd_preds, btxrd_labels, btxrd_probs = _score(load_btxrd_samples(args.btxrd_manifest))
         results.update(report_eval("BTXRD (external)", btxrd_preds, btxrd_labels, btxrd_loss,
-                                   idx_to_label, num_classes, prefix="btxrd"))
+                                   idx_to_label, num_classes, prefix="btxrd", probs=btxrd_probs))
     return results
 
 

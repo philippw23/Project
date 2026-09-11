@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=72:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_downstream_cv_full.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/chexfound/slurm-%j_chexfound_downstream_cv_3class_frozen.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -29,14 +29,12 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 IMAGE_SIZE=512   # 512 = native CheXFound | 224 = BiomedCLIP-equivalent resolution
 USE_MASK=true
 
-# CV-mode continued-pretraining checkpoints (from run_chexfound_pretrain_cv.sh),
-# one fold<N>/{split.json,checkpoint_last.pth} per fold. FROZEN=false tells the
-# orchestrator to pick up each fold's own checkpoint next to its split file.
-CV_DIR=$home_dir/Project/results/chexfound_pretrain_sweep/full_cv
-PATTERN="fold*/split.json"
-CHECKPOINT_FILENAME=checkpoint_last.pth
-FROZEN=false
-
+# Frozen original CheXFound weights (no continued pretraining) — no per-fold
+# checkpoint to look up, so --cv_dir points straight at the raw fold split pool.
+CHEXFOUND_WEIGHTS=$home_dir/Project/src/chexfound/data/teacher_checkpoint.pth
+CV_DIR=$home_dir/Project/data/internal_dataset/cv
+PATTERN="split_fold*.json"
+FROZEN=true
 # 3-class ("full") CV — no BTXRD comparison (BTXRD is binary-labeled only).
 BINARY=false
 
@@ -59,12 +57,13 @@ EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Note: --splits, --eval_test and --run_name are managed per fold by the
-# orchestrator; --checkpoint is only reserved (i.e. must not be passed here)
-# when not --frozen — the orchestrator injects it per fold from CHECKPOINT_FILENAME.
+# orchestrator; --checkpoint is passed explicitly below since --frozen leaves
+# it unreserved (no per-fold checkpoint for the orchestrator to inject).
 python $home_dir/Project/src/downstream_cv.py \
     --baseline               chexfound \
     $( [ "$FROZEN" = "true" ] && echo "--frozen" ) \
-    --checkpoint_filename     $CHECKPOINT_FILENAME \
+    --checkpoint              none \
+    --chexfound_weights       $CHEXFOUND_WEIGHTS \
     --image_size              $IMAGE_SIZE \
     --cv_dir                  $CV_DIR \
     --pattern                 "$PATTERN" \

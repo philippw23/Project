@@ -12,7 +12,7 @@
 #        wandb sweep src/biomedclip/eval/sweep_downstream.yaml
 #   2. Set SWEEP_ID below and submit:
 #        sbatch run_sweep_downstream.sh
-SWEEP_ID="philipp-wiese/gloria-downstream/z848hefb"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
+SWEEP_ID="philipp-wiese/biomedclip-img-text-downstream/bih1l5cn"   # e.g. "philipp-wiese/philipp-wiese/abc12345"
 
 if [ -z "$SWEEP_ID" ]; then
     echo "ERROR: Set SWEEP_ID in this script before submitting."

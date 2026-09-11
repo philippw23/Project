@@ -2,43 +2,36 @@ program: src/biomedclip_img_text_downstream.py
 project: biomedclip-img-text-downstream
 entity: philipp-wiese
 method: bayes
-run_cap: 60
+run_cap: 30
 metric:
-  name: val/loss
-  goal: minimize
+  name: val/balanced_acc
+  goal: maximize
 
 parameters:
   lr:
     distribution: log_uniform_values
     min: 3e-6
-    max: 5e-4
+    max: 5e-5
   dropout:
-    distribution: uniform
-    min: 0.15
-    max: 0.275
+    values: [0.1, 0.15, 0.2, 0.25]
   weight_decay:
     distribution: log_uniform_values
     min: 0.01
     max: 0.30
   hidden_dims:
     values:
-      - [128, 64]
       - [256, 128]
       - [512, 256]
   batch_size:
-    values: [16, 32, 64]
+    values: [16, 32]
   loss:
-    values: [focal, cb_focal]
+    value: focal
   class_weighting:
     values: [inverse, effective] 
   focal_gamma:
     distribution: uniform
-    min: 2.7
+    min: 2.5
     max: 3.2
-  cb_beta:
-    distribution: uniform
-    min: 0.99
-    max: 0.999
 
 command:
   - ${env}
@@ -52,7 +45,8 @@ command:
   - --splits
   - data/internal_dataset/split_final.json
   - --use_mask
-  - --freezed_biomedclip
+  - --checkpoint
+  - results/biomedclip_pretrain/run_bs128_unfreeze2_20260828_114112/best_r1_checkpoint.pt
   - --out_dir
   - results
   - --head
