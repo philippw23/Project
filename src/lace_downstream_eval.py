@@ -29,8 +29,7 @@ from biomedclip.data.datasets import (IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES,
                                        NUM_CLASSES_BINARY)
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.utils.downstream_eval import report_eval
-from LACE.train.downstream import (build_v1_model, build_v2_model,
-                                    extract_v1_embeddings, extract_v2_representations,
+from LACE.train.downstream import (build_v2_model, extract_v2_representations,
                                     evaluate, _precompute_repr_loader)
 
 
@@ -97,14 +96,9 @@ def main(cli: argparse.Namespace) -> dict:
         label_to_idx, idx_to_label, num_classes = LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES
 
     # ── Backbone + head architecture, then load the trained head weights ──────
-    if args.version == "v1":
-        vit, mlp, _, preprocess_val = build_v1_model(args, device, num_classes)
-        trainable_model = mlp
-        extractor = lambda ldr: extract_v1_embeddings(vit, ldr, device)
-    else:
-        classifier, head_wrapper, _, preprocess_val = build_v2_model(args, device, num_classes)
-        trainable_model = head_wrapper
-        extractor = lambda ldr: extract_v2_representations(classifier, ldr, device)
+    classifier, head_wrapper, _, preprocess_val = build_v2_model(args, device, num_classes)
+    trainable_model = head_wrapper
+    extractor = lambda ldr: extract_v2_representations(classifier, ldr, device)
 
     trainable_model.load_state_dict(head_ckpt["model_state_dict"])
     print(f"Loaded head checkpoint {cli.head_checkpoint} "

@@ -15,9 +15,9 @@ src/
 │   ├── eval/                 #   kNN probe, retrieval metrics
 │   ├── loss/                 #   L_ITA, L_sim, L_ortho, L_dice, L_evid_p, L_rec
 │   ├── models/                #   SharedViT, text encoder, LoRA, mask decoder, prototypes
-│   ├── train/                #   pretrain.py (v1), pretrain_v2.py, downstream.py, sweep YAMLs
-│   └── ARCHITECTURE.md       #   Design writeup (v1 objective, model, losses)
-├── lace_pretrain.py / lace_pretrain_v2.py     # Entry points
+│   ├── train/                #   pretrain_v2.py, downstream.py, sweep YAMLs
+│   └── ARCHITECTURE.md       #   Design writeup (objective, model, losses)
+├── lace_pretrain_v2.py                        # Entry point
 ├── lace_downstream.py                         # Downstream head training
 ├── lace_downstream_eval.py                    # Score a saved head, no training
 ├── lace_img_text_downstream.py                # Downstream variant that also fuses text embeddings
@@ -127,7 +127,7 @@ Divides the existing `train` split into 8 stratified, patient-grouped parts and 
 Every approach fine-tunes an image encoder via a self-/weakly-supervised objective on (image, report) pairs or images alone, then freezes it for the downstream classifier.
 
 ```bash
-# LACE (novel curriculum approach) — v1 or v2
+# LACE (novel curriculum approach)
 sbatch sbatch/lace/run_lace_pretrain_v2.sh
 
 # BiomedCLIP contrastive (LoRA) pretraining

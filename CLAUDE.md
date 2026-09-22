@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Bone-tumor malignancy classification research project using domain-adapted vision-language models. The pipeline adapts BiomedCLIP (ViT-B/16 + PubMedBERT) to a private internal bone-tumor X-ray dataset via contrastive pretraining, then trains a downstream malignancy classifier (3-class: benign/intermediate/malignant, with a `--binary` benign/malignant mode used against the external BTXRD test set).
 
-Baselines implemented: **BiomedCLIP** contrastive pretraining (optionally with a GLoRIA-style local loss added, `biomedclip_gloria`), **CheXFound** (DINO+iBOT), **GLoRIA**, and an **ImageNet-pretrained** frozen linear probe — alongside **LACE** (Lesion-Aligned Contrastive Embedding), the novel curriculum-learning approach developed in this project. LACE has two iterations: v1 (all losses active from epoch 1) and v2 (configurable 2-stage curriculum with a mask decoder and prototype/evidential losses); see [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md).
+Baselines implemented: **BiomedCLIP** contrastive pretraining (optionally with a GLoRIA-style local loss added, `biomedclip_gloria`), **CheXFound** (DINO+iBOT), **GLoRIA**, and an **ImageNet-pretrained** frozen linear probe — alongside **LACE** (Lesion-Aligned Contrastive Embedding), the novel curriculum-learning approach developed in this project. LACE runs a configurable 2-stage curriculum with a mask decoder and prototype/evidential losses; see [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md). (An earlier v1 design — all losses active from epoch 1, no mask decoder — has been retired; see git history if needed.)
 
 ## Running Experiments
 
@@ -18,7 +18,7 @@ sbatch sbatch/biomedclip/run_biomedclip_pretrain.sh
 sbatch sbatch/biomedclip/run_biomedclip_downstream.sh
 sbatch sbatch/biomedclip/run_biomedclip_downstream_eval.sh   # score a saved head, no training
 
-# LACE curriculum pretraining (v1 or v2) / downstream / CV / eval
+# LACE curriculum pretraining / downstream / CV / eval
 sbatch sbatch/lace/run_lace_pretrain_v2.sh
 sbatch sbatch/lace/run_lace_downstream_v2.sh
 sbatch sbatch/lace/run_lace_downstream_cv.sh                 # 10-fold CV incl. BTXRD test
@@ -99,11 +99,13 @@ Note: several dated/backup variants of the dataset JSON and split/report files l
 
 ### LACE (curriculum learning)
 
-- **v1** — [src/LACE/train/pretrain.py](src/LACE/train/pretrain.py): all three losses active from epoch 1, fixed or learned log-scale weights.
+[src/LACE/train/pretrain_v2.py](src/LACE/train/pretrain_v2.py): a `MaskTokenDecoder` (lesion segmentation, `L_dice`) plus a fully configurable 2-stage curriculum (`--loss_stages`, e.g. `ita:2 sim:none`) — by default stage 1 warms up the mask decoder (`dice + ortho`), stage 2 adds everything:
   1. **L_ITA** — global image-text alignment with soft phrase-phrase targets
-  2. **L_sim** — local lesion-phrase alignment via attention pooling over a tight, lesion-centred crop
+  2. **L_sim** — local lesion-phrase alignment via attention pooling over the lesion-centred crop
   3. **L_ortho** — orthogonality regularization on the BTXRD dataset
-- **v2** — [src/LACE/train/pretrain_v2.py](src/LACE/train/pretrain_v2.py): adds a `MaskTokenDecoder` (lesion segmentation, `L_dice`), with a fully configurable 2-stage curriculum (`--loss_stages`, e.g. `ita:2 sim:none`) — by default stage 1 warms up the mask decoder (`dice + ortho`), stage 2 adds everything.
+  4. **L_dice** — mask decoder segmentation loss
+
+(An earlier v1 design — `train/pretrain.py`, all losses active from epoch 1, no mask decoder or curriculum — has been retired.)
 
 Encoders in [src/LACE/models/encoders.py](src/LACE/models/encoders.py): `SharedViT`, `BiomedCLIPTextEncoder`, `ProjectionHead`. Downstream heads/training in [src/LACE/train/downstream.py](src/LACE/train/downstream.py) and [src/LACE/models/downstream.py](src/LACE/models/downstream.py); k-fold CV orchestration (internal folds + frozen BTXRD test) in `src/downstream_cv.py`. Design docs: [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md), [src/LACE/CV_EVAL_PLAN.md](src/LACE/CV_EVAL_PLAN.md).
 

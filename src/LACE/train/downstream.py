@@ -1,20 +1,12 @@
-"""LACE downstream malignancy classification (v1 and v2).
+"""LACE downstream malignancy classification.
 
---version v1: Frozen SharedViT CLS token (768-dim, L2-normalised) → MalignancyMLP
---version v2: Frozen SharedViT + MaskTokenModule → LACEv2Classifier head
+Frozen SharedViT + MaskTokenDecoder → LACEv2Classifier head.
 
 Splits are loaded from a splits.json produced during LACE pretraining; age and sex
 are read directly from the split samples (no separate Excel lookup required).
 
-Usage (v1):
+Usage:
     python src/lace_downstream.py \\
-        --version v1 \\
-        --checkpoint results/lace_pretrain/.../best_checkpoint.pt \\
-        --splits    results/lace_pretrain/.../splits.json
-
-Usage (v2):
-    python src/lace_downstream.py \\
-        --version v2 \\
         --checkpoint results/lace_v2_pretrain/.../best_checkpoint.pt \\
         --splits    results/lace_v2_pretrain/.../splits.json
 """
@@ -44,7 +36,6 @@ from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
                                        IDX_TO_LABEL_BINARY, LABEL_TO_IDX_BINARY, NUM_CLASSES_BINARY)
 from biomedclip.data.transforms import build_preprocess_val
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
-from biomedclip.models.classifier import LinearHead, MalignancyMLP
 from biomedclip.utils.downstream_eval import require_binary_for_btxrd, report_eval, compute_auroc, safe_wandb_log
 from biomedclip.utils.misc import DEFAULT_OUT_DIR
 from LACE.data.transforms import build_train_transform_lace
@@ -110,36 +101,6 @@ def _load_vit(checkpoint: dict, device: torch.device) -> SharedViT:
     return vit.to(device)
 
 
-def build_v1_model(
-    args: argparse.Namespace,
-    device: torch.device,
-    num_classes: int = NUM_CLASSES,
-) -> tuple[SharedViT, MalignancyMLP, object, object]:
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    vit  = _load_vit(ckpt, device)
-    vit.eval()
-
-    preprocess_val   = build_preprocess_val(vit.preprocess_val, getattr(args, "image_size", 224))
-    preprocess_train = build_train_transform_lace(preprocess_val)
-
-    if args.head == "linear":
-        mlp = LinearHead(embed_dim=768, num_classes=num_classes).to(device)
-    elif args.head == "mlp_no_meta":
-        mlp = MalignancyMLP(
-            embed_dim=768, hidden_dims=args.hidden_dims,
-            dropout=args.dropout, use_meta=False, num_classes=num_classes,
-        ).to(device)
-    else:
-        mlp = MalignancyMLP(
-            embed_dim=768, hidden_dims=args.hidden_dims,
-            dropout=args.dropout, meta_embed_dim=args.meta_embed_dim,
-            num_classes=num_classes,
-        ).to(device)
-
-    print(f"Loaded v1 checkpoint (epoch {ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', float('nan')):.4f})")
-    return vit, mlp, preprocess_train, preprocess_val
-
-
 def build_v2_model(
     args: argparse.Namespace,
     device: torch.device,
@@ -192,24 +153,6 @@ def build_v2_model(
 
 
 # ── Representation extraction ─────────────────────────────────────────────────
-
-@torch.no_grad()
-def extract_v1_embeddings(
-    vit: SharedViT,
-    loader: DataLoader,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Extract L2-normalised 768-dim CLS features for the frozen v1 ViT."""
-    vit.eval()
-    all_emb, all_age, all_sex, all_lbl = [], [], [], []
-    for batch in loader:
-        cls_feat, _ = vit.forward_all(batch["image"].to(device))  # [B, 768]
-        all_emb.append(F.normalize(cls_feat, dim=-1).cpu())
-        all_age.append(batch["age"])
-        all_sex.append(batch["sex"])
-        all_lbl.append(batch["label"])
-    return torch.cat(all_emb), torch.cat(all_age), torch.cat(all_sex), torch.cat(all_lbl)
-
 
 @torch.no_grad()
 def extract_v2_representations(
@@ -266,36 +209,6 @@ def _precompute_repr_loader(
 
 
 # ── Training / evaluation ─────────────────────────────────────────────────────
-
-def train_one_epoch_v1(
-    mlp: MalignancyMLP,
-    vit: SharedViT,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
-) -> float:
-    mlp.train()
-    vit.eval()
-    total_loss = 0.0
-    for batch in loader:
-        images = batch["image"].to(device)
-        age    = batch["age"].to(device)
-        sex    = batch["sex"].to(device)
-        lbl    = batch["label"].to(device)
-
-        with torch.no_grad():
-            cls_feat, _ = vit.forward_all(images)
-            cls_feat    = F.normalize(cls_feat, dim=-1)
-
-        optimizer.zero_grad()
-        loss = criterion(mlp(cls_feat, age, sex), lbl)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-
-    return total_loss / len(loader)
-
 
 def train_one_epoch_v2(
     classifier: LACEv2Classifier,
@@ -397,12 +310,8 @@ def main(args: argparse.Namespace) -> dict:
         num_classes  = NUM_CLASSES
 
     # ── Build model ───────────────────────────────────────────────────────────
-    if args.version == "v1":
-        vit, mlp, preprocess_train, preprocess_val = build_v1_model(args, device, num_classes)
-        trainable_model = mlp
-    else:
-        classifier, head_wrapper, preprocess_train, preprocess_val = build_v2_model(args, device, num_classes)
-        trainable_model = head_wrapper
+    classifier, head_wrapper, preprocess_train, preprocess_val = build_v2_model(args, device, num_classes)
+    trainable_model = head_wrapper
 
     # ── Load splits ───────────────────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
@@ -427,11 +336,8 @@ def main(args: argparse.Namespace) -> dict:
     train_loader    = DataLoader(train_ds, shuffle=True,  **loader_kwargs)
     val_loader_raw  = DataLoader(val_ds,   shuffle=False, **loader_kwargs)
 
-    # extractor closure over the frozen backbone (v1 ViT CLS or v2 classifier)
-    if args.version == "v1":
-        extractor = lambda ldr: extract_v1_embeddings(vit, ldr, device)
-    else:
-        extractor = lambda ldr: extract_v2_representations(classifier, ldr, device)
+    # extractor closure over the frozen backbone
+    extractor = lambda ldr: extract_v2_representations(classifier, ldr, device)
 
     # ── Pre-compute val (always) + test/BTXRD (only when requested) reprs ──────
     print("Pre-computing val representations...")
@@ -497,10 +403,7 @@ def main(args: argparse.Namespace) -> dict:
           f"(patience={args.patience}, monitor={args.early_stopping_metric})\n")
 
     for epoch in range(1, args.epochs + 1):
-        if args.version == "v1":
-            train_loss = train_one_epoch_v1(mlp, vit, train_loader, optimizer, criterion, device)
-        else:
-            train_loss = train_one_epoch_v2(classifier, train_loader, optimizer, criterion, device)
+        train_loss = train_one_epoch_v2(classifier, train_loader, optimizer, criterion, device)
 
         val_loss, val_acc, val_preds, val_labels, val_probs = evaluate(trainable_model, val_loader, criterion, device)
         val_bal_acc       = balanced_accuracy_score(val_labels, val_preds)
@@ -623,11 +526,11 @@ def main(args: argparse.Namespace) -> dict:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="LACE downstream malignancy classification (v1 and v2)."
+        description="LACE downstream malignancy classification."
     )
 
-    parser.add_argument("--version",    required=True, choices=["v1", "v2"],
-                        help="LACE version: v1 uses ViT CLS token, v2 uses MaskTokenDecoder.")
+    parser.add_argument("--version",    default="v2", choices=["v2"],
+                        help="LACE version (v1 was retired; only v2 remains).")
     parser.add_argument("--downstream_visual_mode", default="cls_fg",
                         choices=["cls", "fg", "cls_fg"],
                         help="v2 visual representation: cls [B,512], fg [B,512], cls_fg [B,1024].")
@@ -649,10 +552,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--batch_size",     type=int,   default=64)
     parser.add_argument("--lr",             type=float, default=1e-3)
     parser.add_argument("--dropout",        type=float, default=0.3,
-                        help="Dropout for the v1 MalignancyMLP.")
+                        help="Unused: LACEv2Classifier's head has a fixed 0.1 dropout, "
+                             "not wired to this flag. Kept for CLI compatibility.")
     parser.add_argument("--meta_embed_dim", type=int,   default=32)
     parser.add_argument("--hidden_dims",    type=str,   nargs="+", default=[256, 128],
-                        help="Hidden layer widths for the v1 MLP.")
+                        help="Unused: LACEv2Classifier's head has a fixed [256] hidden layer, "
+                             "not wired to this flag. Kept for CLI compatibility.")
     parser.add_argument("--weight_decay",   type=float, default=0.01)
     parser.add_argument("--head", default="mlp",
                         choices=["linear", "mlp", "mlp_no_meta"],

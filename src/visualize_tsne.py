@@ -1,6 +1,6 @@
 """t-SNE embedding visualization for bone-tumor malignancy classification.
 
-Supports BiomedCLIP, CheXFound, LACE (v1/v2), and ImageNet baseline encoders.
+Supports BiomedCLIP, CheXFound, LACE (v2), and ImageNet baseline encoders.
 
 Usage examples:
     # BiomedCLIP checkpoint
@@ -28,13 +28,6 @@ Usage examples:
         --checkpoint results/chexfound_pretrain/.../best.pt \\
         --chexfound_config src/chexfound/configs/vit_large.yaml \\
         --splits data/internal_dataset/split.json
-
-    # LACE v1
-    python src/visualize_tsne.py \\
-        --encoder_type lace \\
-        --version v1 \\
-        --checkpoint results/lace_pretrain/.../best.pt \\
-        --splits results/lace_pretrain/.../splits.json
 
     # LACE v2
     python src/visualize_tsne.py \\
@@ -134,7 +127,8 @@ def load_chexfound_encoder(args, device):
 
 def load_lace_encoder(args, device):
     from LACE.models.encoders import SharedViT
-    from LACE.models.mask_tokens import MaskTokenModule
+    from LACE.models.mask_tokens import MaskTokenDecoder, MaskPredictionHead
+    from LACE.models.downstream import LACEv2Classifier
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     lora_cfg = ckpt.get("lora_config", {})
@@ -148,23 +142,29 @@ def load_lace_encoder(args, device):
         embed_dim=lora_cfg.get("embed_dim", 512),
     )
     vit.load_state_dict(ckpt["vit_state"])
-    for p in vit.parameters():
-        p.requires_grad_(False)
     vit = vit.to(device)
-    vit.eval()
 
-    mask_module = None
-    if args.version == "v2":
-        n_mask_tokens = ckpt.get("n_mask_tokens", 16)
-        mask_module = MaskTokenModule(n_tokens=n_mask_tokens)
-        mask_module.load_state_dict(ckpt["mask_module_state"])
-        for p in mask_module.parameters():
-            p.requires_grad_(False)
-        mask_module = mask_module.to(device)
-        mask_module.eval()
+    mask_decoder = MaskTokenDecoder(
+        n_tokens=ckpt.get("n_mask_tokens", 4),
+        n_heads=ckpt.get("n_mask_heads", 8),
+        sigma=ckpt.get("gauss_sigma", 1.5),
+    )
+    mask_decoder.load_state_dict(ckpt["mask_decoder_state"])
+    mask_decoder = mask_decoder.to(device)
 
-    print(f"Loaded LACE {args.version} checkpoint: {args.checkpoint}")
-    return vit, mask_module, vit.preprocess_val
+    mask_head = MaskPredictionHead()
+    mask_head.load_state_dict(ckpt["mask_head_state"])
+    mask_head = mask_head.to(device)
+
+    # use_meta/n_classes/linear_head only shape the (unused-here) classification
+    # head; only _get_visual() is called, so their values don't matter.
+    classifier = LACEv2Classifier(
+        vit=vit, mask_decoder=mask_decoder, mask_head=mask_head, use_meta=False,
+    ).to(device)
+    classifier.eval()
+
+    print(f"Loaded LACE v2 checkpoint: {args.checkpoint}")
+    return classifier, vit.preprocess_val
 
 
 def load_imagenet_encoder(device):
@@ -207,18 +207,12 @@ def extract_chexfound_embeddings(encoder, loader, device):
 
 
 @torch.no_grad()
-def extract_lace_embeddings(vit, mask_module, loader, device, version):
+def extract_lace_embeddings(classifier, loader, device):
     all_emb, all_lbl = [], []
     for batch in loader:
         images = batch["image"].to(device)
-        if version == "v1":
-            cls, _ = vit.forward_all(images)            # [B, 768]
-            emb = F.normalize(cls, dim=-1)
-        else:
-            _, patch_feat = vit.forward_all(images)     # [B, 196, 768]
-            _, _, mask_feats = mask_module(patch_feat)  # [B, N, 768]
-            emb = F.normalize(mask_feats.mean(dim=1), dim=-1)
-        all_emb.append(emb.cpu())
+        emb = classifier._get_visual(images)  # [B, 512] or [B, 1024] per visual_mode
+        all_emb.append(F.normalize(emb, dim=-1).cpu())
         all_lbl.append(batch["label"])
     return torch.cat(all_emb).numpy(), torch.cat(all_lbl).numpy()
 
@@ -310,8 +304,8 @@ def parse_args():
                    help="Path to CheXFound model config YAML (required for chexfound encoder)")
     p.add_argument("--chexfound_weights", default=None,
                    help="Path to original CheXFound .pth weights (required when --checkpoint none)")
-    p.add_argument("--version", default="v1", choices=["v1", "v2"],
-                   help="LACE version (default: v1)")
+    p.add_argument("--version", default="v2", choices=["v2"],
+                   help="LACE version (v1 was retired; only v2 remains).")
     return p.parse_args()
 
 
@@ -321,13 +315,12 @@ def main():
     print(f"Device: {device} | encoder: {args.encoder_type} | split: {args.split}")
 
     # ── Load encoder ──────────────────────────────────────────────────────────
-    mask_module = None
     if args.encoder_type == "biomedclip":
         encoder, preprocess = load_biomedclip_encoder(args, device)
     elif args.encoder_type == "chexfound":
         encoder, preprocess = load_chexfound_encoder(args, device)
     elif args.encoder_type == "lace":
-        encoder, mask_module, preprocess = load_lace_encoder(args, device)
+        encoder, preprocess = load_lace_encoder(args, device)
     else:  # imagenet
         encoder, preprocess = load_imagenet_encoder(device)
 
@@ -345,7 +338,7 @@ def main():
     elif args.encoder_type == "chexfound":
         emb, labels = extract_chexfound_embeddings(encoder, loader, device)
     elif args.encoder_type == "lace":
-        emb, labels = extract_lace_embeddings(encoder, mask_module, loader, device, args.version)
+        emb, labels = extract_lace_embeddings(encoder, loader, device)
     else:  # imagenet
         emb, labels = extract_imagenet_embeddings(encoder, loader, device)
     print(f"Embeddings shape: {emb.shape}")
