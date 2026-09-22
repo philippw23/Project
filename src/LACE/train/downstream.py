@@ -140,6 +140,8 @@ def build_v2_model(
         linear_head=linear_head,
         visual_mode=visual_mode,
         sim_attn_tau=sim_attn_tau,
+        hidden_dims=args.hidden_dims,
+        dropout=args.dropout,
     ).to(device)
 
     head_wrapper = _V2HeadWrapper(classifier)
@@ -552,12 +554,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--batch_size",     type=int,   default=64)
     parser.add_argument("--lr",             type=float, default=1e-3)
     parser.add_argument("--dropout",        type=float, default=0.3,
-                        help="Unused: LACEv2Classifier's head has a fixed 0.1 dropout, "
-                             "not wired to this flag. Kept for CLI compatibility.")
+                        help="Dropout applied after each hidden layer of the MLP head "
+                             "(mlp/mlp_no_meta only; matches MalignancyMLP elsewhere).")
     parser.add_argument("--meta_embed_dim", type=int,   default=32)
     parser.add_argument("--hidden_dims",    type=str,   nargs="+", default=[256, 128],
-                        help="Unused: LACEv2Classifier's head has a fixed [256] hidden layer, "
-                             "not wired to this flag. Kept for CLI compatibility.")
+                        help="Hidden layer widths for the MLP head (mlp/mlp_no_meta only; "
+                             "matches MalignancyMLP elsewhere).")
     parser.add_argument("--weight_decay",   type=float, default=0.01)
     parser.add_argument("--head", default="mlp",
                         choices=["linear", "mlp", "mlp_no_meta"],

@@ -35,6 +35,8 @@ class LACEv2Classifier(nn.Module):
         linear_head: bool = False,
         visual_mode: str = "cls_fg",   # "cls" | "fg" | "cls_fg"
         sim_attn_tau: float = 0.07,
+        hidden_dims: list[int] | None = None,
+        dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.vit          = vit
@@ -65,13 +67,23 @@ class LACEv2Classifier(nn.Module):
         if linear_head:
             self.head = nn.Linear(feat_dim, n_classes)
         else:
-            self.head = nn.Sequential(
-                nn.LayerNorm(feat_dim),
-                nn.Linear(feat_dim, 256),
-                nn.GELU(),
-                nn.Dropout(0.1),
-                nn.Linear(256, n_classes),
-            )
+            # Previous fixed head (LayerNorm + single 256-unit GELU block):
+            # self.head = nn.Sequential(
+            #     nn.LayerNorm(feat_dim),
+            #     nn.Linear(feat_dim, 256),
+            #     nn.GELU(),
+            #     nn.Dropout(0.1),
+            #     nn.Linear(256, n_classes),
+            # )
+            # Now matches MalignancyMLP (biomedclip/chexfound/gloria/imagenet_img):
+            # a configurable stack of Linear -> ReLU -> Dropout per hidden_dims.
+            layers: list[nn.Module] = []
+            in_dim = feat_dim
+            for h in (hidden_dims or [256]):
+                layers += [nn.Linear(in_dim, h), nn.ReLU(), nn.Dropout(dropout)]
+                in_dim = h
+            layers.append(nn.Linear(in_dim, n_classes))
+            self.head = nn.Sequential(*layers)
 
     def _get_visual(self, images: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():

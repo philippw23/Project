@@ -19,7 +19,7 @@ CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside
 SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json  # ignored when CV_DIR is set
 
 # ── Image encoder ─────────────────────────────────────────────────────────────
-IMAGE_ENCODER=biomedclip   # biomedclip | chexfound
+IMAGE_ENCODER=biomedclip   # biomedclip only (chexfound backbone retired)
 
 # ── Architecture ──────────────────────────────────────────────────────────────
 LORA_LAYERS=6

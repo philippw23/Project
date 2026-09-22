@@ -22,13 +22,14 @@ parameters:
 
   hidden_dims:
     values:
+      - [256]
       - [128, 64]
       - [256, 128]
       - [512, 256]
 
   dropout:
     distribution: uniform
-    min: 0.15
+    min: 0.1
     max: 0.275
 
   lr:

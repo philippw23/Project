@@ -1,0 +1,85 @@
+program: src/lace_downstream.py
+project: lace-downstream
+entity: philipp-wiese
+method: bayes
+metric:
+  name: val/best_balanced_acc   # statt val/f1_macro, falls du das beste Checkpoint-Modell auswählst
+  goal: maximize
+run_cap: 50
+
+parameters:
+  checkpoint:
+    value: results/lace_v2_pretrain/run_20260915_093313/best_retrieval_checkpoint.pt
+
+  downstream_visual_mode:
+    value: cls
+
+  image_size:
+    value: 224
+
+  batch_size:
+    value: 64
+
+  hidden_dims:
+    values:
+      - [256]
+      - [128, 64]
+      - [256, 128]
+      - [512, 256]
+
+  dropout:
+    distribution: uniform
+    min: 0.1
+    max: 0.275
+
+  lr:
+    distribution: log_uniform_values
+    min: 3e-6
+    max: 5e-5
+
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.30
+
+  focal_gamma:
+    distribution: uniform
+    min: 2.7
+    max: 3.2
+
+  loss:
+    values: ["focal"]
+
+  class_weighting:
+    values: ["none", "sqrt", "inverse"]
+
+  head:
+    value: mlp_no_meta
+  
+  early_stopping_metric:
+    value: val_bal_acc
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --version
+  - v2
+  - --splits
+  - data/internal_dataset/split_binary_final.json
+  - --use_mask
+  - --out_dir
+  - results
+  - --epochs
+  - "200"
+  - --patience
+  - "20"
+  - --seed
+  - "42"
+  - --wandb
+  - --wandb_project
+  - lace-downstream
+  - --wandb_entity
+  - philipp-wiese
+  - --sweep
+  - ${args}

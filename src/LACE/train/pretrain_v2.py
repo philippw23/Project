@@ -56,10 +56,6 @@ from biomedclip.utils.misc import (
     ROOT_DIR,
 )
 
-_CHEXFOUND_DATA = ROOT_DIR / "src" / "chexfound" / "data"
-DEFAULT_CHEXFOUND_CONFIG    = str(_CHEXFOUND_DATA / "config.yaml")
-DEFAULT_CHEXFOUND_WEIGHTS   = str(_CHEXFOUND_DATA / "teacher_checkpoint.pth")
-
 from LACE.data.datasets import BTXRDOrthoDataset, InternalDatasetV2
 from LACE.data.transforms import (
     build_train_transform_lace,
@@ -76,7 +72,7 @@ from LACE.loss.objectives import (
     select_fg_token,
     symmetric_soft_semantic_loss,
 )
-from LACE.models.encoders import BiomedCLIPTextEncoder, CheXFoundSharedViT, SharedViT
+from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
 from LACE.models.mask_tokens import MaskPredictionHead, MaskTokenDecoder
 
 DEFAULT_BTXRD_IMAGES = ROOT_DIR / "data" / "BTXRD" / "images"
@@ -642,14 +638,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # ── Image encoder ─────────────────────────────────────────────────────────
     parser.add_argument("--image_encoder", default="biomedclip",
-                        choices=["biomedclip", "chexfound"],
+                        choices=["biomedclip"],
                         help="Which image encoder backbone to use. "
-                             "'biomedclip' (ViT-B/16, 768-dim) is the default. "
-                             "'chexfound' loads CheXFound ViT-L/16 (1024-dim).")
-    parser.add_argument("--chexfound_config",  default=DEFAULT_CHEXFOUND_CONFIG,
-                        help="Path to the CheXFound model config YAML.")
-    parser.add_argument("--chexfound_weights", default=DEFAULT_CHEXFOUND_WEIGHTS,
-                        help="Path to the original CheXFound teacher checkpoint .pth.")
+                             "'biomedclip' (ViT-B/16, 768-dim) is the only option "
+                             "(the CheXFound backbone option was retired).")
 
     # ── ViT / LoRA ────────────────────────────────────────────────────────────
     parser.add_argument("--lora_layers", type=int,   default=4)
@@ -799,24 +791,12 @@ def main(args: argparse.Namespace) -> None:
             print(f"\n{'#' * 70}\n# FOLD {fold_idx} — {split_path.name}\n{'#' * 70}")
 
         # ── Models ────────────────────────────────────────────────────────────
-        if args.image_encoder == "chexfound":
-            vit = CheXFoundSharedViT(
-                args.chexfound_config, args.chexfound_weights,
-                args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim,
-            )
-            if args.warm_start_projections:
-                print("Note: --warm_start_projections ignored for chexfound "
-                      "(no compatible BiomedCLIP projection to copy).")
-            if args.unfreeze_layers > 0:
-                print("Note: --unfreeze_layers ignored for chexfound "
-                      "(only supported by the biomedclip SharedViT encoder).")
-        else:
-            vit = SharedViT(
-                args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim,
-                unfreeze_layers=args.unfreeze_layers,
-            )
-            if args.warm_start_projections:
-                vit.load_pretrained_projections()
+        vit = SharedViT(
+            args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim,
+            unfreeze_layers=args.unfreeze_layers,
+        )
+        if args.warm_start_projections:
+            vit.load_pretrained_projections()
 
         text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim)
         if args.warm_start_projections:

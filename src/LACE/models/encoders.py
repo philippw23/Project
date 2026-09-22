@@ -48,8 +48,7 @@ def enable_dynamic_img_size(trunk: nn.Module) -> None:
 
     trunk._pos_embed = types.MethodType(_pos_embed_dynamic, trunk)
 
-VIT_DIM            = 768   # BiomedCLIP ViT-B/16
-CHEXFOUND_VIT_DIM  = 1024  # CheXFound  ViT-L/16
+VIT_DIM   = 768   # BiomedCLIP ViT-B/16
 BERT_DIM  = 768
 EMBED_DIM = 512
 
@@ -155,68 +154,6 @@ class SharedViT(nn.Module):
     @property
     def vit_dim(self) -> int:
         return VIT_DIM
-
-
-class CheXFoundSharedViT(nn.Module):
-    """CheXFound ViT-L/16 trunk with LoRA, matching SharedViT's interface.
-
-    Wraps CheXFoundViT and exposes the same three forward modes so it can be
-    used as a drop-in replacement for SharedViT in pretrain_v2.py:
-        forward_all(images)     -> (cls [B,1024], patches [B,196,1024])
-        forward_cls(images)     -> z_img [B,embed_dim]   for L_ITA
-        forward_patches(images) -> patches [B,196,1024]  for L_sim / L_ortho
-
-    _features(images) returns [B, 197, 1024] (CLS at 0, patches at 1:) to match
-    the slicing pattern used by pretrain_v2.py: vit._features(img)[:, 0, :].
-    """
-
-    def __init__(
-        self,
-        config_path: str,
-        weights_path: str,
-        lora_layers: int,
-        r: int,
-        alpha: float,
-        embed_dim: int = EMBED_DIM,
-    ) -> None:
-        super().__init__()
-        from chexfound.models.encoders import CheXFoundViT as _CheXFoundViT
-        from chexfound.data.transforms import build_preprocess_val_chexfound
-
-        self._encoder = _CheXFoundViT(
-            config_path, weights_path, lora_layers, r, alpha, load_pretrained=True
-        )
-        self.preprocess_val = build_preprocess_val_chexfound()
-        self.img_proj   = ProjectionHead(CHEXFOUND_VIT_DIM, embed_dim)
-        self.patch_proj = ProjectionHead(CHEXFOUND_VIT_DIM, embed_dim)
-
-        n_train = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        n_total = sum(p.numel() for p in self.parameters())
-        print(
-            f"CheXFoundSharedViT: LoRA in last {lora_layers} blocks (r={r}, alpha={alpha}) | "
-            f"trainable: {n_train:,} / {n_total:,} ({100 * n_train / n_total:.2f}%)"
-        )
-
-    def _features(self, images: torch.Tensor) -> torch.Tensor:
-        """Return [B, 197, 1024] with CLS at index 0, patches at 1:."""
-        cls, patches = self._encoder._features(images)
-        return torch.cat([cls.unsqueeze(1), patches], dim=1)
-
-    def forward_all(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        cls, patches = self._encoder._features(images)
-        return cls, patches
-
-    def forward_cls(self, images: torch.Tensor) -> torch.Tensor:
-        cls, _ = self._encoder._features(images)
-        return self.img_proj(cls)
-
-    def forward_patches(self, images: torch.Tensor) -> torch.Tensor:
-        _, patches = self._encoder._features(images)
-        return patches
-
-    @property
-    def vit_dim(self) -> int:
-        return CHEXFOUND_VIT_DIM
 
 
 class BiomedCLIPTextEncoder(nn.Module):

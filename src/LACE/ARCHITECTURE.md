@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-LACE v2 adapts an image encoder (BiomedCLIP ViT-B/16 by default, or CheXFound ViT-L/16) to a private internal bone-tumor X-ray dataset via a joint objective with four components, plus a learned `MaskTokenDecoder` that predicts a lesion segmentation mask directly from patch tokens:
+LACE v2 adapts an image encoder (BiomedCLIP ViT-B/16) to a private internal bone-tumor X-ray dataset via a joint objective with four components, plus a learned `MaskTokenDecoder` that predicts a lesion segmentation mask directly from patch tokens:
 
 $$\mathcal{L}_\text{total} = \lambda_\text{ita} \cdot \mathcal{L}_\text{ITA} + \lambda_\text{sim} \cdot \mathcal{L}_\text{sim} + \lambda_\text{ortho} \cdot \mathcal{L}_\text{ortho} + \lambda_\text{dice} \cdot \mathcal{L}_\text{dice}$$
 
@@ -16,17 +16,18 @@ Unlike v1 (all losses active from epoch 1), v2 runs a **configurable 2-stage cur
 
 ## 2. Model Architecture
 
-### 2.1 Visual Encoder — `SharedViT` / `CheXFoundSharedViT`
+### 2.1 Visual Encoder — `SharedViT`
 
 | Component | Detail |
 |-----------|--------|
-| Backbone (`--image_encoder biomedclip`, default) | BiomedCLIP ViT-B/16 trunk (768-dim), frozen base weights |
-| Backbone (`--image_encoder chexfound`) | CheXFound ViT-L/16 trunk (1024-dim) |
+| Backbone (`--image_encoder biomedclip`, only option) | BiomedCLIP ViT-B/16 trunk (768-dim), frozen base weights |
 | Adapter — LoRA (default) | Last `--lora_layers` transformer blocks, rank `--lora_r`, scale `--lora_alpha` |
-| Adapter — full unfreeze | `--unfreeze_layers N` (biomedclip only) fully fine-tunes the last N blocks + final norm instead of LoRA, overriding `--lora_layers` |
+| Adapter — full unfreeze | `--unfreeze_layers N` fully fine-tunes the last N blocks + final norm instead of LoRA, overriding `--lora_layers` |
 | CLS projection (`img_proj`) | Linear vit_dim → `--embed_dim` (512), L2-normalized → global image embedding $z_\text{img}$ |
 | Patch projection (`patch_proj`) | Linear vit_dim → `--embed_dim`, L2-normalized → patch embeddings $\{p_m\}_{m=1}^{196}$ |
-| `--warm_start_projections` | Copies `img_proj`/`patch_proj` weights from BiomedCLIP's pretrained `visual.head.proj` (biomedclip encoder only) |
+| `--warm_start_projections` | Copies `img_proj`/`patch_proj` weights from BiomedCLIP's pretrained `visual.head.proj` |
+
+(An earlier `CheXFoundSharedViT` backbone option — CheXFound ViT-L/16, 1024-dim — has been retired.)
 
 Only **one crop** is computed per sample (unlike v1's separate global + tight crop): `InternalDatasetV2` crops around the lesion mask using `--context_fraction` (`-1.0` = full image, `0.0` = tight bbox, `>0` = bbox + context margin) and `--context_mode` (`image` = margin relative to full image size; `lesion` = margin relative to the lesion bbox, floored by `--min_crop_size`). Images without a mask always fall back to the full (padded-to-square) image. All losses — $\mathcal{L}_\text{ITA}$, $\mathcal{L}_\text{sim}$, $\mathcal{L}_\text{ortho}$, $\mathcal{L}_\text{dice}$ — operate on this single crop's patch grid.
 
@@ -227,7 +228,7 @@ Passing `--cv_dir <folder>` (e.g. `data/internal_dataset/cv_binary`) runs one fu
 
 | Arg | Default | Notes |
 |-----|---------|-------|
-| `--image_encoder` | `biomedclip` | `biomedclip` \| `chexfound` |
+| `--image_encoder` | `biomedclip` | only option (CheXFound backbone retired) |
 | `--lora_layers` / `--lora_r` / `--lora_alpha` | 4 / 8 / 16.0 | Ignored if `--unfreeze_layers > 0` |
 | `--unfreeze_layers` | 0 | biomedclip only; full fine-tune of last N blocks instead of LoRA |
 | `--embed_dim` | 512 | |
@@ -258,7 +259,7 @@ Hyperparameter search: W&B Bayes optimization (`sweep_pretrain_v2.yaml`, `sweep_
 | File | Contents |
 |------|----------|
 | `train/pretrain_v2.py` | Training loop, curriculum/stage logic, loss orchestration, checkpointing, heatmap visualization |
-| `models/encoders.py` | `SharedViT` (biomedclip), `CheXFoundSharedViT`, `BiomedCLIPTextEncoder`, `ProjectionHead` |
+| `models/encoders.py` | `SharedViT`, `BiomedCLIPTextEncoder`, `ProjectionHead` |
 | `models/lora.py` | `inject_lora_vit`, `unfreeze_last_n_vit` |
 | `models/mask_tokens.py` | `MaskTokenDecoder`, `MaskPredictionHead`, `select_fg_token` |
 | `loss/objectives.py` | `symmetric_soft_semantic_loss` ($\mathcal{L}_\text{ITA}$), `gloria_local_loss` ($\mathcal{L}_\text{sim}$), `ortho_loss`, `compute_l_dice_ce` |
