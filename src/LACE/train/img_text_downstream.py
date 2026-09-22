@@ -11,7 +11,7 @@ pathway this baseline depends on has nothing to embed for that dataset. There
 is no --btxrd_manifest flag here (mirrors biomedclip_img_text_downstream.py).
 
 Usage:
-    python src/lace_img_text_downstream.py \\
+    python src/LACE/train/img_text_downstream.py \\
         --checkpoint results/lace_v2_pretrain/.../best_retrieval_checkpoint.pt \\
         --splits     data/internal_dataset/split_binary_final.json \\
         --downstream_visual_mode cls_fg --head mlp_no_meta --binary true

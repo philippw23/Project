@@ -7,7 +7,7 @@ Val and test embeddings are pre-computed once before the training loop.
 Train embeddings are computed each batch because random augmentations differ per epoch.
 
 Usage:
-    python src/imagenet_img_downstream.py \\
+    python src/imagenet_img/train/downstream.py \\
         --splits     data/internal_dataset/split.json \\
         --out_dir    results/imagenet_img \\
         --epochs     100 \\
@@ -437,3 +437,7 @@ def main(args: argparse.Namespace) -> dict:
     print(f"\nBest {args.early_stopping_metric}: {best_metric:.4f}")
     print(f"Checkpoint saved to: {ckpt_path}")
     return eval_metrics
+
+
+if __name__ == "__main__":
+    main(parse_args())

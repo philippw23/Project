@@ -24,6 +24,7 @@ export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PYTHONPATH=$home_dir/Project/src
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 # Reproduction of sweep run: cls_fg / run_20260707_164235 / split_binary.json
@@ -53,7 +54,7 @@ FOCAL_GAMMA=2.7378671997645583
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
 
-python $home_dir/Project/src/lace_downstream.py \
+python $home_dir/Project/src/LACE/train/downstream.py \
     --version                $VERSION \
     --image_size             $IMAGE_SIZE \
     --downstream_visual_mode $VISUAL_MODE \

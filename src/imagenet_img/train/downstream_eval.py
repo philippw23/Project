@@ -3,7 +3,7 @@
 The checkpoint written by `imagenet_img/train/downstream.py` stores its full config
 (`args`), the encoder embed_dim, and the train age-normalization stats:
 
-    python src/imagenet_img_downstream_eval.py \\
+    python src/imagenet_img/train/downstream_eval.py \\
         --head_checkpoint results/imagenet_img/<run>/best_checkpoint.pt \\
         --splits          data/internal_dataset/split_binary.json
 

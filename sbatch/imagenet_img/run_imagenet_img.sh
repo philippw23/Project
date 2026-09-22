@@ -50,7 +50,7 @@ export PYTHONPATH=$home_dir/Project/src
 unset PYTORCH_NVML_BASED_CUDA_CHECK
 echo "Environment: $MY_CONDA_ENV"
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/imagenet_img_downstream.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/imagenet_img/train/downstream.py \
     --head           $HEAD \
     --splits         $SPLITS \
     --out_dir        $home_dir/Project/results/imagenet_img \

@@ -6,7 +6,7 @@ its held-out internal `test` split and the frozen external **BTXRD** manifest.
 Reports mean ± std across folds — the final generalization result.
 
 All downstream hyperparameters are passed straight through to
-`LACE.train.downstream` (same flags as `lace_downstream.py`); this wrapper only
+`LACE.train.downstream` (same flags as `LACE/train/downstream.py`); this wrapper only
 adds the fold loop and the aggregation. `--splits` and `--eval_test` are managed
 per fold and must not be passed here.
 

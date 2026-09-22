@@ -6,7 +6,7 @@ Splits are loaded from a splits.json produced during LACE pretraining; age and s
 are read directly from the split samples (no separate Excel lookup required).
 
 Usage:
-    python src/lace_downstream.py \\
+    python src/LACE/train/downstream.py \\
         --checkpoint results/lace_v2_pretrain/.../best_checkpoint.pt \\
         --splits    results/lace_v2_pretrain/.../splits.json
 """
@@ -458,7 +458,7 @@ def main(args: argparse.Namespace) -> dict:
                 "wandb_id": wandb_id,
                 "model_state_dict": trainable_model.state_dict(),
                 # everything needed to rebuild + evaluate this head standalone
-                # (see lace_downstream_eval.py): architecture/loss hyperparameters,
+                # (see downstream_eval.py): architecture/loss hyperparameters,
                 # the backbone checkpoint path, and the train age-normalization.
                 "args": vars(args),
                 "age_mean": age_mean,
@@ -609,3 +609,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     raw = " ".join(str(x) for x in args.hidden_dims)
     args.hidden_dims = [int(x) for x in raw.strip("[]").replace(",", " ").split()]
     return args
+
+
+if __name__ == "__main__":
+    main(parse_args())

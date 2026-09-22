@@ -5,7 +5,7 @@ The head checkpoint written by `LACE.train.downstream` stores its full config
 train age-normalization stats). So evaluation only needs the head checkpoint and
 which test split to score:
 
-    python src/lace_downstream_eval.py \\
+    python src/LACE/train/downstream_eval.py \\
         --head_checkpoint results/lace_v2_downstream/best_<run_id>.pt \\
         --splits          data/internal_dataset/test/split_binary_backup.json
 
@@ -54,7 +54,7 @@ def _load_config(head_ckpt: dict, cli: argparse.Namespace) -> argparse.Namespace
         raise SystemExit(
             "This head checkpoint has no embedded config (it predates the config-saving "
             "change). Retrain the head with the updated downstream.py, or evaluate it by "
-            "re-running lace_downstream.py with --eval_test and the original flags."
+            "re-running LACE/train/downstream.py with --eval_test and the original flags."
         )
     args = argparse.Namespace(**head_ckpt["args"])
     # evaluation-time overrides
