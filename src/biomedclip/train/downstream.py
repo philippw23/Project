@@ -8,7 +8,7 @@ Head variants (--head):
     mlp_no_meta  — same MLP capacity, no clinical metadata
 
 Usage:
-    python src/biomedclip_downstream.py \\
+    python src/biomedclip/train/downstream.py \\
         --checkpoint results/biomedclip_pretrain/.../best_r1_checkpoint.pt \\
         --splits     results/biomedclip_pretrain/.../splits.json \\
         --excel      data/internal_dataset/metadata.xlsx \\
@@ -319,7 +319,7 @@ def main(args: argparse.Namespace) -> dict:
         if not lora_cfg:
             raise RuntimeError(
                 f"Checkpoint '{args.checkpoint}' has no 'lora_config'. "
-                "Re-run pretraining with the current biomedclip_pretrain.py."
+                "Re-run pretraining with the current pretrain.py."
             )
         if lora_cfg.get("no_lora"):
             print(f"Partial fine-tune checkpoint (unfreeze_blocks={lora_cfg['unfreeze_blocks']}, no LoRA).")

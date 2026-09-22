@@ -24,10 +24,11 @@ echo "Environment activated"
 # Redirect HuggingFace cache to NFS home (compute nodes have no /home)
 export HF_HOME="$home_dir/.cache/huggingface"
 export TRANSFORMERS_CACHE="$home_dir/.cache/huggingface/transformers"
+export PYTHONPATH="$home_dir/Project/src"
 
 # Print BioMedCLIP image and text encoder architectures.
 python_path="$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python"
-"$python_path" "$home_dir/Project/src/biomedclip_pretrain.py" \
+"$python_path" "$home_dir/Project/src/biomedclip/train/pretrain.py" \
     --print_architecture
 
 # For the complete OpenCLIP wrapper as well, add:

@@ -13,7 +13,7 @@ pathway this baseline depends on has nothing to embed for that dataset. There
 is no --btxrd_manifest flag here.
 
 Usage:
-    python src/biomedclip_img_text_downstream.py \\
+    python src/biomedclip/train/img_text_downstream.py \\
         --checkpoint results/biomedclip_pretrain/.../best_r1_checkpoint.pt \\
         --splits     data/internal_dataset/split.json \\
         --head       mlp --early_stopping_metric val_loss
@@ -264,7 +264,7 @@ def main(args: argparse.Namespace) -> dict:
         if not lora_cfg:
             raise RuntimeError(
                 f"Checkpoint '{args.checkpoint}' has no 'lora_config'. "
-                "Re-run pretraining with the current biomedclip_pretrain.py."
+                "Re-run pretraining with the current pretrain.py."
             )
         if lora_cfg.get("no_lora"):
             print(f"Partial fine-tune checkpoint (unfreeze_blocks={lora_cfg['unfreeze_blocks']}, no LoRA).")

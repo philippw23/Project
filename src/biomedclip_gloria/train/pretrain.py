@@ -2,8 +2,8 @@
 using GLoRIA's global+local loss instead of plain CLIP contrastive loss.
 
 Same LoRA-adapted ViT-B/16 + frozen PubMedBERT setup, same data pipeline,
-splits, checkpoint schema, and CV/binary plumbing as src/biomedclip_pretrain.py
-(see biomedclip.train.pretrain) — everything is shared and reused except the
+splits, checkpoint schema, and CV/binary plumbing as
+src/biomedclip/train/pretrain.py — everything is shared and reused except the
 loss computation, so results are directly comparable to the plain BiomedCLIP
 contrastive baseline and to LACE. See src/biomedclip_gloria/loss/gloria.py for
 what GLoRIA's loss does and how it's adapted onto BiomedCLIP's ViT.

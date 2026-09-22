@@ -59,7 +59,7 @@ export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
 $home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python \
-    $home_dir/Project/src/biomedclip_img_text_downstream.py \
+    $home_dir/Project/src/biomedclip/train/img_text_downstream.py \
     --checkpoint     $CHECKPOINT \
     --splits         $SPLITS \
     --out_dir        $home_dir/Project/results \

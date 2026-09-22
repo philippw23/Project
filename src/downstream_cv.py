@@ -44,10 +44,10 @@ except ImportError:
 
 from biomedclip.data.datasets import (IDX_TO_LABEL, IDX_TO_LABEL_BINARY,
                                        NUM_CLASSES, NUM_CLASSES_BINARY)
-from biomedclip_downstream import (main as run_biomedclip_downstream,
-                                   parse_args as parse_biomedclip_downstream_args)
-from biomedclip_img_text_downstream import (main as run_biomedclip_img_text_downstream,
-                                            parse_args as parse_biomedclip_img_text_downstream_args)
+from biomedclip.train.downstream import (main as run_biomedclip_downstream,
+                                         parse_args as parse_biomedclip_downstream_args)
+from biomedclip.train.img_text_downstream import (main as run_biomedclip_img_text_downstream,
+                                                   parse_args as parse_biomedclip_img_text_downstream_args)
 from chexfound_downstream import (main as run_chexfound_downstream,
                                   parse_args as parse_chexfound_downstream_args)
 from gloria_downstream import (main as run_gloria_downstream,

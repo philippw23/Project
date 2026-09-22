@@ -1,10 +1,10 @@
 """Evaluate a *saved* BiomedCLIP downstream head — no training, no hyperparameter flags.
 
-The head checkpoint written by `biomedclip_downstream.py` stores its full config
+The head checkpoint written by `downstream.py` stores its full config
 (`args`), the train age-normalization stats, and (for fine-tuned runs) the encoder
 LoRA deltas. Evaluation only needs the head checkpoint and which test split to score:
 
-    python src/biomedclip_downstream_eval.py \\
+    python src/biomedclip/train/downstream_eval.py \\
         --head_checkpoint results/biomedclip_downstream/run_.../best_head.pt \\
         --splits          data/internal_dataset/split_binary.json
 
@@ -35,7 +35,7 @@ from biomedclip.utils.downstream_eval import (
     resolve_label_maps, require_binary_for_btxrd, load_btxrd_samples,
     build_downstream_loader, report_eval,
 )
-from biomedclip_downstream import build_head, evaluate, EMBED_DIM
+from biomedclip.train.downstream import build_head, evaluate, EMBED_DIM
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -55,7 +55,7 @@ def _load_config(head_ckpt: dict, cli: argparse.Namespace) -> argparse.Namespace
     if "args" not in head_ckpt:
         raise SystemExit(
             "This head checkpoint has no embedded config (it predates the config-saving "
-            "change). Retrain the head with the updated biomedclip_downstream.py."
+            "change). Retrain the head with the updated downstream.py."
         )
     args = argparse.Namespace(**head_ckpt["args"])
     args.splits         = cli.splits

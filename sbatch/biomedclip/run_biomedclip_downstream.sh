@@ -61,7 +61,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin
 export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/biomedclip_downstream.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/biomedclip/train/downstream.py \
     --checkpoint    $CHECKPOINT \
     --splits        $SPLITS \
     --image_size    $IMAGE_SIZE \

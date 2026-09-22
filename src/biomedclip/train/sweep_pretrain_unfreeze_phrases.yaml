@@ -1,4 +1,4 @@
-program: src/biomedclip_pretrain.py
+program: src/biomedclip/train/pretrain.py
 project: biomedclip-pretrain
 entity: philipp-wiese
 method: bayes

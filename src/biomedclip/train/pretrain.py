@@ -6,7 +6,7 @@ LoRA is injected into the last N transformer blocks of the ViT; the text
 encoder (PubMedBERT) is kept fully frozen throughout.
 
 Usage example:
-    python src/biomedclip_pretrain.py \\
+    python src/biomedclip/train/pretrain.py \\
         --excel data/internal_dataset/metadata.xlsx \\
         --reports data/internal_dataset/text/sanitized_reports.json \\
         --use_mask --lora_layers 4 --epochs 50

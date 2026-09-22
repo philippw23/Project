@@ -4,7 +4,7 @@ Evaluates cosine-similarity zero-shot classification using a 5-template prompt
 ensemble for each class (benign / intermediate / malignant).  Supports:
   - Vanilla BiomedCLIP (no checkpoint)
   - LoRA fine-tuned checkpoint
-  - Partial fine-tune checkpoint (--no_lora variant from biomedclip_pretrain.py)
+  - Partial fine-tune checkpoint (--no_lora variant from biomedclip/train/pretrain.py)
 
 Usage (vanilla encoder):
     python src/biomedclip_zeroshot.py \\

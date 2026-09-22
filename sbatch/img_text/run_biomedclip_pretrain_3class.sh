@@ -59,9 +59,10 @@ export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PYTHONPATH=$home_dir/Project/src
 
 if [ "$NO_LORA" = true ]; then
-    python $home_dir/Project/src/biomedclip_pretrain.py \
+    python $home_dir/Project/src/biomedclip/train/pretrain.py \
         $( [ -z "$CV_DIR" ] && echo "--splits $SPLITS" ) \
         $( [ -n "$CV_DIR" ] && echo "--cv_dir $CV_DIR" ) \
         $( [ -n "$CV_DIR" ] && [ -n "$CV_PATTERN" ] && echo "--cv_pattern $CV_PATTERN" ) \
@@ -79,7 +80,7 @@ if [ "$NO_LORA" = true ]; then
         --wandb_project biomedclip-pretrain \
         --wandb_entity philipp-wiese
 else
-    python $home_dir/Project/src/biomedclip_pretrain.py \
+    python $home_dir/Project/src/biomedclip/train/pretrain.py \
         $( [ -z "$CV_DIR" ] && echo "--splits $SPLITS" ) \
         $( [ -n "$CV_DIR" ] && echo "--cv_dir $CV_DIR" ) \
         $( [ -n "$CV_DIR" ] && [ -n "$CV_PATTERN" ] && echo "--cv_pattern $CV_PATTERN" ) \

@@ -1,4 +1,4 @@
-program: src/biomedclip_downstream.py
+program: src/biomedclip/train/downstream.py
 project: biomedclip-downstream
 entity: philipp-wiese
 method: bayes

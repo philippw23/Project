@@ -26,8 +26,8 @@ export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 # ── Fixed hyperparameters (fill in the winning sweep config) ──────────────────
-# No --image_size here: biomedclip_img_text_downstream.py always uses open_clip's
-# fixed 224×224 preprocessing (unlike biomedclip_downstream.py).
+# No --image_size here: biomedclip/train/img_text_downstream.py always uses open_clip's
+# fixed 224×224 preprocessing (unlike biomedclip/train/downstream.py).
 USE_MASK=true
 
 # CV-mode continued-pretraining checkpoints (from run_biomedclip_pretrain.sh

@@ -8,7 +8,7 @@ come from the same LACE v2 pretraining checkpoint and are always frozen.
 
 No BTXRD evaluation: BTXRD samples carry no report text, so the text-encoder
 pathway this baseline depends on has nothing to embed for that dataset. There
-is no --btxrd_manifest flag here (mirrors biomedclip_img_text_downstream.py).
+is no --btxrd_manifest flag here (mirrors biomedclip/train/img_text_downstream.py).
 
 Usage:
     python src/LACE/train/img_text_downstream.py \\
