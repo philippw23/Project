@@ -15,6 +15,7 @@ echo "SLURM assigned me these nodes:"
 squeue -j "${SLURM_JOBID}" -O nodelist 2>/dev/null | tail -n +2
 
 MY_CONDA_ENV="master"
+export SSL_CERT_FILE=$home_dir/miniconda3/envs/$MY_CONDA_ENV/ssl/cert.pem
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
 export HF_HOME="$home_dir/.cache/huggingface"

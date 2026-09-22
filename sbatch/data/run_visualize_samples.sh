@@ -14,6 +14,7 @@ echo SLURM assigned me these nodes:
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 
 MY_CONDA_ENV="master"
+export SSL_CERT_FILE=$home_dir/miniconda3/envs/$MY_CONDA_ENV/ssl/cert.pem
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin:$PATH
 export PYTHONPATH=$home_dir/Project/src
 export MPLCONFIGDIR=$home_dir/.config/matplotlib

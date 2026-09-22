@@ -1,9 +1,9 @@
 """Evaluate a *saved* GLoRIA downstream head — no training, no hyperparameter flags.
 
-The head checkpoint written by `gloria_downstream.py` stores its full config
+The head checkpoint written by `downstream.py` stores its full config
 (`args`), the encoder embed_dim, and the train age-normalization stats:
 
-    python src/gloria_downstream_eval.py \\
+    python src/gloria/train/downstream_eval.py \\
         --head_checkpoint results/gloria_downstream/run_.../best_head.pt \\
         --splits          data/internal_dataset/split_binary.json
 
@@ -28,8 +28,8 @@ from biomedclip.utils.downstream_eval import (
     resolve_label_maps, require_binary_for_btxrd, load_btxrd_samples,
     build_downstream_loader, report_eval,
 )
-from gloria_downstream import (load_gloria_encoder, build_head, evaluate,
-                               build_gloria_val_transform)
+from gloria.train.downstream import (load_gloria_encoder, build_head, evaluate,
+                                     build_gloria_val_transform)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -49,7 +49,7 @@ def _load_config(head_ckpt: dict, cli: argparse.Namespace) -> argparse.Namespace
     if "args" not in head_ckpt:
         raise SystemExit(
             "This head checkpoint has no embedded config (it predates the config-saving "
-            "change). Retrain the head with the updated gloria_downstream.py."
+            "change). Retrain the head with the updated downstream.py."
         )
     args = argparse.Namespace(**head_ckpt["args"])
     args.splits         = cli.splits

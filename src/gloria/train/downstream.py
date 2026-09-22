@@ -13,7 +13,7 @@ Head variants (--head):
     mlp_no_meta  — same MLP capacity, no clinical metadata
 
 Usage:
-    python src/gloria_downstream.py \\
+    python src/gloria/train/downstream.py \\
         --checkpoint src/gloria/pretrained/chexpert_resnet50.ckpt \\
         --splits     data/internal_dataset/split.json \\
         --head       mlp
@@ -44,11 +44,15 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
+from biomedclip.utils.misc import ROOT_DIR, DEFAULT_SPLITS, DEFAULT_OUT_DIR
+
 # GLoRIA lives in its own older conda environment; register stub modules for
 # dependencies (pytorch_lightning, skimage, nltk, cv2) that are absent in the
 # main environment but are only needed for text-processing / visualisation code
 # that we never invoke during downstream probing.
-GLORIA_DIR = Path(__file__).resolve().parent / "gloria"
+# Anchored on ROOT_DIR (not __file__) since this module now lives inside
+# src/gloria/train/, one level deeper than the vendored src/gloria/ package.
+GLORIA_DIR = ROOT_DIR / "src" / "gloria"
 if str(GLORIA_DIR) not in sys.path:
     sys.path.insert(0, str(GLORIA_DIR))
 
@@ -82,7 +86,6 @@ class _StubFinder:
 
 sys.meta_path.insert(0, _StubFinder())
 
-from biomedclip.utils.misc import ROOT_DIR, DEFAULT_SPLITS, DEFAULT_OUT_DIR
 from biomedclip.data.datasets import (
     DownstreamDataset, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
     LABEL_TO_IDX_BINARY, IDX_TO_LABEL_BINARY, NUM_CLASSES_BINARY,

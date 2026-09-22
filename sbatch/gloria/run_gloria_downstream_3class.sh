@@ -12,7 +12,7 @@
 # ── Parameters (edit here) ────────────────────────────────────────────────────
 home_dir="/mnt/nfs/homedirs/$USER"
 #"/mnt/nfs/homedirs/philippw/Project/src/gloria/pretrained/chexpert_resnet50.ckpt"
-CHECKPOINT=$home_dir/Project/results/gloria_pretrain/gloria_pretrain_unfreeze4_20260812_144239/best_retrieval_checkpoint.pt #"/mnt/nfs/homedirs/philippw/Project/results/gloria_pretrain/gloria_pretrain_lora2_r8_20260610_133210/best_retrieval_checkpoint.pt"
+CHECKPOINT=$home_dir/Project/src/gloria/pretrained/chexpert_resnet50.ckpt  # TEMP: smoke-test against stock GLoRIA weights, no continued-pretrain checkpoint needed
 SPLITS="$home_dir/Project/data/internal_dataset/split_final.json"
 BINARY=false
 USE_MASK=true
@@ -21,7 +21,7 @@ BATCH_SIZE=64
 LR=7.05399563889012e-05
 DROPOUT=0.2
 WEIGHT_DECAY=0.05
-EPOCHS=100
+EPOCHS=1 # TMP: 100
 PATIENCE=50
 
 # Head mode: mlp (age+sex fusion), mlp_no_meta (no metadata), linear (linear probe)
@@ -51,6 +51,7 @@ echo "Starting job ${SLURM_JOBID}"
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 
 MY_CONDA_ENV="master"
+export SSL_CERT_FILE=$home_dir/miniconda3/envs/$MY_CONDA_ENV/ssl/cert.pem
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=1
 export HF_HOME=$home_dir/.cache/huggingface
@@ -63,7 +64,7 @@ echo "Environment: $MY_CONDA_ENV"
 PROJ_FLAG=""
 [ -n "$USE_PROJECTION" ] && PROJ_FLAG="--use_projection"
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria_downstream.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria/train/downstream.py \
     --checkpoint    $CHECKPOINT \
     --splits        $SPLITS \
     --binary                  $BINARY \

@@ -12,6 +12,7 @@ home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
 
 MY_CONDA_ENV="master"
+export SSL_CERT_FILE=$home_dir/miniconda3/envs/$MY_CONDA_ENV/ssl/cert.pem
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin:$PATH
 python=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 

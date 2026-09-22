@@ -15,6 +15,7 @@ echo SLURM assigned me these nodes:
 squeue -j ${SLURM_JOBID} -O nodelist | tail -n +2
 
 MY_CONDA_ENV="master"
+export SSL_CERT_FILE=$home_dir/miniconda3/envs/$MY_CONDA_ENV/ssl/cert.pem
 export CONDA_EXE=$home_dir/miniconda3/bin/conda
 source $home_dir/miniconda3/etc/profile.d/conda.sh
 conda activate $MY_CONDA_ENV
@@ -23,6 +24,7 @@ echo Environment activated
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PYTHONPATH=$home_dir/Project/src
 
 # All architecture/loss hyperparameters + the backbone path + train age-stats are
 # read from the head checkpoint itself. Optional: --btxrd_manifest to also score
@@ -33,7 +35,7 @@ SPLITS=$home_dir/Project/data/internal_dataset/split_final.json
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # ─────────────────────────────────────────────────────────────────────────────
 
-python $home_dir/Project/src/gloria_downstream_eval.py \
+python $home_dir/Project/src/gloria/train/downstream_eval.py \
     --head_checkpoint $HEAD_CHECKPOINT \
     --splits          $SPLITS \
     #--btxrd_manifest  $BTXRD_MANIFEST
