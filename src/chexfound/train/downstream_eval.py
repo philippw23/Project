@@ -1,10 +1,10 @@
 """Evaluate a *saved* CheXFound downstream head — no training, no hyperparameter flags.
 
-The head checkpoint written by `chexfound_downstream.py` stores its full config
+The head checkpoint written by `downstream.py` stores its full config
 (`args`) and the train age-normalization stats, so evaluation only needs the head
 checkpoint and which test split to score:
 
-    python src/chexfound_downstream_eval.py \\
+    python src/chexfound/train/downstream_eval.py \\
         --head_checkpoint results/chexfound_downstream/best_head_<id>.pt \\
         --splits          data/internal_dataset/split_binary.json
 
@@ -29,7 +29,7 @@ from biomedclip.utils.downstream_eval import (
     resolve_label_maps, require_binary_for_btxrd, load_btxrd_samples,
     build_downstream_loader, report_eval,
 )
-from chexfound_downstream import build_encoder, build_head, evaluate
+from chexfound.train.downstream import build_encoder, build_head, evaluate
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -49,7 +49,7 @@ def _load_config(head_ckpt: dict, cli: argparse.Namespace) -> argparse.Namespace
     if "args" not in head_ckpt:
         raise SystemExit(
             "This head checkpoint has no embedded config (it predates the config-saving "
-            "change). Retrain the head with the updated chexfound_downstream.py."
+            "change). Retrain the head with the updated downstream.py."
         )
     args = argparse.Namespace(**head_ckpt["args"])
     args.splits         = cli.splits

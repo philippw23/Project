@@ -9,13 +9,13 @@ Head variants (--head):
     mlp_no_meta  — same MLP capacity, no clinical metadata
 
 Usage (continued-pretrain checkpoint):
-    python src/chexfound_downstream.py \\
+    python src/chexfound/train/downstream.py \\
         --checkpoint results/chexfound_pretrain/.../checkpoint_last.pth \\
         --splits     results/biomedclip_pretrain/.../splits.json \\
         --excel      data/internal_dataset/metadata.xlsx
 
 Usage (frozen original weights):
-    python src/chexfound_downstream.py \\
+    python src/chexfound/train/downstream.py \\
         --checkpoint none \\
         --chexfound_weights /path/to/chexfound_vitl16.pth \\
         --splits ... --excel ...

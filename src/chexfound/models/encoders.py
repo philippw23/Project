@@ -18,7 +18,7 @@ class CheXFoundViT(nn.Module):
         _features(images)   -> (cls [B, 1024], patches [B, N, 1024])
 
     forward_features() returns a DINOv2-style dict so the call site in
-    chexfound_downstream.py is unchanged.
+    chexfound/train/downstream.py is unchanged.
 
     Args:
         config_path:     Path to the CheXFound model config YAML.

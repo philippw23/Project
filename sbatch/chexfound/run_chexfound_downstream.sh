@@ -23,7 +23,7 @@ DROPOUT=0.2
 HIDDEN_DIMS="128"
 META_EMBED_DIM=16
 WEIGHT_DECAY=0.01
-EPOCHS=50
+EPOCHS=1
 LOSS="cb_focal"  # ce | wce | ce_smooth | focal | cb_focal | ldam | balanced_softmax
 FOCAL_GAMMA=3.0
 CLASS_WEIGHTING="effective"  # none | inverse | sqrt | effective
@@ -50,7 +50,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin
 export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfound_downstream.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/chexfound/train/downstream.py \
     --checkpoint    $CHECKPOINT \
     --chexfound_weights $CHEXFOUND_WEIGHTS \
     --image_size    $IMAGE_SIZE \

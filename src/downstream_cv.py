@@ -48,8 +48,8 @@ from biomedclip.train.downstream import (main as run_biomedclip_downstream,
                                          parse_args as parse_biomedclip_downstream_args)
 from biomedclip.train.img_text_downstream import (main as run_biomedclip_img_text_downstream,
                                                    parse_args as parse_biomedclip_img_text_downstream_args)
-from chexfound_downstream import (main as run_chexfound_downstream,
-                                  parse_args as parse_chexfound_downstream_args)
+from chexfound.train.downstream import (main as run_chexfound_downstream,
+                                        parse_args as parse_chexfound_downstream_args)
 from gloria_downstream import (main as run_gloria_downstream,
                                parse_args as parse_gloria_downstream_args)
 from imagenet_img.train.downstream import (main as run_imagenet_downstream,

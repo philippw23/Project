@@ -113,7 +113,7 @@ def make_classification_eval_transform(
     return transforms.Compose(transforms_list)
 
 
-# ── Local downstream helpers (kept for chexfound_downstream.py) ──────────────
+# ── Local downstream helpers (kept for chexfound/train/downstream.py) ────────
 
 def build_preprocess_val_chexfound(image_size: int = 512) -> transforms.Compose:
     # No resize→crop overshoot: resize the short edge to image_size and take the
