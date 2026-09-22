@@ -25,6 +25,7 @@ echo Environment activated
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync
+export PYTHONPATH=$home_dir/Project/src
 
 MODEL=Qwen/Qwen2.5-14B-Instruct #Qwen2.5-14B-Instruct Qwen2.5-32B-Instruct-AWQ
 
@@ -41,7 +42,7 @@ echo "Writing output to $OUTPUT"
 
 # Run the extractor
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
-$python_path $home_dir/Project/src/llm_extractor.py \
+$python_path $home_dir/Project/src/qwen_llm_extractor/extract/joint.py \
     --model $MODEL \
     --input  $home_dir/Project/data/internal_dataset/text/translated_reports.json \
     --output $OUTPUT \

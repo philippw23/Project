@@ -24,12 +24,13 @@ echo Environment activated
 # Redirect HuggingFace cache to NFS home (compute nodes have no /home)
 export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
+export PYTHONPATH=$home_dir/Project/src
 
 # Run the separated extractor
 # Two-stage per-section pipeline (atomic extraction → importance ranking).
 # Input is English-only: the loader reads befund_en / beurteilung_en.
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
-$python_path $home_dir/Project/src/llm_extractor_seperated.py \
+$python_path $home_dir/Project/src/qwen_llm_extractor/extract/separated.py \
     --model Qwen/Qwen2.5-14B-Instruct \
     --reports $home_dir/Project/data/internal_dataset/text/translated_reports.json \
     --out_dir $home_dir/Project/results \

@@ -21,8 +21,9 @@ conda activate $MY_CONDA_ENV
 echo Environment activated
 
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PYTHONPATH=$home_dir/Project/src
 
 # Rasterizes BTXRD polygon annotations to PNG masks and writes the downstream
 # manifest data/BTXRD/btxrd_downstream_binary.json used as the external test set.
-python $home_dir/Project/src/build_btxrd_downstream.py \
+python $home_dir/Project/src/data/build_btxrd_downstream.py \
     --btxrd_dir $home_dir/Project/data/BTXRD

@@ -488,3 +488,7 @@ def parse_args() -> argparse.Namespace:
     if args.output is None:
         args.output = str(Path(args.reports).parent / "full_reports_separated.json")
     return args
+
+
+if __name__ == "__main__":
+    main(parse_args())

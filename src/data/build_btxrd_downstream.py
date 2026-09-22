@@ -20,8 +20,8 @@ which `DownstreamDataset` / the k-fold CV orchestrator consume directly via
 `--btxrd_manifest`.
 
 Usage:
-    python src/build_btxrd_downstream.py
-    python src/build_btxrd_downstream.py --btxrd_dir data/BTXRD --out data/BTXRD/btxrd_downstream_binary.json
+    python src/data/build_btxrd_downstream.py
+    python src/data/build_btxrd_downstream.py --btxrd_dir data/BTXRD --out data/BTXRD/btxrd_downstream_binary.json
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from PIL import Image
 
 from LACE.data.transforms import rasterize_shapes
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 
 def _to_int(val) -> int | None:
