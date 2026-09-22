@@ -155,24 +155,33 @@ failed-parse ("error") report counts.
 
 ### 2g. Prompts — `src/qwen_llm_extractor/prompts/`
 
-**`joint.py`**:
-- German→German (`SYSTEM_PROMPT`/`USER_PROMPT_TEMPLATE`): separates `befund_phrases`
-  (descriptive) vs `beurteilung_phrases` (diagnostic, incl. suspected diagnoses, DDs, negative
-  findings, recommendations); 2–8 words per phrase; **excludes numeric size/measurement phrases**
-  (e.g. "ca. 4 cm", "35 mm"); requires ≥1 phrase per category with a fallback instruction; 5
-  worked examples.
-- English (`SYSTEM_PROMPT_ENGLISH`/`USER_PROMPT_TEMPLATE_ENGLISH`, used with `--english` on
-  `translated_reports.json`): classifies by content type not section; excludes
-  measurements/sizes ("6 x 8 mm osteolytic lesion" → "osteolytic lesion"); special fracture rule
-  (rule 9) — excludes all fracture phrases by default except "pathological fracture" /
-  "insufficiency fracture" describing a present finding; negated fracture phrases excluded
-  entirely; requires ≥1 phrase per category; 4 worked examples.
-- Two-stage variants: stage 1 (`SYSTEM_PROMPT_EXTRACT_ENGLISH`) does recall-first atomic
-  segmentation into 2–6 word phrases, deduplicated; stage 2 (`SYSTEM_PROMPT_CLASSIFY_ENGLISH`)
-  tags each phrase `{phrase, category, relevance}` without dropping/reordering/rewording.
-- Shared taxonomy (`DESCRIPTOR_CATEGORIES_ENGLISH`/`CATEGORY_DEFINITIONS_ENGLISH`): margin/border,
-  periosteal reaction, matrix/density, lesion geometry, host bone response, soft tissue status,
-  surface lesions, skeletal deformity, multifocal disease, diagnosis.
+The joint prompts are split by methodology into three files (all imported by
+`extract/joint.py`):
+
+**`joint_german.py`** (`SYSTEM_PROMPT`/`USER_PROMPT_TEMPLATE`, German→German, the default
+one-shot pipeline): separates `befund_phrases` (descriptive) vs `beurteilung_phrases`
+(diagnostic, incl. suspected diagnoses, DDs, negative findings, recommendations); 2–8 words per
+phrase; **excludes numeric size/measurement phrases** (e.g. "ca. 4 cm", "35 mm"); requires ≥1
+phrase per category with a fallback instruction; 5 worked examples.
+
+**`joint_english.py`** (`SYSTEM_PROMPT_ENGLISH`/`USER_PROMPT_TEMPLATE_ENGLISH`, used with
+`--english` on `translated_reports.json`): classifies by content type not section; excludes
+measurements/sizes ("6 x 8 mm osteolytic lesion" → "osteolytic lesion"); special fracture rule
+(rule 9) — excludes all fracture phrases by default except "pathological fracture" /
+"insufficiency fracture" describing a present finding; negated fracture phrases excluded
+entirely; requires ≥1 phrase per category; 4 worked examples. Also retains (commented out, for
+reference) an earlier, more elaborate draft with an explicit anatomical-scope rule — superseded
+by the live prompt above, not imported anywhere.
+
+**`joint_two_stage.py`** (opt-in via `--two_stage`): stage 1 (`SYSTEM_PROMPT_EXTRACT_ENGLISH`)
+does recall-first atomic segmentation into 2–6 word phrases, deduplicated; stage 2
+(`SYSTEM_PROMPT_CLASSIFY_ENGLISH`) tags each phrase `{phrase, category, relevance}` without
+dropping/reordering/rewording. Also holds the shared taxonomy
+(`DESCRIPTOR_CATEGORIES_ENGLISH`/`CATEGORY_DEFINITIONS_ENGLISH`: margin/border, periosteal
+reaction, matrix/density, lesion geometry, host bone response, soft tissue status, surface
+lesions, skeletal deformity, multifocal disease, diagnosis) — mirrored from `joint_english.py`
+and concatenated into the two-stage prompts; `separated.py` also imports
+`DESCRIPTOR_CATEGORIES_ENGLISH` from here.
 
 **`separated.py`** (German input, English output):
 - `BEFUND_PROMPT_TEMPLATE`: descriptive phrases (morphology, location, size, matrix,

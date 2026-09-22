@@ -18,7 +18,7 @@ The two-stage variant (opt-in) adds:
 """
 
 # Reuse the tuned descriptor taxonomy from the joint prompts for befund extraction.
-from qwen_llm_extractor.prompts.joint import DESCRIPTOR_CATEGORIES_ENGLISH
+from qwen_llm_extractor.prompts.joint_two_stage import DESCRIPTOR_CATEGORIES_ENGLISH
 
 SYSTEM_PROMPT = """\
 Du bist ein erfahrener Radiologe und Experte für strukturierte medizinische Informationsextraktion.

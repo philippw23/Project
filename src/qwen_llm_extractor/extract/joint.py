@@ -19,11 +19,12 @@ from tqdm import tqdm
 
 from qwen_llm_extractor.eval.analysis import flatten_to_dataframe, print_summary
 from qwen_llm_extractor.models.loader import DEFAULT_MODEL, load_model
-from qwen_llm_extractor.prompts.joint import (
-    SYSTEM_PROMPT,
+from qwen_llm_extractor.prompts.joint_german import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from qwen_llm_extractor.prompts.joint_english import (
     SYSTEM_PROMPT_ENGLISH,
-    USER_PROMPT_TEMPLATE,
     USER_PROMPT_TEMPLATE_ENGLISH,
+)
+from qwen_llm_extractor.prompts.joint_two_stage import (
     SYSTEM_PROMPT_EXTRACT_ENGLISH,
     USER_PROMPT_TEMPLATE_EXTRACT_ENGLISH,
     SYSTEM_PROMPT_CLASSIFY_ENGLISH,
