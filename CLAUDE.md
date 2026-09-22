@@ -57,18 +57,20 @@ python src/downstream_cv.py --baseline lace --version v2 --checkpoint <ckpt> --c
 python src/gloria/run.py [config_path]
 ```
 
-**There is no test suite.** Validation is done via W&B logging during training and manual inspection scripts (`src/check_dataset.py`, `src/visualize_samples.py`, `src/analyze_descriptor_vectors.py`).
+**There is no test suite.** Validation is done via W&B logging during training and manual inspection scripts (`src/check_dataset.py`, `src/data/visualize_samples.py`, `src/analyze_descriptor_vectors.py`).
 
 ## Data Pipeline
 
 Four-stage pipeline before training:
 
 1. **Image preprocessing** — mask-guided cropping: `src/preprocess_images.py`
-2. **Report translation** — German → English: `src/translate_reports.py`
+2. **Report translation** — German → English: `src/data/translate_reports.py` (preceded by `src/data/preprocess_reports.py`)
 3. **Phrase extraction** — LLM (Qwen2.5-7B): `src/llm_extractor.py` (or `src/llm_extractor_seperated.py` for befund/beurteilung split separately)
-4. **Dataset assembly** — `src/create_dataset.py`
+4. **Dataset assembly** — `src/data/create_dataset.py`
 
-Downstream of that: `src/create_split.py` builds the stratified train/val/test manifest, and `src/create_cv_splits.py` derives a patient-grouped 10-fold CV pool from it (kept in `data/internal_dataset/cv/`) for `downstream_cv.py`-style fold evaluation. `src/build_btxrd_downstream.py` converts the external **BTXRD** dataset into the same sample-dict manifest format, used as a frozen external test set (binary benign/malignant only).
+Downstream of that: `src/data/create_split.py` builds the stratified train/val/test manifest, and `src/data/create_cv_splits.py` derives a patient-grouped 10-fold CV pool from it (kept in `data/internal_dataset/cv/`) for `downstream_cv.py`-style fold evaluation. `src/build_btxrd_downstream.py` converts the external **BTXRD** dataset into the same sample-dict manifest format, used as a frozen external test set (binary benign/malignant only).
+
+Data-pipeline scripts (assembly, splitting, preprocessing, visualization) live under `src/data/`; baseline entry points and packages remain directly under `src/`.
 
 Default data paths (hardcoded in [src/biomedclip/utils/misc.py](src/biomedclip/utils/misc.py)):
 

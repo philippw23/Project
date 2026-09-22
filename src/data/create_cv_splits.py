@@ -20,7 +20,7 @@ val/test splits are assumed to already be patient-disjoint from train (this is
 asserted per fold).
 
 Usage:
-    python src/create_cv_splits.py --input  data/internal_dataset/split_final.json --out_dir data/internal_dataset/cv --seed 42
+    python src/data/create_cv_splits.py --input  data/internal_dataset/split_final.json --out_dir data/internal_dataset/cv --seed 42
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from pathlib import Path
 
 from sklearn.model_selection import StratifiedGroupKFold
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 TRAIN_PARTS = 8  # given val/test become parts 9 and 10 -> pool of 10
 

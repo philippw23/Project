@@ -6,7 +6,7 @@ A row is included only if the image file exists on disk.
 Report fields are null when no matching report is found.
 
 Usage:
-    python src/create_dataset.py
+    python src/data/create_dataset.py
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT_DIR          = Path(__file__).resolve().parent.parent
+ROOT_DIR          = Path(__file__).resolve().parent.parent.parent
 EXCEL_PATH        = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
 FULL_REPORTS_PATH = ROOT_DIR / "data" / "internal_dataset" / "text" / "full_reports.json"
 DEFAULT_IMAGES_DIR  = ROOT_DIR / "data" / "internal_dataset" / "images"

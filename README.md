@@ -47,13 +47,16 @@ src/
 ├── llm_extractor_seperated.py  # Entry point → separated (befund / beurteilung) extraction
 │
 ├── preprocess_images.py        # Square-pad images/masks (internal + BTXRD)
-├── preprocess_reports.py / translate_reports.py   # Report cleaning & translation
-├── create_dataset.py           # Assemble dataset_full.json
-├── create_split.py             # Patient-level stratified train/val/test split
-├── create_cv_splits.py         # Derive patient-grouped 10-fold CV pool from split.json
 ├── build_btxrd_downstream.py   # Convert BTXRD into the internal sample-dict manifest format
 ├── check_dataset.py            # Reports what images/masks/metadata are missing
-└── visualize_samples.py        # Sample visualisation
+│
+├── data/                        # Data-pipeline scripts (assembly, splitting, visualisation)
+│   ├── preprocess_reports.py / translate_reports.py   # Report cleaning & translation
+│   ├── create_dataset.py       # Assemble dataset_full.json
+│   ├── create_split.py         # Patient-level stratified train/val/test split
+│   ├── create_cv_splits.py     # Derive patient-grouped 10-fold CV pool from split.json
+│   ├── visualize_samples.py    # Sample visualisation
+│   └── visualize_tsne.py       # t-SNE embedding visualisation across baselines
 
 sbatch/                         # SLURM job scripts, mirrors src/ (biomedclip/, biomedclip_gloria/,
                                  # lace/, chexfound/, gloria/, imagenet_img/, data/, utils/)
@@ -104,7 +107,7 @@ Two scripts turn the raw metadata, reports, images, and masks into a fixed patie
 
 **Step 1 — assemble `dataset_full.json`:**
 ```bash
-python src/create_dataset.py
+python src/data/create_dataset.py
 ```
 Matches each `metadata.xlsx` row to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`.
 

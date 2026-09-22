@@ -4,18 +4,18 @@ Supports BiomedCLIP, CheXFound, LACE (v2), and ImageNet baseline encoders.
 
 Usage examples:
     # BiomedCLIP checkpoint
-    python src/visualize_tsne.py \\
+    python src/data/visualize_tsne.py \\
         --encoder_type biomedclip \\
         --checkpoint results/biomedclip_pretrain/.../best.pt \\
         --splits data/internal_dataset/split.json
 
     # BiomedCLIP base weights (no checkpoint)
-    python src/visualize_tsne.py \\
+    python src/data/visualize_tsne.py \\
         --encoder_type biomedclip \\
         --splits data/internal_dataset/split.json
 
     # CheXFound baseline (no continued-pretrain checkpoint)
-    python src/visualize_tsne.py \\
+    python src/data/visualize_tsne.py \\
         --encoder_type chexfound \\
         --checkpoint none \\
         --chexfound_config src/chexfound/configs/vit_large.yaml \\
@@ -23,21 +23,21 @@ Usage examples:
         --splits data/internal_dataset/split.json
 
     # CheXFound from continued-pretrain checkpoint
-    python src/visualize_tsne.py \\
+    python src/data/visualize_tsne.py \\
         --encoder_type chexfound \\
         --checkpoint results/chexfound_pretrain/.../best.pt \\
         --chexfound_config src/chexfound/configs/vit_large.yaml \\
         --splits data/internal_dataset/split.json
 
     # LACE v2
-    python src/visualize_tsne.py \\
+    python src/data/visualize_tsne.py \\
         --encoder_type lace \\
         --version v2 \\
         --checkpoint results/lace_v2_pretrain/.../best.pt \\
         --splits results/lace_v2_pretrain/.../splits.json
 
     # ImageNet ViT-B/16 baseline
-    python src/visualize_tsne.py \\
+    python src/data/visualize_tsne.py \\
         --encoder_type imagenet \\
         --splits data/internal_dataset/split.json
 """
@@ -55,7 +55,7 @@ import torch.nn.functional as F
 from sklearn.manifold import TSNE
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from biomedclip.data.datasets import DownstreamDataset, IDX_TO_LABEL
 from biomedclip.utils.misc import DEFAULT_OUT_DIR, DEFAULT_SPLITS, MODEL_TAG

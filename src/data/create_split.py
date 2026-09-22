@@ -4,12 +4,15 @@ Runs `build_stratified_splits` from the BiomedCLIP data pipeline and writes
 `split.json` to the specified output directory — no model loading required.
 
 Usage:
-    python src/create_split.py [args]
+    python src/data/create_split.py [args]
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_SPLIT_DIR
 from biomedclip.data.splits import build_stratified_splits

@@ -7,10 +7,10 @@ Supports resuming: already-translated entries (present in the output file) are
 skipped so the job can be restarted after interruption.
 
 Usage:
-    python src/translate_reports.py                          # all reports
-    python src/translate_reports.py --max 5                  # quick test
-    python src/translate_reports.py --quantize               # low VRAM (4-bit)
-    python src/translate_reports.py --model Qwen/Qwen2.5-3B-Instruct
+    python src/data/translate_reports.py                          # all reports
+    python src/data/translate_reports.py --max 5                  # quick test
+    python src/data/translate_reports.py --quantize               # low VRAM (4-bit)
+    python src/data/translate_reports.py --model Qwen/Qwen2.5-3B-Instruct
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_INPUT  = ROOT_DIR / "data" / "text" / "sanitized_reports.json"
 DEFAULT_OUTPUT = ROOT_DIR / "data" / "text" / "translated_reports.json"
 DEFAULT_MODEL  = "Qwen/Qwen2.5-7B-Instruct"

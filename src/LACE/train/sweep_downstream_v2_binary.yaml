@@ -67,6 +67,7 @@ command:
   - v2
   - --splits
   - data/internal_dataset/split_binary_final.json
+  - --binary
   - --use_mask
   - --out_dir
   - results

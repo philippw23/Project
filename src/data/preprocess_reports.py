@@ -2,8 +2,8 @@
 import json
 from pathlib import Path
 
-INPUT_PATH = Path(__file__).parent.parent / "data" / "text" / "reports.json"
-OUTPUT_PATH = Path(__file__).parent.parent / "data" / "text" / "sanitized_reports.json"
+INPUT_PATH = Path(__file__).parent.parent.parent / "data" / "text" / "reports.json"
+OUTPUT_PATH = Path(__file__).parent.parent.parent / "data" / "text" / "sanitized_reports.json"
 
 PLACEHOLDER = "Die Bilder wurden bereitgestellt."
 

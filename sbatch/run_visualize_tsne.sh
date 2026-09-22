@@ -76,7 +76,7 @@ if [ "$ENCODER_TYPE" = "lace" ]; then
     EXTRA_ARGS="$EXTRA_ARGS --version $LACE_VERSION"
 fi
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/visualize_tsne.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/data/visualize_tsne.py \
     --encoder_type  $ENCODER_TYPE \
     --splits        $SPLITS \
     --split         $SPLIT \
