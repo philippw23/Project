@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image, UnidentifiedImageError
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 DEFAULT_EXCEL   = ROOT_DIR / "data" / "internal_dataset" / "metadata.xlsx"
 DEFAULT_REPORTS = ROOT_DIR / "data" / "internal_dataset" / "text" / "sanitized_reports.json"
 DEFAULT_IMAGES  = ROOT_DIR / "data" / "internal_dataset" / "images"
