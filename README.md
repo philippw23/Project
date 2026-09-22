@@ -15,46 +15,44 @@ src/
 │   ├── eval/                 #   kNN probe, retrieval metrics
 │   ├── loss/                 #   L_ITA, L_sim, L_ortho, L_dice, L_evid_p, L_rec
 │   ├── models/                #   SharedViT, text encoder, LoRA, mask decoder, prototypes
-│   ├── train/                #   pretrain_v2.py, downstream.py, sweep YAMLs
+│   ├── train/                #   pretrain_v2.py, downstream.py, downstream_eval.py,
+│   │                          #   img_text_downstream.py, sweep YAMLs — all entry points
 │   └── ARCHITECTURE.md       #   Design writeup (objective, model, losses)
-├── lace_pretrain_v2.py                        # Entry point
-├── lace_downstream.py                         # Downstream head training
-├── lace_downstream_eval.py                    # Score a saved head, no training
-├── lace_img_text_downstream.py                # Downstream variant that also fuses text embeddings
 │
 ├── biomedclip/                # BiomedCLIP contrastive pretraining package
-│   ├── data/ distributed/ eval/ loss/ models/ train/ utils/
-├── biomedclip_pretrain.py / biomedclip_downstream.py / biomedclip_downstream_eval.py
-├── biomedclip_zeroshot.py / biomedclip_img_text_downstream.py
+│   ├── data/ distributed/ eval/ loss/ models/ utils/
+│   └── train/                #   pretrain.py, downstream.py, downstream_eval.py,
+│                              #   img_text_downstream.py, sweep YAMLs — all entry points
 │
 ├── biomedclip_gloria/          # BiomedCLIP pretraining + GLoRIA-style local loss
-├── biomedclip_gloria_pretrain.py   # Entry point (downstream reuses biomedclip_downstream.py)
+│   └── train/pretrain.py       #   Entry point (downstream reuses biomedclip/train/downstream.py)
 │
 ├── chexfound/                 # CheXFound DINO+iBOT continued pretraining
-├── chexfound_downstream.py / chexfound_downstream_eval.py
+│   └── train/                #   pretrain.py, downstream.py, downstream_eval.py
 │
 ├── gloria/                    # GLoRIA (separate old env — see Requirements)
-├── gloria_downstream.py / gloria_pretrain.py / gloria_downstream_eval.py
+│   └── train/                #   downstream.py, downstream_eval.py
+├── gloria_pretrain.py          # Entry point (kept at root — not a package submodule)
 │
 ├── imagenet_img/               # Frozen ImageNet ViT-B/16 linear probe
-├── imagenet_img_downstream.py / imagenet_img_downstream_eval.py
+│   └── train/                #   downstream.py, downstream_eval.py
 │
 ├── downstream_cv.py             # 10-fold CV + BTXRD eval orchestrator (shared across baselines)
 │
 ├── qwen_llm_extractor/         # LLM phrase-extraction package (Qwen2.5-7B-Instruct)
-│   ├── data/ eval/ extract/ models/ prompts/ utils/
-├── llm_extractor.py            # Entry point → joint extraction
-├── llm_extractor_seperated.py  # Entry point → separated (befund / beurteilung) extraction
+│   ├── data/ eval/ models/ prompts/ utils/
+│   └── extract/               #   joint.py, separated.py — entry points
 │
 ├── preprocess_images.py        # Square-pad images/masks (internal + BTXRD)
-├── build_btxrd_downstream.py   # Convert BTXRD into the internal sample-dict manifest format
-├── check_dataset.py            # Reports what images/masks/metadata are missing
 │
 ├── data/                        # Data-pipeline scripts (assembly, splitting, visualisation)
 │   ├── preprocess_reports.py / translate_reports.py   # Report cleaning & translation
 │   ├── create_dataset.py       # Assemble dataset_full.json
 │   ├── create_split.py         # Patient-level stratified train/val/test split
 │   ├── create_cv_splits.py     # Derive patient-grouped 10-fold CV pool from split.json
+│   ├── build_btxrd_downstream.py # Convert BTXRD into the internal sample-dict manifest format
+│   ├── check_dataset.py        # Reports what images/masks/metadata are missing
+│   ├── check_missing_metadata.py # Reports rows with missing age/sex/label in metadata.xlsx
 │   ├── visualize_samples.py    # Sample visualisation
 │   └── visualize_tsne.py       # t-SNE embedding visualisation across baselines
 
@@ -171,7 +169,7 @@ sbatch sbatch/run_sweep_pretrain.sh
 
 ### 5 — Downstream malignancy classification
 
-Every approach follows the same pattern: `<name>_downstream.py` loads the frozen pretrained encoder, appends clinical metadata (age, sex), and trains a small MLP for malignancy prediction; `<name>_downstream_eval.py` loads a saved head checkpoint and re-scores it (against a split and/or the BTXRD manifest) with no training.
+Every approach follows the same pattern: `<baseline>/train/downstream.py` loads the frozen pretrained encoder, appends clinical metadata (age, sex), and trains a small MLP for malignancy prediction; `<baseline>/train/downstream_eval.py` loads a saved head checkpoint and re-scores it (against a split and/or the BTXRD manifest) with no training.
 
 ```bash
 sbatch sbatch/lace/run_lace_downstream_v2.sh

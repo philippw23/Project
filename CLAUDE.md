@@ -48,16 +48,16 @@ sbatch sbatch/run_sweep_pretrain.sh
 sbatch sbatch/run_sweep_downstream.sh
 ```
 
-Every baseline follows the same `<name>_downstream.py` (trains a head, saves a checkpoint) / `<name>_downstream_eval.py` (loads a saved head checkpoint, re-runs evaluation only — no training, no hyperparameter flags) split. Python entry points can also be run directly, e.g.:
+Every baseline follows the same `<baseline>/train/downstream.py` (trains a head, saves a checkpoint) / `<baseline>/train/downstream_eval.py` (loads a saved head checkpoint, re-runs evaluation only — no training, no hyperparameter flags) split. Python entry points can also be run directly, e.g.:
 
 ```bash
-python src/biomedclip_pretrain.py [args]
+python src/biomedclip/train/pretrain.py [args]
 python src/LACE/train/pretrain_v2.py [args]
 python src/downstream_cv.py --baseline lace --version v2 --checkpoint <ckpt> --cv_dir data/internal_dataset/cv [args]
 python src/gloria/run.py [config_path]
 ```
 
-**There is no test suite.** Validation is done via W&B logging during training and manual inspection scripts (`src/check_dataset.py`, `src/data/visualize_samples.py`).
+**There is no test suite.** Validation is done via W&B logging during training and manual inspection scripts (`src/data/check_dataset.py`, `src/data/visualize_samples.py`).
 
 ## Data Pipeline
 
@@ -65,12 +65,12 @@ Four-stage pipeline before training:
 
 1. **Image preprocessing** — mask-guided cropping: `src/preprocess_images.py`
 2. **Report translation** — German → English: `src/data/translate_reports.py` (preceded by `src/data/preprocess_reports.py`)
-3. **Phrase extraction** — LLM (Qwen2.5-7B): `src/llm_extractor.py` (or `src/llm_extractor_seperated.py` for befund/beurteilung split separately)
+3. **Phrase extraction** — LLM (Qwen2.5-7B): `src/qwen_llm_extractor/extract/joint.py` (or `src/qwen_llm_extractor/extract/separated.py` for befund/beurteilung split separately)
 4. **Dataset assembly** — `src/data/create_dataset.py`
 
-Downstream of that: `src/data/create_split.py` builds the stratified train/val/test manifest, and `src/data/create_cv_splits.py` derives a patient-grouped 10-fold CV pool from it (kept in `data/internal_dataset/cv/`) for `downstream_cv.py`-style fold evaluation. `src/build_btxrd_downstream.py` converts the external **BTXRD** dataset into the same sample-dict manifest format, used as a frozen external test set (binary benign/malignant only).
+Downstream of that: `src/data/create_split.py` builds the stratified train/val/test manifest, and `src/data/create_cv_splits.py` derives a patient-grouped 10-fold CV pool from it (kept in `data/internal_dataset/cv/`) for `downstream_cv.py`-style fold evaluation. `src/data/build_btxrd_downstream.py` converts the external **BTXRD** dataset into the same sample-dict manifest format, used as a frozen external test set (binary benign/malignant only).
 
-Data-pipeline scripts (assembly, splitting, preprocessing, visualization) live under `src/data/`; baseline entry points and packages remain directly under `src/`.
+Data-pipeline scripts (assembly, splitting, preprocessing, visualization) live under `src/data/`; baseline entry points live under each baseline's own package (`src/<baseline>/train/`), with `downstream_cv.py` as the one exception kept at `src/` root since it orchestrates across baselines.
 
 Default data paths (hardcoded in [src/biomedclip/utils/misc.py](src/biomedclip/utils/misc.py)):
 
@@ -117,20 +117,20 @@ Continued pretraining with DINO + iBOT joint objective ([src/chexfound/train/ssl
 
 ### Additional baselines
 
-- **ImageNet** ([src/imagenet_img/](src/imagenet_img/)): frozen ImageNet-1k ViT-B/16, linear probe only (`src/imagenet_img_downstream.py`).
-- **BiomedCLIP + GLoRIA** ([src/biomedclip_gloria/](src/biomedclip_gloria/)): BiomedCLIP contrastive pretraining with an added GLoRIA-style local (word/region) loss (`src/biomedclip_gloria_pretrain.py`); downstream classification reuses `biomedclip_downstream.py`/`biomedclip_downstream_eval.py` pointed at the resulting checkpoint.
+- **ImageNet** ([src/imagenet_img/](src/imagenet_img/)): frozen ImageNet-1k ViT-B/16, linear probe only (`src/imagenet_img/train/downstream.py`).
+- **BiomedCLIP + GLoRIA** ([src/biomedclip_gloria/](src/biomedclip_gloria/)): BiomedCLIP contrastive pretraining with an added GLoRIA-style local (word/region) loss (`src/biomedclip_gloria/train/pretrain.py`); downstream classification reuses `biomedclip/train/downstream.py`/`downstream_eval.py` pointed at the resulting checkpoint.
 
 ### Downstream classifiers & eval scripts
 
-There is no single unified downstream entry point; each approach has its own `<name>_downstream.py` (trains the head, freezes the backbone, pre-computes image embeddings once and reuses them across epochs) and matching `<name>_downstream_eval.py` (loads a saved head checkpoint — including stored config/args, normalization stats, and any LoRA deltas — and re-scores it against a split or the BTXRD manifest, no training). Shared eval helpers live in [src/biomedclip/utils/downstream_eval.py](src/biomedclip/utils/downstream_eval.py).
+There is no single unified downstream entry point; each approach has its own `<baseline>/train/downstream.py` (trains the head, freezes the backbone, pre-computes image embeddings once and reuses them across epochs) and matching `<baseline>/train/downstream_eval.py` (loads a saved head checkpoint — including stored config/args, normalization stats, and any LoRA deltas — and re-scores it against a split or the BTXRD manifest, no training). Shared eval helpers live in [src/biomedclip/utils/downstream_eval.py](src/biomedclip/utils/downstream_eval.py).
 
 ### Qwen LLM Extractor
 
-[src/qwen_llm_extractor/](src/qwen_llm_extractor/) uses Qwen2.5-7B-Instruct (4-bit quantized via bitsandbytes) to extract anatomical phrases from German radiology reports. Two modes: joint (single prompt, `src/llm_extractor.py`) and separated (befund + beurteilung separately, `src/llm_extractor_seperated.py`). Prompts in [src/qwen_llm_extractor/prompts/](src/qwen_llm_extractor/prompts/).
+[src/qwen_llm_extractor/](src/qwen_llm_extractor/) uses Qwen2.5-7B-Instruct (4-bit quantized via bitsandbytes) to extract anatomical phrases from German radiology reports. Two modes: joint (single prompt, `src/qwen_llm_extractor/extract/joint.py`) and separated (befund + beurteilung separately, `src/qwen_llm_extractor/extract/separated.py`). Prompts in [src/qwen_llm_extractor/prompts/](src/qwen_llm_extractor/prompts/).
 
 ## Key Hyperparameters
 
-Relevant args for `biomedclip_pretrain.py`:
+Relevant args for `biomedclip/train/pretrain.py`:
 
 | Arg | Default | Notes |
 |-----|---------|-------|

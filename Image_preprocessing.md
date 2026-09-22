@@ -11,7 +11,7 @@ There is **no offline preprocessing step used by the actual training runs** —
 a `preprocessed_images/` directory) is not called by any of the training data
 loaders. All cropping/padding happens on-the-fly, per sample, inside
 `Dataset.__getitem__`. The one exception is BTXRD, where the downstream-manifest
-builder ([`src/build_btxrd_downstream.py`](src/build_btxrd_downstream.py)) reads
+builder ([`src/data/build_btxrd_downstream.py`](src/data/build_btxrd_downstream.py)) reads
 from `data/BTXRD/preprocessed_images/`, so that directory must exist (produced by
 running `preprocess_images.py --dataset btxrd` once) before building the BTXRD
 manifest — see §2.
@@ -179,7 +179,7 @@ stage).
 
 ### 2.2 Binary segmentation mask construction
 
-[`src/build_btxrd_downstream.py`](src/build_btxrd_downstream.py), using
+[`src/data/build_btxrd_downstream.py`](src/data/build_btxrd_downstream.py), using
 `rasterize_shapes` from
 [`src/LACE/data/transforms.py:53-78`](src/LACE/data/transforms.py):
 

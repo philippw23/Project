@@ -7,12 +7,12 @@ Overall flow:
 
 ```
 data/text/reports.json
-  → src/preprocess_reports.py            → data/text/sanitized_reports.json
-  → src/translate_reports.py             → data/text/translated_reports.json
-  → src/llm_extractor.py / _seperated.py → full_reports.json / full_reports_separated.json
-  → src/create_dataset.py                → data/internal_dataset/dataset_full.json
-  → src/create_split.py                  → data/internal_dataset/split.json (split_binary.json)
-  → Dataset classes (__getitem__)        → tokenized tensors fed to the model
+  → src/data/preprocess_reports.py                        → data/text/sanitized_reports.json
+  → src/data/translate_reports.py                         → data/text/translated_reports.json
+  → src/qwen_llm_extractor/extract/joint.py / separated.py → full_reports.json / full_reports_separated.json
+  → src/data/create_dataset.py                             → data/internal_dataset/dataset_full.json
+  → src/data/create_split.py                                → data/internal_dataset/split.json (split_binary.json)
+  → Dataset classes (__getitem__)                          → tokenized tensors fed to the model
 ```
 
 Note: `src/build_dataset_json.py` referenced in CLAUDE.md does not currently exist in the repo;
@@ -63,9 +63,9 @@ Translates `befund`/`beurteilung` fields using a local Qwen instruct LLM (defaul
 
 ## Stage 2 — LLM phrase extraction
 
-Two CLI entry points, both thin wrappers over `src/qwen_llm_extractor/`:
-- `src/llm_extractor.py` → `qwen_llm_extractor.extract.joint`
-- `src/llm_extractor_seperated.py` → `qwen_llm_extractor.extract.separated`
+Two CLI entry points, both inside `src/qwen_llm_extractor/extract/`:
+- `src/qwen_llm_extractor/extract/joint.py` — joint (single-prompt) extraction
+- `src/qwen_llm_extractor/extract/separated.py` — separated (befund / beurteilung) extraction
 
 ### 2a. Joint pipeline — `src/qwen_llm_extractor/extract/joint.py`
 

@@ -34,7 +34,7 @@ Two pools exist in practice, generated from the two split manifests:
 Wrapper: [sbatch/data/run_create_cv_splits.sh](sbatch/data/run_create_cv_splits.sh).
 
 `data/BTXRD/` is a separate, fixed **external** test set (built once by
-[src/build_btxrd_downstream.py](src/build_btxrd_downstream.py)) — it is never
+[src/data/build_btxrd_downstream.py](src/data/build_btxrd_downstream.py)) — it is never
 folded, and is excluded from all pretraining so it stays an unbiased
 generalization check.
 
@@ -49,7 +49,7 @@ pool.
 
 Baselines with CV-mode pretraining: **LACE v2**
 ([src/LACE/train/pretrain_v2.py](src/LACE/train/pretrain_v2.py)), **BiomedCLIP**
-([src/biomedclip_pretrain.py](src/biomedclip_pretrain.py)), and **CheXFound**
+([src/biomedclip/train/pretrain.py](src/biomedclip/train/pretrain.py)), and **CheXFound**
 ([src/chexfound/train/pretrain.py](src/chexfound/train/pretrain.py)). All three
 share the same shape:
 
