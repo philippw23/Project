@@ -2,7 +2,7 @@
 
 Domain-adapts vision-language and vision-only models to a private bone-tumor X-ray dataset, then trains a downstream MLP classifier for malignancy prediction (3-class benign / intermediate / malignant, or binary benign / malignant against the external [BTXRD](data/BTXRD) test set).
 
-Implements **LACE** (Lesion-Aligned Contrastive Embedding) — a novel curriculum-learning pretraining approach developed in this project — alongside baselines built on [BiomedCLIP](https://huggingface.co/microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224), **CheXFound** (DINO+iBOT), **GLoRIA**, a frozen **ImageNet** encoder, an image encoder trained **from scratch**, and **YOLO** repurposed as a classifier.
+Implements **LACE** (Lesion-Aligned Contrastive Embedding) — a novel curriculum-learning pretraining approach developed in this project — alongside baselines built on [BiomedCLIP](https://huggingface.co/microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224) (including a GLoRIA-style local-loss variant, `biomedclip_gloria`), **CheXFound** (DINO+iBOT), **GLoRIA**, and a frozen **ImageNet** encoder.
 
 ---
 
@@ -19,13 +19,16 @@ src/
 │   └── ARCHITECTURE.md       #   Design writeup (v1 objective, model, losses)
 ├── lace_pretrain.py / lace_pretrain_v2.py     # Entry points
 ├── lace_downstream.py                         # Downstream head training
-├── lace_downstream_cv.py                      # 10-fold CV + BTXRD eval orchestrator
 ├── lace_downstream_eval.py                    # Score a saved head, no training
+├── lace_img_text_downstream.py                # Downstream variant that also fuses text embeddings
 │
 ├── biomedclip/                # BiomedCLIP contrastive pretraining package
 │   ├── data/ distributed/ eval/ loss/ models/ train/ utils/
 ├── biomedclip_pretrain.py / biomedclip_downstream.py / biomedclip_downstream_eval.py
 ├── biomedclip_zeroshot.py / biomedclip_img_text_downstream.py
+│
+├── biomedclip_gloria/          # BiomedCLIP pretraining + GLoRIA-style local loss
+├── biomedclip_gloria_pretrain.py   # Entry point (downstream reuses biomedclip_downstream.py)
 │
 ├── chexfound/                 # CheXFound DINO+iBOT continued pretraining
 ├── chexfound_downstream.py / chexfound_downstream_eval.py
@@ -36,12 +39,7 @@ src/
 ├── imagenet_img/               # Frozen ImageNet ViT-B/16 linear probe
 ├── imagenet_img_downstream.py / imagenet_img_downstream_eval.py
 │
-├── scratch_img/                # Image encoder trained from scratch (resnet18 | vit_tiny)
-├── scratch_img_downstream.py / scratch_img_downstream_eval.py
-├── scratch_img_text/           # + from-scratch text encoder, contrastive auxiliary loss
-│
-├── yolo/                       # YOLO-as-classifier baseline
-│   ├── data/ (bbox_from_mask, prepare_yolo_dataset) models/ train/ (train.py, downstream.py) utils/
+├── downstream_cv.py             # 10-fold CV + BTXRD eval orchestrator (shared across baselines)
 │
 ├── qwen_llm_extractor/         # LLM phrase-extraction package (Qwen2.5-7B-Instruct)
 │   ├── data/ eval/ extract/ models/ prompts/ utils/
@@ -53,14 +51,12 @@ src/
 ├── create_dataset.py           # Assemble dataset_full.json
 ├── create_split.py             # Patient-level stratified train/val/test split
 ├── create_cv_splits.py         # Derive patient-grouped 10-fold CV pool from split.json
-├── create_split_clahe.py       # Split variant for CLAHE-enhanced YOLO images
-├── build_dataset_json.py       # Alternate dataset-assembly entry point
 ├── build_btxrd_downstream.py   # Convert BTXRD into the internal sample-dict manifest format
 ├── check_dataset.py            # Reports what images/masks/metadata are missing
 └── visualize_samples.py        # Sample visualisation
 
-sbatch/                         # SLURM job scripts, mirrors src/ (biomedclip/, lace/, chexfound/,
-                                 # gloria/, imagenet_img/, scratch/, yolo/, data/, utils/)
+sbatch/                         # SLURM job scripts, mirrors src/ (biomedclip/, biomedclip_gloria/,
+                                 # lace/, chexfound/, gloria/, imagenet_img/, data/, utils/)
 data/
 ├── internal_dataset/
 │   ├── images/ segmentations/ metadata.xlsx
@@ -142,6 +138,9 @@ sbatch sbatch/chexfound/run_chexfound_pretrain.sh
 
 # GLoRIA pretraining (own environment — see Requirements)
 sbatch sbatch/gloria/run_gloria_pretrain.sh
+
+# BiomedCLIP + GLoRIA-style local loss pretraining variant
+sbatch sbatch/biomedclip_gloria/run_biomedclip_gloria_pretrain.sh
 ```
 
 BiomedCLIP key arguments:
@@ -169,16 +168,14 @@ sbatch sbatch/run_sweep_pretrain.sh
 
 ### 5 — Downstream malignancy classification
 
-Every approach follows the same pattern: `<name>_downstream.py` loads the frozen pretrained (or, for the from-scratch/YOLO baselines, jointly-trained) encoder, appends clinical metadata (age, sex), and trains a small MLP for malignancy prediction; `<name>_downstream_eval.py` loads a saved head checkpoint and re-scores it (against a split and/or the BTXRD manifest) with no training.
+Every approach follows the same pattern: `<name>_downstream.py` loads the frozen pretrained encoder, appends clinical metadata (age, sex), and trains a small MLP for malignancy prediction; `<name>_downstream_eval.py` loads a saved head checkpoint and re-scores it (against a split and/or the BTXRD manifest) with no training.
 
 ```bash
 sbatch sbatch/lace/run_lace_downstream_v2.sh
-sbatch sbatch/biomedclip/run_biomedclip_downstream.sh
+sbatch sbatch/biomedclip/run_biomedclip_downstream.sh     # also used for the biomedclip_gloria checkpoint
 sbatch sbatch/chexfound/run_chexfound_downstream.sh
 sbatch sbatch/gloria/run_gloria_downstream.sh
 sbatch sbatch/imagenet_img/run_imagenet_img.sh
-sbatch sbatch/scratch/run_scratch_img.sh
-sbatch sbatch/scratch/run_scratch_img_text.sh
 ```
 
 Key arguments (vary slightly per approach):
@@ -191,40 +188,18 @@ Key arguments (vary slightly per approach):
 | `--binary` | Benign-vs-malignant only (required to also score against BTXRD) |
 | `--epochs` | Fine-tuning epochs |
 
-**10-fold cross-validation** (fixed hyperparameters, reports mean ± std across folds and the external BTXRD test set):
+**10-fold cross-validation** (fixed hyperparameters, reports mean ± std across folds and the external BTXRD test set): every baseline shares the same orchestrator, [src/downstream_cv.py](src/downstream_cv.py) (`--baseline lace|lace_img_text|biomedclip|biomedclip_img_text|chexfound|gloria|imagenet`), wrapped per approach as `sbatch/<approach>/run_<approach>_downstream_cv*.sh`:
 ```bash
 sbatch sbatch/lace/run_lace_downstream_cv.sh
+sbatch sbatch/biomedclip/run_biomedclip_downstream_cv_frozen.sh
+sbatch sbatch/chexfound/run_chexfound_downstream_cv_frozen.sh
+sbatch sbatch/gloria/run_gloria_downstream_cv_3class_frozen.sh
 ```
 
 **Hyperparameter sweeps**:
 ```bash
 wandb sweep src/LACE/train/sweep_downstream_v2.yaml
 sbatch sbatch/run_sweep_downstream.sh
-```
-
-### 6 — YOLO baseline
-
-Object-detection model repurposed as a classifier, trained directly on the bone-tumor X-rays with CLAHE-enhanced images (detection classes = malignancy classes: benign=0, intermediate=1, malignant=2).
-
-**Step 1 — CLAHE preprocessing** (creates `data/internal_dataset/images_clahe/`):
-```bash
-sbatch sbatch/data/run_preprocess_clahe.sh
-```
-
-**Step 2 — Create `split_clahe.json`** (run after step 1 completes):
-```bash
-python src/create_split_clahe.py
-```
-
-**Step 3 — Prepare YOLO dataset structure** (creates `data/yolo/`):
-```bash
-sbatch sbatch/yolo/run_prepare_yolo_dataset.sh
-```
-
-**Step 4 — Train** (pure detection-as-classification), or **train the backbone + MLP + bbox multi-task head**:
-```bash
-sbatch sbatch/yolo/run_yolo_train.sh
-sbatch sbatch/yolo/run_yolo_downstream.sh
 ```
 
 ---
@@ -244,7 +219,7 @@ sbatch sbatch/yolo/run_yolo_downstream.sh
 There is no single top-level `requirements.txt`; install the key packages manually into your environment:
 
 ```bash
-pip install torch transformers open_clip_torch accelerate bitsandbytes "xformers==0.0.28.post3" ultralytics scikit-learn wandb
+pip install torch transformers open_clip_torch accelerate bitsandbytes "xformers==0.0.28.post3" scikit-learn wandb
 ```
 
 GLoRIA has its own older, self-contained environment (pytorch-lightning 1.1.4, torch 1.7.1):

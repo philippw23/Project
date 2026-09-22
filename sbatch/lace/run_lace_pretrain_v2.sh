@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=96:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2 cos sim_A8.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2 cos sim_A2_sim12.out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
 
@@ -65,7 +65,7 @@ WEIGHT_DECAY=0.002526095370464355
 # Optional per-loss stage control; OVERRIDES $LOSSES when non-empty. Space-separated
 # NAME:STAGES tokens over ita/sim/ortho/dice, stages from {1,2} or 0/none.
 # e.g. LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:2"
-LOSS_STAGES="dice:none ortho:none ita:1,2 sim:none"
+LOSS_STAGES="dice:1,2 ortho:1,2 ita:none sim:1,2"
 LEARN_LOSS_WEIGHTS=true
 LAMBDA_ITA=1.5
 LAMBDA_SIM=2

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Bone-tumor malignancy classification research project using domain-adapted vision-language models. The pipeline adapts BiomedCLIP (ViT-B/16 + PubMedBERT) to a private internal bone-tumor X-ray dataset via contrastive pretraining, then trains a downstream malignancy classifier (3-class: benign/intermediate/malignant, with a `--binary` benign/malignant mode used against the external BTXRD test set).
 
-Baselines implemented: **BiomedCLIP** contrastive pretraining, **CheXFound** (DINO+iBOT), **GLoRIA**, an **ImageNet-pretrained** frozen linear probe, an image encoder trained **from scratch** (with an optional contrastive text auxiliary loss), and a **YOLO** detector repurposed as a classifier — alongside **LACE** (Lesion-Aligned Contrastive Embedding), the novel curriculum-learning approach developed in this project. LACE has two iterations: v1 (all losses active from epoch 1) and v2 (configurable 2-stage curriculum with a mask decoder and prototype/evidential losses); see [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md).
+Baselines implemented: **BiomedCLIP** contrastive pretraining (optionally with a GLoRIA-style local loss added, `biomedclip_gloria`), **CheXFound** (DINO+iBOT), **GLoRIA**, and an **ImageNet-pretrained** frozen linear probe — alongside **LACE** (Lesion-Aligned Contrastive Embedding), the novel curriculum-learning approach developed in this project. LACE has two iterations: v1 (all losses active from epoch 1) and v2 (configurable 2-stage curriculum with a mask decoder and prototype/evidential losses); see [src/LACE/ARCHITECTURE.md](src/LACE/ARCHITECTURE.md).
 
 ## Running Experiments
 
@@ -34,11 +34,11 @@ sbatch sbatch/gloria/run_gloria_pretrain.sh
 sbatch sbatch/gloria/run_gloria_downstream.sh
 sbatch sbatch/gloria/run_gloria_downstream_eval.sh
 
-# Additional baselines (image-only frozen ImageNet probe, from-scratch encoder, YOLO)
+# Additional baseline (image-only frozen ImageNet probe)
 sbatch sbatch/imagenet_img/run_imagenet_img.sh
-sbatch sbatch/scratch/run_scratch_img.sh
-sbatch sbatch/scratch/run_scratch_img_text.sh
-sbatch sbatch/yolo/run_yolo_train.sh
+
+# BiomedCLIP + GLoRIA-style local loss pretraining variant
+sbatch sbatch/biomedclip_gloria/run_biomedclip_gloria_pretrain.sh
 
 # LLM phrase extraction (Qwen2.5-7B)
 sbatch sbatch/data/run_llm_extractor.sh
@@ -66,7 +66,7 @@ Four-stage pipeline before training:
 1. **Image preprocessing** — mask-guided cropping: `src/preprocess_images.py`
 2. **Report translation** — German → English: `src/translate_reports.py`
 3. **Phrase extraction** — LLM (Qwen2.5-7B): `src/llm_extractor.py` (or `src/llm_extractor_seperated.py` for befund/beurteilung split separately)
-4. **Dataset assembly** — `src/build_dataset_json.py`
+4. **Dataset assembly** — `src/create_dataset.py`
 
 Downstream of that: `src/create_split.py` builds the stratified train/val/test manifest, and `src/create_cv_splits.py` derives a patient-grouped 10-fold CV pool from it (kept in `data/internal_dataset/cv/`) for `downstream_cv.py`-style fold evaluation. `src/build_btxrd_downstream.py` converts the external **BTXRD** dataset into the same sample-dict manifest format, used as a frozen external test set (binary benign/malignant only).
 
@@ -114,9 +114,7 @@ Continued pretraining with DINO + iBOT joint objective ([src/chexfound/train/ssl
 ### Additional baselines
 
 - **ImageNet** ([src/imagenet_img/](src/imagenet_img/)): frozen ImageNet-1k ViT-B/16, linear probe only (`src/imagenet_img_downstream.py`).
-- **Scratch** ([src/scratch_img/](src/scratch_img/)): randomly-initialized encoder (`--encoder resnet18|vit_tiny`) trained jointly with the MLP head end-to-end (`src/scratch_img_downstream.py`).
-- **Scratch + text** ([src/scratch_img_text/](src/scratch_img_text/)): same image encoder plus a from-scratch Tiny Transformer text encoder; adds a symmetric InfoNCE auxiliary loss through separate projection heads (image trunk detached from the contrastive gradient), discarded at inference.
-- **YOLO** ([src/yolo/](src/yolo/)): a pretrained YOLO model repurposed as a classifier — detection classes equal malignancy classes (benign=0/intermediate=1/malignant=2) for `train/train.py`, or a frozen/fine-tunable YOLO backbone feeding a joint `BBoxHead` + `MalignancyMLP` in `train/downstream.py`.
+- **BiomedCLIP + GLoRIA** ([src/biomedclip_gloria/](src/biomedclip_gloria/)): BiomedCLIP contrastive pretraining with an added GLoRIA-style local (word/region) loss (`src/biomedclip_gloria_pretrain.py`); downstream classification reuses `biomedclip_downstream.py`/`biomedclip_downstream_eval.py` pointed at the resulting checkpoint.
 
 ### Downstream classifiers & eval scripts
 
@@ -139,11 +137,11 @@ Relevant args for `biomedclip_pretrain.py`:
 | `--epochs` | 50 | |
 | `--lr` | 1e-4 | |
 
-W&B Bayes sweep configs live next to each approach's training code, e.g. `src/LACE/train/sweep_pretrain_v2.yaml`, `src/imagenet_img/train/sweep.yaml`, `src/scratch_img/train/sweep.yaml`, as well as the top-level `sbatch/run_sweep_*.sh` wrappers.
+W&B Bayes sweep configs live next to each approach's training code, e.g. `src/LACE/train/sweep_pretrain_v2.yaml`, `src/imagenet_img/train/sweep.yaml`, as well as the top-level `sbatch/run_sweep_*.sh` wrappers.
 
 ## Dependencies
 
-There is no top-level `requirements.txt` in the repo currently — install the key packages manually into your environment: `torch`, `transformers`, `open_clip_torch`, `accelerate`, `bitsandbytes`, `xformers==0.0.28.post3`, plus `ultralytics` for the YOLO baseline.
+There is no top-level `requirements.txt` in the repo currently — install the key packages manually into your environment: `torch`, `transformers`, `open_clip_torch`, `accelerate`, `bitsandbytes`, `xformers==0.0.28.post3`.
 
 GLoRIA has its own older, self-contained environment (pytorch-lightning 1.1.4, torch 1.7.1):
 

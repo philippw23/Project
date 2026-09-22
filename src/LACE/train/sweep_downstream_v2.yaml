@@ -12,7 +12,7 @@ parameters:
     value: results/lace_v2_pretrain/run_20260831_174119/best_retrieval_checkpoint.pt
 
   downstream_visual_mode:
-    values: [cls_fg, fg, cls]
+    value: cls
 
   image_size:
     value: 224

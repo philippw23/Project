@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_A7_binary_no_curriculum.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_binary_A8.out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
 
@@ -48,22 +48,22 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # Standard is 0.15
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
-STAGE1_EPOCHS=16           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
+STAGE1_EPOCHS=20           # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
 EPOCHS=120                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 20
 PATIENCE=20
 
 # ── Optimisation ──────────────────────────────────────────────────────────────
 # overfit: LR=1e-3 SCHEDULER=constant
-LR=1.672772947691402e-05
+LR=1.4301596013002614e-05
 SCHEDULER=cosine
-WEIGHT_DECAY=0.0010489285940590723
+WEIGHT_DECAY=0.0014302030569857762
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
 #LOSSES="ita ortho dice"
 # Optional per-loss stage control; OVERRIDES $LOSSES when non-empty. Space-separated
 # NAME:STAGES tokens over ita/sim/ortho/dice, stages from {1,2} or 0/none.
 # e.g. LOSS_STAGES="dice:1,2 ortho:1,2 ita:2 sim:2"
-LOSS_STAGES="dice:none ortho:none ita:1,2 sim:1,2"
+LOSS_STAGES="dice:none ortho:none ita:1,2 sim:none"
 LEARN_LOSS_WEIGHTS=true
 LAMBDA_ITA=1.0           # starting point; adjusted by training when LEARN_LOSS_WEIGHTS=true
 LAMBDA_SIM=1.0
@@ -71,13 +71,13 @@ LAMBDA_ORTHO=1.0
 LAMBDA_DICE=1.0
 
 # ── Soft-target / t2i ────────────────────────────────────────────────────────
-TAU_S_BEUR=0.03     # shared soft-assignment temp for beur->image similarity attention L_sim; sweep {0.01, 0.03, 0.05}
-TAU_S_BEF=0.045     # shared soft-assignment temp for bef->image similarity attention L_sim; sweep {0.01, 0.03, 0.05}
-TAU_S_IMG_FULL=0.03 # shared soft-assignment temp for image->image similarity attention L_sim; sweep {0.01, 0.03, 0.05}   
+TAU_S_BEUR=0.03897154086872584     # shared soft-assignment temp for beur->image similarity attention L_sim; sweep {0.01, 0.03, 0.05}
+TAU_S_BEF=0.0437924870038921     # shared soft-assignment temp for bef->image similarity attention L_sim; sweep {0.01, 0.03, 0.05}
+TAU_S_IMG_FULL=0.031084157445333143 # shared soft-assignment temp for image->image similarity attention L_sim; sweep {0.01, 0.03, 0.05}
 LAMBDA_T2I=0.5
-SAME_IMAGE_BOOST=20.0
+SAME_IMAGE_BOOST=10
 REWEIGHT_BY_N_PHRASES=true
-T2I_MODE=image_image  #image_image | "text_text" | "descriptor" | "infonce"
+T2I_MODE=text_text  #image_image | "text_text" | "descriptor" | "infonce"
 
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────
