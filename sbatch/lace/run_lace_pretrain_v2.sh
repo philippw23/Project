@@ -79,7 +79,7 @@ TAU_S_IMG_FULL=0.032
 LAMBDA_T2I=0.25
 SAME_IMAGE_BOOST=15
 REWEIGHT_BY_N_PHRASES=true
-T2I_MODE=image_image  #image_image | "text_text" | "descriptor" | "infonce"
+T2I_MODE=image_image  #image_image | "text_text" | "infonce"
 
 SEED=42
 # ─────────────────────────────────────────────────────────────────────────────

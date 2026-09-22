@@ -37,7 +37,6 @@ def symmetric_soft_semantic_loss(
     same_image_boost: float = 0.0,
     reweight_by_n_phrases: bool = False,
     t2i_mode: str = "image_image",
-    descriptor_features: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Symmetric alignment: I2T soft KL + T2I controlled by t2i_mode.
 
@@ -45,7 +44,6 @@ def symmetric_soft_semantic_loss(
     T2I: each phrase matches an anchor distribution controlled by t2i_mode:
          - "image_image": image-image cosine similarity (soft KL)
          - "text_text":   phrase-phrase cosine similarity (soft KL, same as I2T anchor)
-         - "descriptor":  21-dim binary descriptor cosine similarity (soft KL, MedCLIP eq. 4)
          - "infonce":     hard InfoNCE — phrase vs unique image embeddings [N_total, B]
 
     For soft modes the T2I logit matrix is the transpose of the shared I2T matrix.
@@ -63,9 +61,7 @@ def symmetric_soft_semantic_loss(
         same_image_boost:       float          added to same-image phrase-phrase logits before
                                                softmax in I2T target only (0.0 = off)
         reweight_by_n_phrases:  bool           if True, each image contributes equally
-        t2i_mode:               str            "image_image"|"text_text"|"descriptor"|"infonce"
-        descriptor_features:    [N_total, 21]  precomputed binary descriptor vectors per phrase
-                                               (required when t2i_mode="descriptor")
+        t2i_mode:               str            "image_image"|"text_text"|"infonce"
     Returns:
         (total, l_i2t, l_t2i)  — total = l_i2t + l_t2i
     """
@@ -107,9 +103,6 @@ def symmetric_soft_semantic_loss(
         with torch.no_grad():
             if t2i_mode == "text_text":
                 t_t2i = t_phrase
-            elif t2i_mode == "descriptor" and descriptor_features is not None:
-                d = F.normalize(descriptor_features.float(), dim=-1)
-                t_t2i = F.softmax(d @ d.T, dim=1)              # no temperature, MedCLIP eq. 4
             else:  # image_image
                 t_t2i = F.softmax(img_features @ img_features.T / τ_s_img, dim=1)
         if weights is not None:
@@ -135,7 +128,6 @@ def gloria_local_loss(
     λ_t2i: float = 1.0,
     t2i_mode: str = "infonce",
     img_cls_features: torch.Tensor | None = None,
-    descriptor_features: torch.Tensor | None = None,
     patch_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """GLoRIA-style local phrase-patch alignment (GLoRIA eq. 7 + eq. 8).
@@ -152,7 +144,6 @@ def gloria_local_loss(
          - "infonce":     hard InfoNCE, diagonal positive (default)
          - "text_text":   soft KL, per-image aggregated phrase-phrase targets
          - "image_image": soft KL, image-image cosine similarity targets; requires img_cls_features
-         - "descriptor":  soft KL, per-image aggregated descriptor similarity targets
 
     Args:
         P_proj:              [B_sim, M, D]   L2-normalised projected patch embeddings
@@ -166,11 +157,9 @@ def gloria_local_loss(
         same_image_boost:    float           logit boost for same-image pairs in I2T soft target
         reweight_by_n_phrases: bool          weight each phrase by 1/n_i so images contribute equally
         λ_t2i:               float           weight for T2I loss
-        t2i_mode:            str             one of "infonce", "text_text", "image_image", "descriptor"
+        t2i_mode:            str             one of "infonce", "text_text", "image_image"
         img_cls_features:    [B_sim, D]      global CLS embeddings of sim_valid images
                                              (required when t2i_mode="image_image")
-        descriptor_features: [B_sim, 21]     descriptor vectors per image
-                                             (required when t2i_mode="descriptor")
     Returns:
         (total, l_i2t, l_t2i)
     """
@@ -260,18 +249,12 @@ def gloria_local_loss(
                 t_t2i = F.softmax(
                     img_cls_features[phrase_to_image] @ img_cls_features.T / τ_s_img, dim=-1
                 )                                                             # [N_total, B_sim]
-            else:  # descriptor (or image_image fallback without features)
-                if descriptor_features is not None:
-                    d = F.normalize(descriptor_features.float(), dim=-1)     # [B_sim, 21]
-                    t_t2i = F.softmax(
-                        (d[phrase_to_image] @ d.T), dim=-1                   # [N_total, B_sim]
-                    )
-                else:
-                    # Fallback: uniform (should not happen with correct args)
-                    t_t2i = torch.full(
-                        (valid_phrases.shape[0], B_sim), 1.0 / B_sim,
-                        device=valid_phrases.device, dtype=valid_phrases.dtype,
-                    )
+            else:
+                # Fallback: uniform (should not happen with correct args)
+                t_t2i = torch.full(
+                    (valid_phrases.shape[0], B_sim), 1.0 / B_sim,
+                    device=valid_phrases.device, dtype=valid_phrases.dtype,
+                )
         if weights is not None:
             l_t2i = (weights * F.kl_div(
                 F.log_softmax(s_t2i, dim=-1), t_t2i, reduction='none'

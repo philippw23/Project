@@ -33,8 +33,6 @@ The soft target is anchored on **text-text similarity**, not image-image similar
 | `text_text` | same soft target as I2T ($q^\text{phrase}$) |
 | `infonce` | hard one-hot InfoNCE, phrase → its source image (cross-entropy instead of KL) |
 
-A fourth mode, `descriptor` (cosine similarity of 21-dim binary lesion-descriptor vectors, MedCLIP eq. 4 style), exists in the code but was not empirically evaluated — omitted here.
-
 $$\mathcal{L}_\text{ITA} = \mathcal{L}_\text{ITA}^\text{i2t} + \lambda_\text{t2i}\,\mathcal{L}_\text{ITA}^\text{t2i}$$
 
 **Modifiers:**

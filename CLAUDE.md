@@ -57,7 +57,7 @@ python src/downstream_cv.py --baseline lace --version v2 --checkpoint <ckpt> --c
 python src/gloria/run.py [config_path]
 ```
 
-**There is no test suite.** Validation is done via W&B logging during training and manual inspection scripts (`src/check_dataset.py`, `src/data/visualize_samples.py`, `src/analyze_descriptor_vectors.py`).
+**There is no test suite.** Validation is done via W&B logging during training and manual inspection scripts (`src/check_dataset.py`, `src/data/visualize_samples.py`).
 
 ## Data Pipeline
 

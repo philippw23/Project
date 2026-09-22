@@ -257,7 +257,6 @@ class InternalTripleDataset(Dataset):
         context_mode: str = "image",
         min_crop_size: int = 0,
         max_beur_text_len: int = 256,
-        descriptor_vectors: dict[str, list[int]] | None = None,
         is_train: bool = False,
     ) -> None:
         self.preprocess              = preprocess
@@ -281,7 +280,6 @@ class InternalTripleDataset(Dataset):
         self.context_mode            = context_mode
         self.min_crop_size           = min_crop_size
         self.max_beur_text_len       = max_beur_text_len
-        self.descriptor_vectors      = descriptor_vectors or {}
 
         if text_mode == "phrase":
             # phrase mode uses befund phrases (L_sim) AND beurteilung phrases (L_ITA).
@@ -480,14 +478,12 @@ class InternalTripleDataset(Dataset):
                 "has_befund":         torch.tensor(bool(bef_phrases), dtype=torch.bool),
             }
 
-        desc = self.descriptor_vectors.get(str(s["image"]), [0] * 21)
         return {
             "global_crop":       full_image,
             "crop_image":        crop_image,
             "patch_labels":      patch_labels,
             "crop_patch_labels": crop_patch_labels,
             "has_mask":          torch.tensor(has_mask, dtype=torch.bool),
-            "descriptor_vec":    torch.tensor(desc, dtype=torch.float32),
             **text_fields,
         }
 

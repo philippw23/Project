@@ -81,7 +81,6 @@ $$q^\text{phrase}_{ij} = \frac{\exp(\phi_i \cdot \phi_j / \tau_{s,\text{beur}})}
 |------|-------------------------------------|
 | `image_image` (default) | $\text{softmax}(z_i \cdot z_j / \tau_{s,\text{img\_full}})$ — image-image similarity |
 | `text_text` | Same soft targets as I2T |
-| `descriptor` | Cosine similarity of 21-dim binary descriptor vectors |
 | `infonce` | Hard one-hot: phrase → its source image (standard InfoNCE) |
 
 $$\mathcal{L}_\text{ITA} = \mathcal{L}_\text{ITA}^\text{i2t} + \lambda_\text{t2i} \cdot \mathcal{L}_\text{ITA}^\text{t2i}$$
@@ -238,7 +237,7 @@ Passing `--cv_dir <folder>` (e.g. `data/internal_dataset/cv_binary`) runs one fu
 | `--sim_attn_tau` | 0.07 | $\mathcal{L}_\text{sim}$ attention softmax temperature |
 | `--batch_size` / `--btxrd_batch_size` | 128 / 128 | |
 | `--text_mode` | `phrase` | `full` \| `phrase` \| `mixed` |
-| `--t2i_mode` | `image_image` | `image_image` \| `text_text` \| `descriptor` \| `infonce` |
+| `--t2i_mode` | `image_image` | `image_image` \| `text_text` \| `infonce` |
 | `--context_fraction` / `--context_mode` / `--min_crop_size` | 0.15 / `image` / 224 | Single-crop geometry (§2.1) |
 | `--stage1_epochs` | 10 | `0` disables the curriculum |
 | `--epochs` | 40 | Total (stage1 + stage2) |

@@ -729,7 +729,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # ── Soft-target / t2i settings ────────────────────────────────────────────
     parser.add_argument("--t2i_mode", default="image_image",
-                        choices=["image_image", "text_text", "descriptor", "infonce"])
+                        choices=["image_image", "text_text", "infonce"])
     parser.add_argument("--tau_s_beur",     type=float, default=0.015)
     parser.add_argument("--tau_s_bef",      type=float, default=0.07)
     parser.add_argument("--tau_s_img_full", type=float, default=0.07)

@@ -186,10 +186,6 @@ failed-parse ("error") report counts.
   no classification), `BEFUND_RANK_*`/`BEURTEILUNG_RANK_*` (assign relevance without
   adding/dropping/rewording phrases).
 
-**`targets.py`**: a separate prompt for a 21-dimensional binary descriptor vector (e.g.
-`sclerotic_margin`, `osteolytic`, `chondroid_matrix`, `pathological_fracture`), with explicit
-tumor-type inference rules. Consumed as `descriptor_vectors` in `LACE/data/datasets.py`.
-
 **`joint_backup.py`**: unused backup/older prompt file, not imported anywhere active.
 
 ---
@@ -312,9 +308,7 @@ non-empty segmentation mask.
     samples from text losses even when the sample wasn't hard-dropped in `"full"` mode.
 - `InternalTripleDataset`: same filtering pattern for `"phrase"`/`"mixed"` text modes, plus a
   `"concat"` mode (joins phrase lists with `", "`, tokenizes as one string;
-  `has_beurteilung`/`has_befund` flags from `bool(...)`). Also carries `descriptor_vectors`
-  (21-dim binary vectors from the `targets.py` prompt pipeline), defaulting to `[0]*21` if
-  missing.
+  `has_beurteilung`/`has_befund` flags from `bool(...)`).
 - `BTXRDOrthoDataset`: image+mask only, no text (external BTXRD dataset, unrelated to German
   reports).
 
