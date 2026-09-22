@@ -100,8 +100,9 @@ export HF_HOME=$home_dir/.cache/huggingface
 export TRANSFORMERS_CACHE=$home_dir/.cache/huggingface/transformers
 export WANDB_DIR=$home_dir/Project/logs
 export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
+export PYTHONPATH=$home_dir/Project/src
 
-python $home_dir/Project/src/lace_pretrain_v2.py \
+python $home_dir/Project/src/LACE/train/pretrain_v2.py \
     --image_encoder     $IMAGE_ENCODER \
     $( [ -z "$CV_DIR" ] && echo "--splits $SPLITS" ) \
     $( [ -n "$CV_DIR" ] && echo "--cv_dir $CV_DIR" ) \

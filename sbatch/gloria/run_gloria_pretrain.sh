@@ -61,7 +61,7 @@ echo "Environment: $MY_CONDA_ENV"
 
 
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria_pretrain.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria/train/pretrain.py \
     --checkpoint        $CHECKPOINT \
     --splits            $SPLITS \
     --out_dir           $home_dir/Project/results \

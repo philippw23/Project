@@ -63,7 +63,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin
 export PYTHONPATH=$home_dir/Project/src
 echo "Environment: $MY_CONDA_ENV"
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria_pretrain.py \
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/gloria/train/pretrain.py \
     --checkpoint        $CHECKPOINT \
     --cv_dir            $CV_DIR \
     --cv_pattern        "$CV_PATTERN" \

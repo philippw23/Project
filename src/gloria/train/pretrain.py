@@ -6,7 +6,7 @@ The BERT text encoder is kept fully frozen; only the image encoder is
 adapted via LoRA or partial unfreezing.
 
 Usage:
-    python src/gloria_pretrain.py \\
+    python src/gloria/train/pretrain.py \\
         --checkpoint src/gloria/pretrained/chexpert_resnet50.ckpt \\
         --splits data/internal_dataset/split.json \\
         --adapter_mode lora --n_layers 2 --lora_r 8
@@ -50,7 +50,7 @@ from biomedclip.data.transforms import crop_around_mask
 
 # ── GLoRIA module loading (avoids the old pytorch-lightning environment) ───────
 
-GLORIA_DIR = Path(__file__).resolve().parent / "gloria"
+GLORIA_DIR = ROOT_DIR / "src" / "gloria"
 if str(GLORIA_DIR) not in sys.path:
     sys.path.insert(0, str(GLORIA_DIR))
 

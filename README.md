@@ -31,8 +31,7 @@ src/
 │   └── train/                #   pretrain.py, downstream.py, downstream_eval.py
 │
 ├── gloria/                    # GLoRIA (separate old env — see Requirements)
-│   └── train/                #   downstream.py, downstream_eval.py
-├── gloria_pretrain.py          # Entry point (kept at root — not a package submodule)
+│   └── train/                #   pretrain.py, downstream.py, downstream_eval.py
 │
 ├── imagenet_img/               # Frozen ImageNet ViT-B/16 linear probe
 │   └── train/                #   downstream.py, downstream_eval.py

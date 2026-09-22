@@ -1,4 +1,4 @@
-program: src/lace_pretrain_v2.py
+program: src/LACE/train/pretrain_v2.py
 project: lace-v2-pretrain
 entity: philipp-wiese
 method: bayes
