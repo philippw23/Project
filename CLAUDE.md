@@ -145,9 +145,9 @@ W&B Bayes sweep configs live next to each approach's training code, e.g. `src/LA
 
 ## Dependencies
 
-There is no top-level `requirements.txt` in the repo currently — install the key packages manually into your environment: `torch`, `transformers`, `open_clip_torch`, `accelerate`, `bitsandbytes`, `xformers==0.0.28.post3`.
+[`requirements.txt`](requirements.txt) (a `pip freeze` of the `master` conda env) covers **every** baseline, including GLoRIA: `pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121` (the extra index is required — `torch`/`torchaudio`/`torchvision` are pinned to `+cu121` builds not on plain PyPI).
 
-GLoRIA has its own older, self-contained environment (pytorch-lightning 1.1.4, torch 1.7.1):
+GLoRIA's `train/pretrain.py`/`train/downstream.py`/`train/downstream_eval.py` (what every `sbatch/gloria/*.sh` job runs) stub out `pytorch_lightning`/`skimage`/`nltk`/`cv2` at import time specifically to avoid needing GLoRIA's original environment, so `master` is sufficient for those. The separate, older self-contained environment below (pytorch-lightning 1.1.4, torch 1.7.1) is only needed to run the original vendored `src/gloria/run.py` entry point directly, unstubbed:
 
 ```bash
 conda env create -f src/gloria/environment.yml
