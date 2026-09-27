@@ -229,7 +229,7 @@ sbatch sbatch/run_sweep_downstream.sh
 
 ## Requirements
 
-[`requirements.txt`](requirements.txt) is a `pip freeze` of the `master` conda env used by every baseline except GLoRIA — install it with:
+[`requirements.txt`](requirements.txt) is a `pip freeze` of the `master` conda env used by **every** baseline, including GLoRIA — install it with:
 
 ```bash
 pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
@@ -237,7 +237,7 @@ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/w
 
 The `--extra-index-url` is required: `torch`/`torchaudio`/`torchvision` are pinned to `+cu121` local-version builds that plain PyPI doesn't serve.
 
-GLoRIA has its own older, self-contained environment (pytorch-lightning 1.1.4, torch 1.7.1) and is **not** covered by `requirements.txt`:
+GLoRIA's `train/pretrain.py` / `train/downstream.py` / `train/downstream_eval.py` (the scripts every `sbatch/gloria/*.sh` job actually runs) stub out `pytorch_lightning`/`skimage`/`nltk`/`cv2` at import time specifically to avoid needing GLoRIA's original environment, so `master`/`requirements.txt` is sufficient for those. The separate, older self-contained environment below (pytorch-lightning 1.1.4, torch 1.7.1) is only needed if you run the original vendored `src/gloria/run.py` entry point directly, unstubbed:
 ```bash
 conda env create -f src/gloria/environment.yml
 pip install -e src/gloria/
