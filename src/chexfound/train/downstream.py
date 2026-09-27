@@ -40,7 +40,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.utils.misc import ROOT_DIR, DEFAULT_OUT_DIR, DEFAULT_SPLITS
+from biomedclip.utils.misc import ROOT_DIR, DEFAULT_OUT_DIR, DEFAULT_SPLITS, resolve_sample_paths
 from biomedclip.data.datasets import (
     DownstreamDataset, EmbeddingDataset, LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
     LABEL_TO_IDX_BINARY, IDX_TO_LABEL_BINARY, NUM_CLASSES_BINARY,
@@ -289,9 +289,9 @@ def main(args: argparse.Namespace) -> dict:
     with open(args.splits, encoding="utf-8") as fh:
         raw = json.load(fh)
     splits = {
-        "train": raw["train"],
-        "val":   raw["val"],
-        "test":  raw["test"],
+        "train": resolve_sample_paths(raw["train"]),
+        "val":   resolve_sample_paths(raw["val"]),
+        "test":  resolve_sample_paths(raw["test"]),
     }
 
     all_samples    = splits["train"] + splits["val"] + splits["test"]

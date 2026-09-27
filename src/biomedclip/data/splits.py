@@ -13,6 +13,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from .datasets import BoneTumorPairDataset
+from biomedclip.utils.misc import resolve_sample_paths, resolve_path
 
 
 def load_age_sex_lookup(excel_path: Path) -> dict[str, tuple[float, float]]:
@@ -125,7 +126,7 @@ def build_stratified_splits(
         if binary and e["label"] == "intermediate":
             skipped["intermediate"] += 1
             continue
-        if not _mask_has_pixels(Path(e.get("mask") or "")):
+        if not _mask_has_pixels(resolve_path(e.get("mask"))):
             skipped["no_mask"] += 1
             continue
         sample = dict(e)
@@ -203,6 +204,13 @@ def build_stratified_splits(
     with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
     print(f"  Split manifest saved -> {manifest_path}\n")
+
+    # Resolve to absolute paths for immediate in-memory use — after the manifest
+    # above is already written, so the on-disk file keeps the original (possibly
+    # repo-root-relative) strings.
+    resolve_sample_paths(train)
+    resolve_sample_paths(val)
+    resolve_sample_paths(test)
 
     return train, val, test
 

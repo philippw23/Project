@@ -18,6 +18,33 @@ DEFAULT_SPLIT_DIR    = ROOT_DIR / "data" / "internal_dataset"
 DEFAULT_SPLITS       = DEFAULT_SPLIT_DIR / "split.json"
 
 
+def resolve_path(value: str | None, root: Path = ROOT_DIR) -> Path:
+    """Return an absolute Path for a manifest path string.
+
+    Manifests may store either legacy absolute paths (pre-existing files) or
+    repo-root-relative paths (written by create_dataset.py / build_btxrd_downstream.py
+    going forward) — an already-absolute value is passed through untouched, so both
+    formats resolve transparently with no migration needed.
+    """
+    p = Path(value or "")
+    return p if not value or p.is_absolute() else root / p
+
+
+def resolve_sample_paths(samples: list[dict], root: Path = ROOT_DIR) -> list[dict]:
+    """Rewrite each sample's "image"/"mask" field to an absolute path in place.
+
+    For consumers that use samples directly (training/eval) — not for code that
+    re-serializes samples back to a manifest file, which must keep the original
+    (possibly relative) strings so the on-disk format stays portable.
+    """
+    for s in samples:
+        if s.get("image"):
+            s["image"] = str(resolve_path(s["image"], root))
+        if s.get("mask"):
+            s["mask"] = str(resolve_path(s["mask"], root))
+    return samples
+
+
 def _count_parameters(module: nn.Module) -> tuple[int, int]:
     total     = sum(p.numel() for p in module.parameters())
     trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)

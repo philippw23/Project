@@ -50,6 +50,7 @@ from biomedclip.utils.misc import (
     DEFAULT_OUT_DIR,
     save_checkpoint,
     print_biomedclip_architecture,
+    resolve_sample_paths,
 )
 from biomedclip.data.transforms import build_train_transform
 from biomedclip.data.splits import build_stratified_splits
@@ -376,8 +377,8 @@ def _load_fold_datasets(
         with open(split_path, encoding="utf-8") as fh:
             split_data = json.load(fh)
         shutil.copy(split_path, this_run_dir / "split.json")
-        train_samples = split_data["train"]
-        val_samples   = split_data["val"]
+        train_samples = resolve_sample_paths(split_data["train"])
+        val_samples   = resolve_sample_paths(split_data["val"])
         print(f"Loaded split from {split_path} ({len(train_samples)} train, {len(val_samples)} val samples)")
     else:
         train_samples, val_samples, _ = build_stratified_splits(args, run_dir=this_run_dir)

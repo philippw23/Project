@@ -29,6 +29,7 @@ from biomedclip.data.datasets import (IDX_TO_LABEL, LABEL_TO_IDX, NUM_CLASSES,
                                        NUM_CLASSES_BINARY)
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.utils.downstream_eval import report_eval
+from biomedclip.utils.misc import resolve_sample_paths
 from LACE.train.downstream import (build_v2_model, extract_v2_representations,
                                     evaluate, _precompute_repr_loader)
 
@@ -115,6 +116,8 @@ def main(cli: argparse.Namespace) -> dict:
 
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
+    for _split in ("train", "val", "test"):
+        resolve_sample_paths(splits.get(_split, []))
 
     # ── Loss (for a comparable reported test loss) ────────────────────────────
     train_labels_all = torch.tensor(
@@ -146,7 +149,7 @@ def main(cli: argparse.Namespace) -> dict:
     if args.btxrd_manifest:
         print(f"Pre-computing BTXRD representations from {args.btxrd_manifest}...")
         with open(args.btxrd_manifest, encoding="utf-8") as fh:
-            btxrd_samples = json.load(fh)
+            btxrd_samples = resolve_sample_paths(json.load(fh))
         btxrd_loader, n_btxrd = _precompute_repr_loader(
             btxrd_samples, age_mean, age_std, preprocess_val,
             args, extractor, device, label_to_idx,

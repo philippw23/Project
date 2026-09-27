@@ -37,7 +37,7 @@ from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset,
 from biomedclip.data.transforms import build_preprocess_val
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.utils.downstream_eval import require_binary_for_btxrd, report_eval, compute_auroc, safe_wandb_log
-from biomedclip.utils.misc import DEFAULT_OUT_DIR
+from biomedclip.utils.misc import DEFAULT_OUT_DIR, resolve_sample_paths
 from LACE.data.transforms import build_train_transform_lace
 from LACE.models.downstream import LACEv2Classifier
 from LACE.models.encoders import SharedViT
@@ -318,6 +318,8 @@ def main(args: argparse.Namespace) -> dict:
     # ── Load splits ───────────────────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
+    for _split in ("train", "val", "test"):
+        resolve_sample_paths(splits[_split])
 
     all_samples    = splits["train"] + splits["val"] + splits["test"]
     age_sex_lookup = {Path(s["image"]).stem: (s["age"], s["sex"]) for s in all_samples}
@@ -360,7 +362,7 @@ def main(args: argparse.Namespace) -> dict:
         if args.btxrd_manifest:
             print(f"Pre-computing BTXRD representations from {args.btxrd_manifest}...")
             with open(args.btxrd_manifest, encoding="utf-8") as fh:
-                btxrd_samples = json.load(fh)
+                btxrd_samples = resolve_sample_paths(json.load(fh))
             btxrd_loader, n_btxrd = _precompute_repr_loader(
                 btxrd_samples, age_mean, age_std, preprocess_val,
                 args, extractor, device, label_to_idx,

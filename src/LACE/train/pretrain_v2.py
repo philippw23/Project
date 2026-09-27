@@ -54,6 +54,7 @@ from biomedclip.utils.misc import (
     DEFAULT_OUT_DIR,
     DEFAULT_SPLITS,
     ROOT_DIR,
+    resolve_sample_paths,
 )
 
 from LACE.data.datasets import BTXRDOrthoDataset, InternalDatasetV2
@@ -843,8 +844,8 @@ def main(args: argparse.Namespace) -> None:
         with open(split_path, encoding="utf-8") as fh:
             split_data = json.load(fh)
         shutil.copy(split_path, this_run_dir / "split.json")
-        pretrain_samples = split_data["train"]
-        val_samples      = split_data["val"]
+        pretrain_samples = resolve_sample_paths(split_data["train"])
+        val_samples      = resolve_sample_paths(split_data["val"])
         print(f"Loaded split from {split_path} "
                 f"({len(pretrain_samples)} train, {len(val_samples)} val samples)")
 

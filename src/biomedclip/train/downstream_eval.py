@@ -24,7 +24,7 @@ import open_clip
 import torch
 from torch.utils.data import DataLoader
 
-from biomedclip.utils.misc import MODEL_TAG
+from biomedclip.utils.misc import MODEL_TAG, resolve_sample_paths
 from biomedclip.data.transforms import build_preprocess_val
 from biomedclip.data.datasets import EmbeddingDataset
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
@@ -117,6 +117,8 @@ def main(cli: argparse.Namespace) -> dict:
     # ── Age normalization + loss ──────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
+    for _split in ("train", "val", "test"):
+        resolve_sample_paths(splits.get(_split, []))
     if "age_mean" in head_ckpt and "age_std" in head_ckpt:
         age_mean, age_std = head_ckpt["age_mean"], head_ckpt["age_std"]
     else:

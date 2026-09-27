@@ -44,7 +44,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.utils.misc import ROOT_DIR, DEFAULT_OUT_DIR
+from biomedclip.utils.misc import ROOT_DIR, DEFAULT_OUT_DIR, resolve_sample_paths
 from biomedclip.data.splits import build_stratified_splits
 from biomedclip.data.transforms import crop_around_mask
 
@@ -551,8 +551,8 @@ def run_single(
         with open(split_path, encoding="utf-8") as fh:
             split_data = json.load(fh)
         shutil.copy(split_path, run_dir / "split.json")
-        train_raw = split_data["train"]
-        val_raw   = split_data["val"]
+        train_raw = resolve_sample_paths(split_data["train"])
+        val_raw   = resolve_sample_paths(split_data["val"])
         print(f"Loaded split from {split_path}: {len(train_raw)} train / {len(val_raw)} val samples")
     else:
         train_raw, val_raw, _ = build_stratified_splits(args, run_dir=run_dir)

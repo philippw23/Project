@@ -25,6 +25,4 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 python $home_dir/Project/src/data/create_cv_splits.py \
     --input   $home_dir/Project/data/internal_dataset/split_binary.json \
     --out_dir $home_dir/Project/data/internal_dataset/cv \
-    --folds 10 \
-    --val_frac 0.1 \
     --seed 42

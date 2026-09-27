@@ -60,7 +60,7 @@ from chexfound.models.lora import inject_lora_chexfound, _iter_real_vit_blocks
 from chexfound.train.ssl_meta_arch import SSLMetaArch
 from chexfound.utils.utils import CosineScheduler, fix_random_seeds
 from biomedclip.data.splits import build_stratified_splits
-from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_SPLITS
+from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_SPLITS, resolve_sample_paths
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -163,7 +163,7 @@ def build_dataset(dataset_path: str, transform, out_dir: Path) -> torch.utils.da
         if Path(splits_path).is_file():
             with open(splits_path, encoding="utf-8") as fh:
                 split_data = json.load(fh)
-            train = split_data["train"]
+            train = resolve_sample_paths(split_data["train"])
             print(f"BoneTumor: loaded {len(train)} train samples from {splits_path}")
         else:
             import types

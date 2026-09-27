@@ -19,4 +19,10 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$home_dir/miniconda3/bin
 export PYTHONPATH=$home_dir/Project/src
 echo Environment activated
 
-$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/preprocess_images.py --dataset both
+# Only BTXRD actually consumes this script's output (build_btxrd_downstream.py
+# reads from preprocessed_images/ and aligns its rasterized masks to the square
+# padding applied here). The internal dataset trains directly off the raw
+# images/segmentations/ and crops around the lesion mask live at training time
+# (crop_around_mask works on arbitrary H×W, no square-padding prerequisite), so
+# its preprocessed_images/ output is unused — skip --dataset internal/both.
+$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python $home_dir/Project/src/preprocess_images.py --dataset btxrd

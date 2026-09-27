@@ -44,7 +44,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.utils.misc import ROOT_DIR, DEFAULT_SPLITS, DEFAULT_OUT_DIR
+from biomedclip.utils.misc import ROOT_DIR, DEFAULT_SPLITS, DEFAULT_OUT_DIR, resolve_sample_paths
 
 # GLoRIA lives in its own older conda environment; register stub modules for
 # dependencies (pytorch_lightning, skimage, nltk, cv2) that are absent in the
@@ -442,9 +442,9 @@ def main(args: argparse.Namespace) -> dict:
     with open(args.splits, encoding="utf-8") as fh:
         raw_splits = json.load(fh)
     splits = {
-        "train": raw_splits["train"],
-        "val":   raw_splits["val"],
-        "test":  raw_splits["test"],
+        "train": resolve_sample_paths(raw_splits["train"]),
+        "val":   resolve_sample_paths(raw_splits["val"]),
+        "test":  resolve_sample_paths(raw_splits["test"]),
     }
 
     all_samples    = splits["train"] + splits["val"] + splits["test"]

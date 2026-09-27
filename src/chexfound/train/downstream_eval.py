@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from biomedclip.data.datasets import EmbeddingDataset
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import extract_embeddings
+from biomedclip.utils.misc import resolve_sample_paths
 from biomedclip.utils.downstream_eval import (
     resolve_label_maps, require_binary_for_btxrd, load_btxrd_samples,
     build_downstream_loader, report_eval,
@@ -80,6 +81,8 @@ def main(cli: argparse.Namespace) -> dict:
 
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
+    for _split in ("train", "val", "test"):
+        resolve_sample_paths(splits.get(_split, []))
     if "age_mean" in head_ckpt and "age_std" in head_ckpt:
         age_mean, age_std = head_ckpt["age_mean"], head_ckpt["age_std"]
     else:

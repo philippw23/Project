@@ -38,6 +38,16 @@ from LACE.data.transforms import rasterize_shapes
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 
+def _manifest_path(p: Path, root: Path = ROOT_DIR) -> str:
+    """Store paths relative to the repo root when possible, so the manifest stays
+    portable across checkouts; fall back to absolute if p lies outside root
+    (e.g. a custom --btxrd_dir pointed elsewhere)."""
+    try:
+        return str(p.relative_to(root))
+    except ValueError:
+        return str(p)
+
+
 def _to_int(val) -> int | None:
     try:
         return int(round(float(val)))
@@ -133,7 +143,7 @@ def build(args: argparse.Namespace) -> None:
         if annot_path.exists():
             out_mask = masks_out / f"{stem}.png"
             if _rasterize_and_save(annot_path, out_mask):
-                mask_field = str(out_mask.resolve())
+                mask_field = _manifest_path(out_mask.resolve())
                 stats["with_mask"] += 1
             else:
                 stats["no_mask"] += 1
@@ -141,7 +151,7 @@ def build(args: argparse.Namespace) -> None:
             stats["no_mask"] += 1
 
         samples.append({
-            "image": str(img_path.resolve()),
+            "image": _manifest_path(img_path.resolve()),
             "mask":  mask_field,
             "label": label,
             "age":   age,

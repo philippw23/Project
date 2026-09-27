@@ -24,6 +24,16 @@ DEFAULT_MASKS_DIR   = ROOT_DIR / "data" / "internal_dataset" / "segmentations"
 DEFAULT_OUTPUT_PATH = ROOT_DIR / "data" / "internal_dataset" / "dataset_full.json"
 
 
+def _manifest_path(p: Path, root: Path = ROOT_DIR) -> str:
+    """Store paths relative to the repo root when possible, so manifests stay
+    portable across checkouts; fall back to absolute if p lies outside root
+    (e.g. a custom --images_dir pointed elsewhere)."""
+    try:
+        return str(p.relative_to(root))
+    except ValueError:
+        return str(p)
+
+
 def _normalise_id(val: str) -> str:
     try:
         return str(int(float(val)))
@@ -149,8 +159,8 @@ def main(args: argparse.Namespace) -> None:
         label = row["malignancy"] or None
 
         entries.append({
-            "image":               str(image_path),
-            "mask":                str(mask_path) if mask_path.exists() else None,
+            "image":               _manifest_path(image_path),
+            "mask":                _manifest_path(mask_path) if mask_path.exists() else None,
             "report":              report,
             "label":               label,
             "age":                 age,

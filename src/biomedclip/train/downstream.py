@@ -38,7 +38,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_SPLITS
+from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_SPLITS, resolve_sample_paths
 from biomedclip.data.transforms import build_train_transform, build_preprocess_val
 from LACE.models.encoders import enable_dynamic_img_size
 from biomedclip.data.datasets import (
@@ -366,9 +366,9 @@ def main(args: argparse.Namespace) -> dict:
     with open(args.splits, encoding="utf-8") as fh:
         raw = json.load(fh)
     splits = {
-        "train": raw["train"],
-        "val":   raw["val"],
-        "test":  raw["test"],
+        "train": resolve_sample_paths(raw["train"]),
+        "val":   resolve_sample_paths(raw["val"]),
+        "test":  resolve_sample_paths(raw["test"]),
     }
 
     all_samples    = splits["train"] + splits["val"] + splits["test"]

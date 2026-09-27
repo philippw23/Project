@@ -37,6 +37,7 @@ from biomedclip.data.datasets import (
     LABEL_TO_IDX, IDX_TO_LABEL, NUM_CLASSES,
     LABEL_TO_IDX_BINARY, IDX_TO_LABEL_BINARY, NUM_CLASSES_BINARY,
 )
+from biomedclip.utils.misc import resolve_sample_paths
 
 
 def resolve_label_maps(binary: bool) -> tuple[dict, dict, int]:
@@ -64,7 +65,8 @@ def require_binary_for_btxrd(binary: bool, btxrd_manifest: str | None) -> None:
 def load_btxrd_samples(btxrd_manifest: str) -> list[dict]:
     """Load a BTXRD downstream manifest (flat JSON list of sample dicts)."""
     with open(btxrd_manifest, encoding="utf-8") as fh:
-        return json.load(fh)
+        samples = json.load(fh)
+    return resolve_sample_paths(samples)
 
 
 def build_downstream_loader(

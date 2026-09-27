@@ -28,8 +28,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-DEFAULT_INPUT  = ROOT_DIR / "data" / "text" / "sanitized_reports.json"
-DEFAULT_OUTPUT = ROOT_DIR / "data" / "text" / "translated_reports.json"
+DEFAULT_INPUT  = ROOT_DIR / "data" / "internal_dataset" / "text" / "sanitized_reports.json"
+DEFAULT_OUTPUT = ROOT_DIR / "data" / "internal_dataset" / "text" / "translated_reports.json"
 DEFAULT_MODEL  = "Qwen/Qwen2.5-7B-Instruct"
 
 # ---------------------------------------------------------------------------

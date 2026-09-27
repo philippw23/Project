@@ -106,7 +106,7 @@ Two scripts turn the raw metadata, reports, images, and masks into a fixed patie
 ```bash
 python src/data/create_dataset.py
 ```
-Matches each `metadata.xlsx` row to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`.
+Matches each `metadata.xlsx` row to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`. Image/mask paths are stored relative to the repo root, so the manifest stays portable across checkouts — see [Data](#data).
 
 **Step 2 — create `split.json`:**
 ```bash
@@ -248,3 +248,5 @@ data/internal_dataset/
 ```
 
 `data/BTXRD/` holds the external test set (images, annotations, `btxrd_downstream_binary.json`), used only for binary benign/malignant evaluation.
+
+> **Portability:** `create_dataset.py` and `build_btxrd_downstream.py` write `image`/`mask` fields relative to the repo root (falling back to absolute if the source images live outside it). Every loader across all baselines resolves these back to absolute paths at load time via `resolve_sample_paths()` in [src/biomedclip/utils/misc.py](src/biomedclip/utils/misc.py); an already-absolute path (as in manifests generated before this convention, or any existing `results/.../split.json` run snapshot) is passed through untouched. So old and new manifests load interchangeably, and copying `data/` alongside the repo to a new machine or collaborator's checkout works without rewriting any paths — no CLI flag needed.

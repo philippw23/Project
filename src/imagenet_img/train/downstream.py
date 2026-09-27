@@ -38,7 +38,7 @@ from biomedclip.data.datasets import (DownstreamDataset, EmbeddingDataset)
 from biomedclip.data.splits import build_stratified_splits
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import MalignancyMLP, extract_embeddings
-from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_OUT_DIR
+from biomedclip.utils.misc import DEFAULT_DATASET_JSON, DEFAULT_OUT_DIR, resolve_sample_paths
 from biomedclip.utils.downstream_eval import (
     resolve_label_maps, require_binary_for_btxrd, load_btxrd_samples,
     build_downstream_loader, report_eval, compute_auroc, safe_wandb_log,
@@ -239,7 +239,11 @@ def main(args: argparse.Namespace) -> dict:
     if args.splits is not None:
         with open(args.splits, encoding="utf-8") as fh:
             raw = json.load(fh)
-        splits = {"train": raw["train"], "val": raw["val"], "test": raw["test"]}
+        splits = {
+            "train": resolve_sample_paths(raw["train"]),
+            "val":   resolve_sample_paths(raw["val"]),
+            "test":  resolve_sample_paths(raw["test"]),
+        }
     else:
         train, val, test = build_stratified_splits(args, run_dir=Path(args.out_dir))
         splits = {"train": train, "val": val, "test": test}

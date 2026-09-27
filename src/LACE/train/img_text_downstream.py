@@ -47,7 +47,7 @@ from biomedclip.data.transforms import build_preprocess_val, crop_around_mask
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
 from biomedclip.models.classifier import LinearHead, MalignancyMLP
 from biomedclip.utils.downstream_eval import report_eval, compute_auroc, safe_wandb_log
-from biomedclip.utils.misc import DEFAULT_OUT_DIR
+from biomedclip.utils.misc import DEFAULT_OUT_DIR, resolve_sample_paths
 from LACE.data.transforms import build_train_transform_lace
 from LACE.models.downstream import LACEv2Classifier
 from LACE.models.encoders import BiomedCLIPTextEncoder
@@ -310,6 +310,8 @@ def main(args: argparse.Namespace) -> dict:
     # ── Data ──────────────────────────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
         splits = json.load(fh)
+    for _split in ("train", "val", "test"):
+        resolve_sample_paths(splits[_split])
 
     all_samples    = splits["train"] + splits["val"] + splits["test"]
     age_sex_lookup = {Path(s["image"]).stem: (float(s["age"]), float(s["sex"])) for s in all_samples}

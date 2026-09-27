@@ -41,7 +41,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_SPLITS
+from biomedclip.utils.misc import ROOT_DIR, MODEL_TAG, DEFAULT_OUT_DIR, DEFAULT_SPLITS, resolve_sample_paths
 from biomedclip.data.datasets import DownstreamDatasetWithText, EmbeddingDataset
 from biomedclip.data.transforms import build_train_transform
 from biomedclip.loss.classification import build_classification_loss, compute_class_weights
@@ -281,7 +281,11 @@ def main(args: argparse.Namespace) -> dict:
     # ── Data ──────────────────────────────────────────────────────────────────
     with open(args.splits, encoding="utf-8") as fh:
         raw = json.load(fh)
-    splits = {"train": raw["train"], "val": raw["val"], "test": raw["test"]}
+    splits = {
+        "train": resolve_sample_paths(raw["train"]),
+        "val":   resolve_sample_paths(raw["val"]),
+        "test":  resolve_sample_paths(raw["test"]),
+    }
 
     all_samples    = splits["train"] + splits["val"] + splits["test"]
     age_sex_lookup = {Path(s["image"]).stem: (float(s["age"]), float(s["sex"])) for s in all_samples}
