@@ -80,8 +80,15 @@ results/                       # Checkpoints, CSVs, W&B artefacts (.gitignore'd)
 # Check for missing images / masks / metadata
 sbatch sbatch/data/run_check_dataset.sh
 
-# Square-pad images and masks to preprocessed_images/
+# Square-pad BTXRD images and masks to preprocessed_images/ — only BTXRD needs this:
+# build_btxrd_downstream.py reads from preprocessed_images/ and aligns its rasterized
+# masks to this padding. The internal dataset trains directly off the raw
+# images/segmentations/ and crops around the lesion mask live at training time
+# (crop_around_mask works on arbitrary H×W, no square-padding prerequisite).
 sbatch sbatch/data/run_preprocess_images.sh
+
+# Sanitize raw reports (drop entries with an empty/placeholder befund)
+sbatch sbatch/data/run_preprocess_reports.sh
 
 # Translate German reports to English
 sbatch sbatch/data/run_translate_reports.sh
@@ -118,7 +125,13 @@ Filters to entries with a report, a label, and a non-empty segmentation mask; no
 ```bash
 sbatch sbatch/data/run_create_cv_splits.sh
 ```
-Divides the existing `train` split into 8 stratified, patient-grouped parts and rotates the given `val`/`test` in as parts 9/10, writing 10 fold files to `data/internal_dataset/cv/` for cross-validated downstream evaluation.
+Divides the existing `train` split into 8 stratified, patient-grouped parts and rotates the given `val`/`test` in as parts 9/10, writing 10 fold files to `data/internal_dataset/cv/` for cross-validated downstream evaluation. The fold count (10 = 8 train parts + given val + given test) is a fixed constant, not a CLI argument; the val/test fraction is likewise whatever `create_split.py` produced upstream, not something this step controls.
+
+**Step 4 — (independent of steps 1-3) build the BTXRD downstream manifest:**
+```bash
+sbatch sbatch/data/run_build_btxrd_downstream.sh
+```
+Rasterizes BTXRD's polygon annotations to PNG masks aligned with the square-padded `preprocessed_images/` from [step 1](#1--data-preprocessing), and writes the flat sample-dict manifest `data/BTXRD/btxrd_downstream_binary.json` used as the frozen external binary (benign/malignant) test set.
 
 > **Note:** `split.json` embeds the phrases copied from `dataset_full.json`. After changing phrase extraction, re-run **both** `create_dataset.py` and the split step for the change to take effect — editing prompts alone does not update existing splits.
 
