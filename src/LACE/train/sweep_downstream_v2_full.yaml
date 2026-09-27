@@ -3,7 +3,7 @@ project: lace-downstream
 entity: philipp-wiese
 method: bayes
 metric:
-  name: val/best_balanced_acc   # statt val/f1_macro, falls du das beste Checkpoint-Modell auswählst
+  name: val/balanced_acc   # statt val/f1_macro, falls du das beste Checkpoint-Modell auswählst
   goal: maximize
 run_cap: 50
 
@@ -18,40 +18,38 @@ parameters:
     value: 224
 
   batch_size:
-    value: 64
+    values: [32, 64]
 
   hidden_dims:
     values:
       - [256]
-      - [128, 64]
-      - [256, 128]
       - [512, 256]
-
-  dropout:
-    distribution: uniform
-    min: 0.1
-    max: 0.275
 
   lr:
     distribution: log_uniform_values
-    min: 3e-6
-    max: 5e-5
+    min: 3e-5
+    max: 5.5e-5
+
+  dropout:
+    distribution: uniform
+    min: 0.18
+    max: 0.30
 
   weight_decay:
     distribution: log_uniform_values
-    min: 0.01
-    max: 0.30
+    min: 0.015
+    max: 0.06
 
   focal_gamma:
     distribution: uniform
-    min: 2.7
-    max: 3.2
+    min: 2.70
+    max: 2.85
 
   loss:
     values: ["focal"]
 
   class_weighting:
-    values: ["none", "sqrt", "inverse"]
+    value: "inverse"
 
   head:
     value: mlp_no_meta
@@ -71,9 +69,9 @@ command:
   - --out_dir
   - results
   - --epochs
-  - "200"
+  - "120"
   - --patience
-  - "20"
+  - "15"
   - --seed
   - "42"
   - --wandb

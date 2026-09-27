@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=08:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_downstream.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_downstream_A0.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -32,28 +32,29 @@ export PYTHONPATH=$home_dir/Project/src
 IMAGE_SIZE=224          # 224 = default | 512 = CheXFound-equivalent resolution
 USE_MASK=true           # apply lesion-mask cropping to input images (else the full image is just resized)
 VERSION=v2              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
-VISUAL_MODE=cls_fg      # cls [B,512] | fg [B,512] | cls_fg [B,1024]  run_20260721_080616
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260827_115704/best_retrieval_checkpoint.pt
+VISUAL_MODE=cls     # cls [B,512] | fg [B,512] | cls_fg [B,1024]  run_20260721_080616
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260927_152001/best_retrieval_checkpoint.pt
 SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json
 BINARY=true            # true = benign vs malignant only (intermediate skipped)
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # # ── Training ──────────────────────────────────────────────────────────────────
-EPOCHS=100
-PATIENCE=10
-BATCH_SIZE=16
-LR=2.1612235726471097e-05
-WEIGHT_DECAY=0.45
-DROPOUT=0.35
-HEAD=mlp_no_meta                # linear | mlp (with age/sex meta) | mlp_no_meta
+EPOCHS=200
+PATIENCE=20
+BATCH_SIZE=64
+LR=4.90020996230697e-05
+WEIGHT_DECAY=0.012226572177342613
+DROPOUT=0.23260805233012644
+HEAD=mlp_no_meta
 META_EMBED_DIM=0
-HIDDEN_DIMS="[256, 128]"            # only used for mlp heads
+HIDDEN_DIMS="[512, 256]"
 
 # # ── Loss ──────────────────────────────────────────────────────────────────────
 LOSS=focal
-CLASS_WEIGHTING=none  # none | inverse | sqrt | effective
-FOCAL_GAMMA=3.1543303978419135
+CLASS_WEIGHTING=sqrt  # none | inverse | sqrt | effective
+FOCAL_GAMMA=2.8780833007633864
 CB_BETA=0.99
 SEED=42
+EARLY_STOPPING_METRIC="val_bal_acc"
 # ─────────────────────────────────────────────────────────────────────────────
 
 python $home_dir/Project/src/LACE/train/downstream.py \
@@ -79,6 +80,7 @@ python $home_dir/Project/src/LACE/train/downstream.py \
     --use_mask               $USE_MASK \
     $( [ "$BINARY" = "true" ] && echo "--binary" ) \
     --seed                   $SEED \
+    --early_stopping_metric  $EARLY_STOPPING_METRIC \
     --wandb \
     --wandb_project lace-downstream \
     --wandb_entity  philipp-wiese \

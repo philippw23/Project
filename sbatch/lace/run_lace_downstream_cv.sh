@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv_A4_binary_rocauc.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lace_downstream_cv_A4_binary_correct_MLP_no_curriculum.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -35,25 +35,25 @@ VISUAL_MODE=cls # cls_fg #fg          # cls | fg | cls_fg
 # CV-mode pretrain run dir: one fold<N>/{split.json,best_retrieval_checkpoint.pt}
 # per fold. Each fold's checkpoint + split are picked up together from there —
 # update this to the CV pretrain run you want to evaluate.  run_20260724_221040
-CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260824_210717
+CV_DIR=$home_dir/Project/results/lace_v2_pretrain/run_20260924_222640
 PATTERN="fold*/split.json"
 CHECKPOINT_FILENAME=best_retrieval_checkpoint.pt #best_retrieval_checkpoint.pt #
 
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 BINARY=true
 
-EPOCHS=100
-PATIENCE=25
-BATCH_SIZE=16
-LR=2.1612235726471097e-05
-WEIGHT_DECAY=0.45
-DROPOUT=0.35
+EPOCHS=200
+PATIENCE=20
+BATCH_SIZE=64
+LR=4.90020996230697e-05
+WEIGHT_DECAY=0.012226572177342613
+DROPOUT=0.23260805233012644
 HEAD=mlp_no_meta
-HIDDEN_DIMS="[256, 128]"
+HIDDEN_DIMS="[512, 256]"
 
 LOSS=focal
-CLASS_WEIGHTING=none
-FOCAL_GAMMA=3.1543303978419135
+CLASS_WEIGHTING=sqrt
+FOCAL_GAMMA=2.8780833007633864
 CB_BETA=0.99
 SEED=42
 EARLY_STOPPING_METRIC="val_bal_acc"

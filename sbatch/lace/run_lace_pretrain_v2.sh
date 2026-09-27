@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=96:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2 cos sim_A2_sim12.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_Full LACE v2 cos sim_A2_no_curr.out"
 # Note: bump --time above when CV_DIR is set below — CV runs N folds back to
 # back in a single job, so it needs roughly N x a normal single-run time budget.
 
@@ -50,7 +50,7 @@ CONTEXT_FRACTION=0.15      # -1.0 = full image | 0.0 = tight bbox crop | >0 = cr
 # Standard is 0.15
 # ── Curriculum ────────────────────────────────────────────────────────────────
 # overfit: STAGE1_EPOCHS=500 EPOCHS=500
-STAGE1_EPOCHS=20          # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
+STAGE1_EPOCHS=0  #20          # stage 1: L_ITA + L_dice; warmup = stage1_epochs // 5 = 3
 EPOCHS=160                 # total (stage1 + stage2); stage 2 warmup = (epochs - stage1_epochs) // 5 = 20
 PATIENCE=20
 
