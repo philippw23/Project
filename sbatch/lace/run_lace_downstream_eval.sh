@@ -30,7 +30,7 @@ export PYTHONPATH=$home_dir/Project/src
 # read from the head checkpoint itself — only the checkpoint and the test split are
 # needed. Optional: --btxrd_manifest to also score BTXRD; --checkpoint to override
 # the backbone path if the pretrain checkpoint has moved. best_20260715_065428_quk9bzds
-HEAD_CHECKPOINT=$home_dir/Project/results/lace_v2_downstream/best_20260721_180534_xji0luc2.pt   # <-- set this
+HEAD_CHECKPOINT=$home_dir/Project/results/lace_v2_downstream/best_20260927_164730_u47v2d7v.pt   # <-- set this
 SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
 # ─────────────────────────────────────────────────────────────────────────────

@@ -229,13 +229,15 @@ sbatch sbatch/run_sweep_downstream.sh
 
 ## Requirements
 
-There is no single top-level `requirements.txt`; install the key packages manually into your environment:
+[`requirements.txt`](requirements.txt) is a `pip freeze` of the `master` conda env used by every baseline except GLoRIA — install it with:
 
 ```bash
-pip install torch transformers open_clip_torch accelerate bitsandbytes "xformers==0.0.28.post3" scikit-learn wandb
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 ```
 
-GLoRIA has its own older, self-contained environment (pytorch-lightning 1.1.4, torch 1.7.1):
+The `--extra-index-url` is required: `torch`/`torchaudio`/`torchvision` are pinned to `+cu121` local-version builds that plain PyPI doesn't serve.
+
+GLoRIA has its own older, self-contained environment (pytorch-lightning 1.1.4, torch 1.7.1) and is **not** covered by `requirements.txt`:
 ```bash
 conda env create -f src/gloria/environment.yml
 pip install -e src/gloria/
