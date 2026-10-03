@@ -113,13 +113,13 @@ Two scripts turn the raw metadata, reports, images, and masks into a fixed patie
 ```bash
 python src/data/create_dataset.py
 ```
-Matches each `metadata.xlsx` row to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`. Image/mask paths are stored relative to the repo root, so the manifest stays portable across checkouts — see [Data](#data).
+Matches each `metadata.xlsx` row to its report in `text/full_reports.json` by `report_accnr` (fallback `patid`), keeping a row only if the image exists on disk. Writes one entry per image (image, mask, befund / beurteilung / phrases, label, age, sex, patid) to `data/internal_dataset/dataset_full.json`. Image/mask paths are stored relative to the repo root, so the manifest stays portable across checkouts — see [Data](#data). **This is the only step that reads phrases**: `--reports_path` must point at the *enriched* reports JSON produced by [step 2](#2--phrase-extraction-optional-for-evidence-phrase-experiments) (with `befund_phrases`/`beurteilung_phrases` fields added), not a plain `text/full_reports.json` predating extraction.
 
 **Step 2 — create `split.json`:**
 ```bash
 sbatch sbatch/data/run_create_split.sh          # add --binary for benign-vs-malignant only
 ```
-Filters to entries with a report, a label, and a non-empty segmentation mask; normalises sex (m/f → 1/0, unknown → 0.5) and imputes unknown age with the training-set mean. Splits at the **patient level** (no train/val/test leakage), **stratified by each patient's majority label**, into train / val / test (default 0.8 / 0.1 / 0.1, `seed=42`). Writes `data/internal_dataset/split.json` (or `split_binary.json`).
+Filters to entries with a report, a label, and a non-empty segmentation mask; normalises sex (m/f → 1/0, unknown → 0.5) and imputes unknown age with the training-set mean. Splits at the **patient level** (no train/val/test leakage), **stratified by each patient's majority label**, into train / val / test (default 0.8 / 0.1 / 0.1, `seed=42`). Writes `data/internal_dataset/split.json` (or `split_binary.json`). Does not read phrases itself — it only reads labels/paths from `dataset_full.json` and carries whatever phrases are already embedded in it along for the ride.
 
 **Step 3 — (optional) create a 10-fold CV pool:**
 ```bash

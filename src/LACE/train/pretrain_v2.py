@@ -863,7 +863,7 @@ def main(args: argparse.Namespace) -> None:
             context_mode=args.context_mode,
             min_crop_size=args.min_crop_size,
         )
-        train_ds = InternalDatasetV2(pretrain_samples, preprocess_train, tokenizer, **ds_kwargs)
+        train_ds = InternalDatasetV2(pretrain_samples, preprocess_train, tokenizer, is_train=True, **ds_kwargs)
         val_ds   = InternalDatasetV2(val_samples,      preprocess_val,   tokenizer, **ds_kwargs)
 
         if args.overfit_n is not None:

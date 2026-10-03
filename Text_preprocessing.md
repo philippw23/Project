@@ -315,9 +315,6 @@ non-empty segmentation mask.
     `all_text = ", ".join(beur_phrases + bef_phrases)` also tokenized at `max_text_len`.
   - `has_befund = torch.tensor(bool(bef_phrases))` — used downstream to mask out image-only
     samples from text losses even when the sample wasn't hard-dropped in `"full"` mode.
-- `InternalTripleDataset`: same filtering pattern for `"phrase"`/`"mixed"` text modes, plus a
-  `"concat"` mode (joins phrase lists with `", "`, tokenizes as one string;
-  `has_beurteilung`/`has_befund` flags from `bool(...)`).
 - `BTXRDOrthoDataset`: image+mask only, no text (external BTXRD dataset, unrelated to German
   reports).
 
@@ -354,6 +351,6 @@ non-empty segmentation mask.
 | `qwen_llm_extractor/data/reports.py` (`load_reports_joint`/`load_reports_separated`) | both sections empty | report silently skipped when loading for extraction |
 | `create_dataset.py:109-111` | corresponding image PNG missing on disk | metadata row dropped (not text-related, but the only hard drop at this stage) |
 | `biomedclip/data/splits.py:459-477` | no `report` text, no `label`, (binary) `label == "intermediate"`, or empty/all-zero mask | sample excluded from train/val/test split — the primary text-driven exclusion gate |
-| `LACE/data/datasets.py` `InternalDatasetV2`/`InternalTripleDataset` (`text_mode="phrase"`) | empty `befund_phrases` or `beurteilung_phrases` | sample dropped at dataset construction (count printed) |
+| `LACE/data/datasets.py` `InternalDatasetV2` (`text_mode="phrase"`) | empty `befund_phrases` or `beurteilung_phrases` | sample dropped at dataset construction (count printed) |
 | `LACE/data/datasets.py` (`text_mode="mixed"`) | empty `befund_phrases` | sample dropped (beurteilung allowed empty) |
 | `LACE/data/datasets.py` (`text_mode="full"`) | — | no filtering; empty individual fields padded with `"[PAD]"` at tokenization time |

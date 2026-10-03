@@ -11,6 +11,7 @@ Entry point: ``main()`` / ``parse_args()`` — run as a script via the package C
 """
 
 import argparse
+import importlib
 import json
 from pathlib import Path
 
@@ -19,11 +20,6 @@ from tqdm import tqdm
 
 from qwen_llm_extractor.eval.analysis import flatten_to_dataframe, print_summary
 from qwen_llm_extractor.models.loader import DEFAULT_MODEL, load_model
-from qwen_llm_extractor.prompts.joint_german import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-from qwen_llm_extractor.prompts.joint_english import (
-    SYSTEM_PROMPT_ENGLISH,
-    USER_PROMPT_TEMPLATE_ENGLISH,
-)
 from qwen_llm_extractor.prompts.joint_two_stage import (
     SYSTEM_PROMPT_EXTRACT_ENGLISH,
     USER_PROMPT_TEMPLATE_EXTRACT_ENGLISH,
@@ -31,6 +27,22 @@ from qwen_llm_extractor.prompts.joint_two_stage import (
     USER_PROMPT_TEMPLATE_CLASSIFY_ENGLISH,
 )
 from qwen_llm_extractor.utils.json_repair import _parse_response
+
+DEFAULT_PROMPT_MODULE_ENGLISH = "joint_english"
+DEFAULT_PROMPT_MODULE_GERMAN = "joint_german"
+
+
+def _load_prompts(prompt_module: str, english: bool) -> tuple[str, str]:
+    """Import SYSTEM_PROMPT(_ENGLISH)/USER_PROMPT_TEMPLATE(_ENGLISH) from a prompts module.
+
+    ``prompt_module`` is a module name under ``qwen_llm_extractor.prompts`` (e.g.
+    ``joint_english_ablation_no_note``), letting one-off prompt variants be selected
+    via ``--prompt_module`` instead of forking a copy of this script.
+    """
+    module = importlib.import_module(f"qwen_llm_extractor.prompts.{prompt_module}")
+    if english:
+        return module.SYSTEM_PROMPT_ENGLISH, module.USER_PROMPT_TEMPLATE_ENGLISH
+    return module.SYSTEM_PROMPT, module.USER_PROMPT_TEMPLATE
 
 
 def _entry_key(e: dict) -> str:
@@ -92,9 +104,9 @@ def query_llm_batch(
     reports: list[str],
     model,
     tokenizer,
-    max_new_tokens: int = 512,
-    system_prompt: str = SYSTEM_PROMPT,
-    user_prompt_template: str = USER_PROMPT_TEMPLATE,
+    max_new_tokens: int,
+    system_prompt: str,
+    user_prompt_template: str,
 ) -> list[tuple[dict, str]]:
     """Run a batch of reports through the LLM and return [(parsed_json, raw_text), ...].
 
@@ -158,9 +170,9 @@ def query_llm(
     report: str,
     model,
     tokenizer,
-    max_new_tokens: int = 512,
-    system_prompt: str = SYSTEM_PROMPT,
-    user_prompt_template: str = USER_PROMPT_TEMPLATE,
+    max_new_tokens: int,
+    system_prompt: str,
+    user_prompt_template: str,
 ) -> tuple[dict, str]:
     """Single-report wrapper around query_llm_batch (kept for backward compat)."""
     return query_llm_batch(
@@ -285,8 +297,7 @@ def main(args: argparse.Namespace) -> None:
         )
         return
 
-    system_prompt        = SYSTEM_PROMPT_ENGLISH        if args.english else SYSTEM_PROMPT
-    user_prompt_template = USER_PROMPT_TEMPLATE_ENGLISH if args.english else USER_PROMPT_TEMPLATE
+    system_prompt, user_prompt_template = _load_prompts(args.prompt_module, args.english)
 
     all_results: list[dict] = []
     all_patids:  list[str]  = []
@@ -362,6 +373,15 @@ def parse_args() -> argparse.Namespace:
              "(use with translated_reports.json).",
     )
     parser.add_argument(
+        "--prompt_module", default=None,
+        help="Module under qwen_llm_extractor.prompts to load the one-shot joint-extraction "
+             f"prompts from (default: {DEFAULT_PROMPT_MODULE_ENGLISH} with --english, else "
+             f"{DEFAULT_PROMPT_MODULE_GERMAN}). Must define SYSTEM_PROMPT_ENGLISH/"
+             "USER_PROMPT_TEMPLATE_ENGLISH (--english) or SYSTEM_PROMPT/USER_PROMPT_TEMPLATE, "
+             "e.g. joint_english_ablation_no_note. Ignored with --two_stage, which always uses "
+             "joint_two_stage.",
+    )
+    parser.add_argument(
         "--model", default=DEFAULT_MODEL,
         help=f"HuggingFace model ID (default: {DEFAULT_MODEL}).",
     )
@@ -397,6 +417,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.output is None:
         args.output = str(Path(args.input).parent / "full_reports.json")
+    if args.prompt_module is None:
+        args.prompt_module = (
+            DEFAULT_PROMPT_MODULE_ENGLISH if args.english else DEFAULT_PROMPT_MODULE_GERMAN
+        )
     return args
 
 

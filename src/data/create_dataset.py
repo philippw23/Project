@@ -5,6 +5,14 @@ in full_reports.json using report_accnr (preferred) or patid (fallback).
 A row is included only if the image file exists on disk.
 Report fields are null when no matching report is found.
 
+This is the only stage that touches LLM-extracted phrases: --reports_path must
+point at the *enriched* reports JSON produced by the phrase extractor
+(src/qwen_llm_extractor/extract/joint.py or separated.py), which adds
+befund_phrases/beurteilung_phrases fields on top of full_reports.json. Those
+phrases are copied as-is into each output entry below; downstream stages
+(create_split.py, create_cv_splits.py) only read labels/paths from the
+resulting dataset JSON and never look at the reports file again.
+
 Usage:
     python src/data/create_dataset.py
 """
@@ -100,6 +108,7 @@ def main(args: argparse.Namespace) -> None:
             "beurteilung":         (entry.get("beurteilung")         or "").strip() or None,
             "befund_en":           (entry.get("befund_en")           or "").strip() or None,
             "beurteilung_en":      (entry.get("beurteilung_en")      or "").strip() or None,
+            # Phrase-extractor output; [] (not None) if reports_path predates extraction.
             "befund_phrases":      entry.get("befund_phrases")       or [],
             "beurteilung_phrases": entry.get("beurteilung_phrases")  or [],
         }

@@ -29,14 +29,19 @@ export PYTHONPATH=$home_dir/Project/src
 
 MODEL=Qwen/Qwen2.5-14B-Instruct #Qwen2.5-14B-Instruct Qwen2.5-32B-Instruct-AWQ
 
+# Prompts module under src/qwen_llm_extractor/prompts/ (one-shot joint extraction only;
+# ignored with TWO_STAGE=true). Default (joint_english/joint_german) if left empty.
+# e.g. joint_english_ablation_no_note, joint_english_260714_1053.
+PROMPT_MODULE=joint_english
+
 TWO_STAGE=false    # true = two-stage (atomic extract → classify+rank); false = one-shot joint
 # Use a distinct output per methodology so results are not mixed/overwritten.
 TIMESTAMP=$(date +%y%m%d_%H%M)
 MODEL_SIZE=$(echo "$MODEL" | grep -oE '[0-9]+B')
 if [ "$TWO_STAGE" = "true" ]; then
-    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_two_stage_${MODEL_SIZE}_${TIMESTAMP}.json
+    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_two_stage_${MODEL_SIZE}_${TIMESTAMP}_${PROMPT_MODULE}.json
 else
-    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_${MODEL_SIZE}_${TIMESTAMP}.json
+    OUTPUT=$home_dir/Project/data/internal_dataset/test/full_reports_${MODEL_SIZE}_${TIMESTAMP}_${PROMPT_MODULE}.json
 fi
 echo "Writing output to $OUTPUT"
 
@@ -44,11 +49,12 @@ echo "Writing output to $OUTPUT"
 python_path=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin/python
 $python_path $home_dir/Project/src/qwen_llm_extractor/extract/joint.py \
     --model $MODEL \
-    --input  $home_dir/Project/data/internal_dataset/text/translated_reports.json \
+    --input  $home_dir/Project/data/internal_dataset/test/translated_reports2.json \
     --output $OUTPUT \
     --english \
     --batch_size 4 \
     --quantize_8bit \
     $( [ "$TWO_STAGE" = "true" ] && echo "--two_stage" ) \
+    $( [ -n "$PROMPT_MODULE" ] && echo "--prompt_module $PROMPT_MODULE" ) \
     #--max 15
 

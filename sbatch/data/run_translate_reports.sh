@@ -27,7 +27,7 @@ export PATH=$home_dir/miniconda3/envs/$MY_CONDA_ENV/bin:$PATH
 
 python $home_dir/Project/src/data/translate_reports.py \
     --input  $home_dir/Project/data/internal_dataset/test/sanitized_reports.json \
-    --output $home_dir/Project/data/internal_dataset/test/translated_reports.json \
+    --output $home_dir/Project/data/internal_dataset/test/translated_reports2.json \
     --model  Qwen/Qwen2.5-7B-Instruct \
     # --max 5
     # --quantize   # uncomment if VRAM is tight

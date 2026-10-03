@@ -14,9 +14,9 @@
 # run (results land under run_<timestamp>/fold0/, fold1/, ...). Leave empty for
 # a normal single-split run using SPLITS below. Mutually exclusive with SPLITS.
 home_dir="/mnt/nfs/homedirs/$USER"
-CV_DIR= #$home_dir/Project/data/internal_dataset/cv_binary   # empty = single-split run using SPLITS below (binary pretraining, no CV)
+CV_DIR=$home_dir/Project/data/internal_dataset/cv_binary   # empty = single-split run using SPLITS below (binary pretraining, no CV)
 CV_PATTERN="split_binary_fold*.json"                # glob for fold files inside CV_DIR (empty = script default "split_binary_fold*.json")
-SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json  # ignored when CV_DIR is set
+SPLITS=$home_dir/Project/data/internal_dataset/test/split_binary.json # data/internal_dataset/split_binary_final.json  # ignored when CV_DIR is set
 
 # ── Image encoder ─────────────────────────────────────────────────────────────
 IMAGE_ENCODER=biomedclip   # biomedclip only (chexfound backbone retired)

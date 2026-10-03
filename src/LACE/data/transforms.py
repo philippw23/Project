@@ -184,7 +184,7 @@ def synchronized_train_transform(
     sharpness_p: float = 0.3,
     blur_kernel: int = 3,
     blur_sigma: tuple[float, float] = (0.1, 1.0),
-    threshold: float = 0.5,
+    threshold: float = 0.10,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Train-time augmentation that keeps image and mask spatially aligned.
 
@@ -192,6 +192,11 @@ def synchronized_train_transform(
     sharpness + Gaussian blur + normalize), but the geometric ops use the same
     sampled parameters for the image and the mask, so the returned patch labels
     stay registered to the augmented image. Photometric ops are image-only.
+
+    ``threshold`` is passed straight through to ``patchify_mask_224`` as
+    ``min_coverage`` — kept at that function's own default (0.10) so train-time
+    patch labels use the same coverage floor as ``mask_to_patch_labels`` (the
+    eval-time path); don't change one without the other.
 
     Returns ``(image_tensor [3, size, size], patch_labels [196])``.
     """

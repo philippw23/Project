@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import random
 from pathlib import Path
 
 from biomedclip.data.splits import build_stratified_splits
-from LACE.data.datasets import InternalDatasetV2, InternalTripleDataset
 
 
 def build_lace_splits(
@@ -20,74 +18,3 @@ def build_lace_splits(
     train, val, test = build_stratified_splits(args, run_dir=run_dir)
     return train, val, test, test
 
-
-def build_pretrain_datasets_lace(
-    pretrain_samples: list[dict],
-    preprocess_train,
-    preprocess_val,
-    tokenizer,
-    seed: int,
-    monitor_val_frac: float = 0.1,
-    max_text_len: int = 128,
-    text_mode: str = "full",
-    max_bef_phrases: int = 16,
-    max_beur_phrases: int = 16,
-    global_context_fraction: float = 0.4,
-    context_fraction: float = 0.15,
-) -> tuple[InternalTripleDataset, InternalTripleDataset]:
-    """90/10 random split of pretrain_samples into train and monitor-val datasets."""
-    rng     = random.Random(seed)
-    indices = list(range(len(pretrain_samples)))
-    rng.shuffle(indices)
-    split      = int(len(indices) * (1.0 - monitor_val_frac))
-    train_samp = [pretrain_samples[i] for i in indices[:split]]
-    val_samp   = [pretrain_samples[i] for i in indices[split:]]
-
-    print(f"Pretrain loop split: {len(train_samp)} train / {len(val_samp)} monitor-val")
-
-    train_ds = InternalTripleDataset(
-        train_samp, preprocess_train, tokenizer, max_text_len,
-        text_mode, max_bef_phrases, max_beur_phrases,
-        global_context_fraction=global_context_fraction,
-        context_fraction=context_fraction,
-    )
-    val_ds = InternalTripleDataset(
-        val_samp, preprocess_val, tokenizer, max_text_len,
-        text_mode, max_bef_phrases, max_beur_phrases,
-        global_context_fraction=global_context_fraction,
-        context_fraction=context_fraction,
-    )
-    return train_ds, val_ds
-
-
-def build_pretrain_datasets_lace_v2(
-    pretrain_samples: list[dict],
-    preprocess_train,
-    preprocess_val,
-    tokenizer,
-    seed: int,
-    monitor_val_frac: float = 0.1,
-    max_text_len: int = 128,
-    text_mode: str = "phrase",
-    max_bef_phrases: int = 16,
-    max_beur_phrases: int = 16,
-) -> tuple[InternalDatasetV2, InternalDatasetV2]:
-    """90/10 random split of pretrain_samples into train and monitor-val datasets (v2)."""
-    rng     = random.Random(seed)
-    indices = list(range(len(pretrain_samples)))
-    rng.shuffle(indices)
-    split      = int(len(indices) * (1.0 - monitor_val_frac))
-    train_samp = [pretrain_samples[i] for i in indices[:split]]
-    val_samp   = [pretrain_samples[i] for i in indices[split:]]
-
-    print(f"Pretrain loop split (v2): {len(train_samp)} train / {len(val_samp)} monitor-val")
-
-    train_ds = InternalDatasetV2(
-        train_samp, preprocess_train, tokenizer, max_text_len,
-        text_mode, max_bef_phrases, max_beur_phrases,
-    )
-    val_ds = InternalDatasetV2(
-        val_samp, preprocess_val, tokenizer, max_text_len,
-        text_mode, max_bef_phrases, max_beur_phrases,
-    )
-    return train_ds, val_ds

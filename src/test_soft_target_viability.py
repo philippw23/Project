@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Soft-target viability test for LACE v1 — first training batch.
+"""Soft-target viability test — first training batch.
 
-Loads one batch through the exact LACE v1 pipeline (SharedViT + BiomedCLIPTextEncoder
+Loads one batch through the LACE pipeline (SharedViT + BiomedCLIPTextEncoder
 with pretrained projections, epoch-0 state) and produces similarity heatmaps for:
 
   1. Full image ↔ full image
@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from LACE.data.datasets import InternalTripleDataset
+from LACE.data.datasets import InternalDatasetV2
 from LACE.data.transforms import build_train_transform_lace
 from LACE.loss.objectives import phrase_soft_targets
 from LACE.models.encoders import BiomedCLIPTextEncoder, SharedViT
@@ -137,8 +137,8 @@ def main(args: argparse.Namespace) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ── LACE v1 models — epoch 0 state ───────────────────────────────────────
-    print("Initializing LACE v1 models (epoch 0, pretrained projections)…")
+    # ── Models — epoch 0 state ───────────────────────────────────────────────
+    print("Initializing LACE models (epoch 0, pretrained projections)…")
     vit      = SharedViT(args.lora_layers, args.lora_r, args.lora_alpha, args.embed_dim)
     text_enc = BiomedCLIPTextEncoder(embed_dim=args.embed_dim)
     vit.load_pretrained_projections()
@@ -161,39 +161,57 @@ def main(args: argparse.Namespace) -> None:
             samples = json.load(fh)
         print(f"Splits not found — using all {len(samples)} samples from dataset")
 
-    train_ds = InternalTripleDataset(
+    # Two InternalDatasetV2 instances over the same samples, differing only in
+    # context_fraction, reproduce the old dual-crop (global + tight) comparison —
+    # v2's own training loop uses a single context_fraction for everything.
+    ds_kwargs = dict(text_mode="phrase", max_bef_phrases=16, max_beur_phrases=16)
+    global_ds = InternalDatasetV2(
         samples, preprocess_train, tokenizer,
-        text_mode="phrase",
-        max_bef_phrases=16,
-        max_beur_phrases=16,
+        context_fraction=args.global_context_fraction, **ds_kwargs,
+    )
+    crop_ds = InternalDatasetV2(
+        samples, preprocess_train, tokenizer,
+        context_fraction=args.context_fraction, **ds_kwargs,
     )
 
+    # Identically-seeded generators give both loaders the same shuffle order
+    # (DataLoader(shuffle=True, generator=g) calls randperm(N, generator)
+    # internally), so global_batch[i] and crop_batch[i] are the same sample.
     g = torch.Generator()
     g.manual_seed(args.seed)
-    loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
+    global_loader = DataLoader(
+        global_ds, batch_size=args.batch_size, shuffle=True,
         num_workers=0, generator=g,
     )
-    batch = next(iter(loader))
-    B = batch["global_crop"].shape[0]
+    global_batch = next(iter(global_loader))
+
+    g_crop = torch.Generator()
+    g_crop.manual_seed(args.seed)
+    crop_loader = DataLoader(
+        crop_ds, batch_size=args.batch_size, shuffle=True,
+        num_workers=0, generator=g_crop,
+    )
+    crop_batch = next(iter(crop_loader))
+
+    B = global_batch["input_image"].shape[0]
     print(f"First batch: {B} samples")
 
     # ── Encode ────────────────────────────────────────────────────────────────
     with torch.no_grad():
-        full_embs = vit.forward_cls(batch["global_crop"].to(device)).cpu()
-        crop_embs = vit.forward_cls(batch["crop_image"].to(device)).cpu()
+        full_embs = vit.forward_cls(global_batch["input_image"].to(device)).cpu()
+        crop_embs = vit.forward_cls(crop_batch["input_image"].to(device)).cpu()
 
-        beur_pmask = batch["beur_phrase_mask"]
-        bef_pmask  = batch["bef_phrase_mask"]
+        beur_pmask = global_batch["beur_phrase_mask"]
+        bef_pmask  = global_batch["bef_phrase_mask"]
 
         beur_embs = text_enc._encode_phrase_batch(
-            batch["beur_phrase_ids"].to(device),
-            batch["beur_phrase_attn"].to(device),
+            global_batch["beur_phrase_ids"].to(device),
+            global_batch["beur_phrase_attn"].to(device),
             beur_pmask.to(device),
         ).cpu()
         bef_embs = text_enc._encode_phrase_batch(
-            batch["bef_phrase_ids"].to(device),
-            batch["bef_phrase_attn"].to(device),
+            global_batch["bef_phrase_ids"].to(device),
+            global_batch["bef_phrase_attn"].to(device),
             bef_pmask.to(device),
         ).cpu()
 
@@ -203,8 +221,8 @@ def main(args: argparse.Namespace) -> None:
     # internally, so the same seed gives the same order.
     g2 = torch.Generator()
     g2.manual_seed(args.seed)
-    perm = torch.randperm(len(train_ds), generator=g2)
-    batch_samples = [train_ds.samples[i.item()] for i in perm[:B]]
+    perm = torch.randperm(len(global_ds), generator=g2)
+    batch_samples = [global_ds.samples[i.item()] for i in perm[:B]]
 
     def _tok_full(texts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         hf_tok = getattr(tokenizer, "tokenizer", tokenizer)
@@ -293,7 +311,7 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="LACE v1 soft-target viability — first training batch"
+        description="LACE soft-target viability — first training batch"
     )
     parser.add_argument("--splits",      default=str(DEFAULT_SPLITS),
                         help="Path to split.json (default: data/internal_dataset/split.json)")
@@ -303,6 +321,10 @@ if __name__ == "__main__":
                         help="Fallback dataset path if splits not found")
     parser.add_argument("--out_dir",     default=str(ROOT_DIR / "results" / "soft_target_viability"))
     parser.add_argument("--batch_size",  type=int,   default=128)
+    parser.add_argument("--global_context_fraction", type=float, default=0.4,
+                        help="context_fraction for the wide 'full image' view (default: 0.4)")
+    parser.add_argument("--context_fraction", type=float, default=0.15,
+                        help="context_fraction for the tight 'crop image' view (default: 0.15)")
     parser.add_argument("--tau_s_img",  type=float, default=0.015,
                         help="Soft-target temperature for image heatmaps (default: 0.015)")
     parser.add_argument("--tau_s_beur", type=float, default=0.015,

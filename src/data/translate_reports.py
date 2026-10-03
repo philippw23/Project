@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import warnings
 from pathlib import Path
 
@@ -58,6 +59,33 @@ Reply ONLY with this JSON (no extra text):
   "befund_en": "<English translation of BEFUND>",
   "beurteilung_en": "<English translation of BEURTEILUNG>"
 }}"""
+
+
+# ---------------------------------------------------------------------------
+# Reply parsing
+# ---------------------------------------------------------------------------
+
+# A valid JSON escape pair is kept as-is; any other lone backslash (e.g. the
+# model writing "\L" for a garbled symbol) is doubled so the reply still parses.
+_JSON_ESCAPE_OR_BACKSLASH = re.compile(r'\\(["\\/bfnrt]|u[0-9a-fA-F]{4})|\\')
+
+
+def parse_json_reply(raw: str) -> dict | None:
+    """Parse the JSON object the model returned, tolerating minor escape errors."""
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None
+    body = raw[start:end]
+    sanitized = _JSON_ESCAPE_OR_BACKSLASH.sub(
+        lambda m: m.group(0) if m.group(1) else "\\\\", body
+    )
+    for candidate in (body, sanitized):
+        try:
+            return json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -135,24 +163,24 @@ def translate_report(
     generated = output_ids[0][inputs["input_ids"].shape[1]:]
     raw = tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-    # Extract JSON from the response
-    start = raw.find("{")
-    end   = raw.rfind("}") + 1
-    if start == -1 or end == 0:
+    result = parse_json_reply(raw)
+    if result is None:
         return {"befund_en": "", "beurteilung_en": "", "_error": raw}
-    try:
-        result = json.loads(raw[start:end])
-        return {
-            "befund_en":      result.get("befund_en", ""),
-            "beurteilung_en": result.get("beurteilung_en", ""),
-        }
-    except json.JSONDecodeError:
-        return {"befund_en": "", "beurteilung_en": "", "_error": raw}
+    return {
+        "befund_en":      result.get("befund_en", ""),
+        "beurteilung_en": result.get("beurteilung_en", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def report_key(report: dict) -> tuple[str, str]:
+    """Identify a report by (patid, accnr) — patid alone collides for patients
+    with multiple reports/accession numbers."""
+    return (str(report["patid"]), str(report.get("accnr", "")))
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Translate German radiology reports to English.")
@@ -174,16 +202,21 @@ def main() -> None:
 
     # Load already-translated entries for resuming
     out_path = Path(args.output)
-    translated: dict[str, dict] = {}
+    translated: dict[tuple[str, str], dict] = {}
     if out_path.exists():
         with open(out_path, encoding="utf-8") as fh:
             existing = json.load(fh)
-        translated = {str(e["patid"]): e for e in existing}
-        print(f"Resuming: {len(translated)} entries already translated.")
+        translated = {report_key(e): e for e in existing}
+        n_failed = sum("_error" in e for e in translated.values())
+        print(f"Resuming: {len(translated) - n_failed} entries already translated, "
+              f"{n_failed} failed earlier (will retry).")
+
+    def is_done(key: tuple[str, str]) -> bool:
+        return key in translated and "_error" not in translated[key]
 
     tokenizer, model = load_model(args.model, args.quantize)
 
-    to_process = [r for r in reports if str(r["patid"]) not in translated]
+    to_process = [r for r in reports if not is_done(report_key(r))]
     if args.max is not None:
         to_process = to_process[: args.max]
 
@@ -191,6 +224,7 @@ def main() -> None:
 
     errors = 0
     for report in tqdm(to_process, desc="Translating"):
+        key = report_key(report)
         patid = str(report["patid"])
         result = translate_report(
             befund=report.get("befund", ""),
@@ -204,7 +238,7 @@ def main() -> None:
             tqdm.write(f"  [WARN] patid={patid} — JSON parse failed: {result['_error'][:80]}")
 
         entry = {**report, **result}
-        translated[patid] = entry
+        translated[key] = entry
 
         # Save after every entry so progress is never lost
         out_path.parent.mkdir(parents=True, exist_ok=True)

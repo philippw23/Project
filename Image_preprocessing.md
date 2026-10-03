@@ -132,26 +132,28 @@ patchification is derived from an unaugmented mask via `mask_to_patch_labels`
 (resize + center-crop with NEAREST interpolation, matching the eval preprocess
 pipeline, then patchify).
 
-### 1.4 Dual crop for LACE (`InternalTripleDataset`)
+### 1.4 Sample construction for LACE (`InternalDatasetV2`)
 
-[`src/LACE/data/datasets.py:336-397`](src/LACE/data/datasets.py). Unlike plain
-BiomedCLIP (single crop per sample), LACE produces **two independently-cropped
-views** of each sample, both derived from the same raw image/mask pair via
-`crop_around_mask_pair` (§1.1):
+[`src/LACE/data/datasets.py:38-243`](src/LACE/data/datasets.py). Unlike the
+retired v1 design (`InternalTripleDataset`, a dual global+tight crop), LACE v2
+uses a **single crop per sample** — one `context_fraction` (default `0.15`)
+feeds `L_ITA`, `L_sim`, and the mask-decoder loss alike; there is no separate
+wide "global" view.
 
-| View | `context_fraction` | Purpose |
-|---|---|---|
-| `global_crop` | 0.4 (`global_context_fraction`) | wide view, used for global image-text alignment (`L_ITA`) |
-| `crop_image`  | 0.15 (`context_fraction`)        | tight lesion-centered view, used for local lesion-phrase alignment (`L_sim`) and the mask-decoder loss |
+The crop itself (`crop_around_mask_pair`, §1.1) is always deterministic — same
+geometry for image and mask, no randomness. What differs between train and
+eval is what happens *after* that crop:
+- **Train** (`is_train=True`, mask present): `synchronized_train_transform`
+  (§1.3) draws one random crop/rotation and applies it to image and mask
+  together, so `patch_labels` stay registered to the augmented image.
+- **Eval, or no mask**: the plain `preprocess`/`preprocess_val` pipeline runs
+  on the image, and `patch_labels` are computed independently from the
+  (unaugmented) mask via `mask_to_patch_labels` — safe here only because
+  there's no independent randomness for the two to fall out of sync over.
 
-If there is no valid mask, both views fall back to the full raw image
+If there is no valid mask, the image falls back to the full raw image
 (`pad_to_square`), and `has_mask=False` signals the training loop to skip
-`L_sim`/the internal `L_ortho` term for that sample. At train time
-(`is_train=True`), each view independently goes through
-`synchronized_train_transform` (§1.3, its own random crop/rotation draw per view);
-at eval time both go through the plain `preprocess` pipeline, with patch labels
-recomputed directly from the (already geometrically-cropped) mask via
-`mask_to_patch_labels`.
+`L_sim`/the internal `L_ortho` term for that sample.
 
 ---
 

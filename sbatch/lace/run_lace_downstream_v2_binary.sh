@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=08:00:00
-#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_downstream_A0.out"
+#SBATCH --output="/mnt/nfs/homedirs/%u/Project/logs/lace/slurm-%j_lacev2_downstream_A4.out"
 
 home_dir="/mnt/nfs/homedirs/$USER"
 export HOME=$home_dir
@@ -33,7 +33,7 @@ IMAGE_SIZE=224          # 224 = default | 512 = CheXFound-equivalent resolution
 USE_MASK=true           # apply lesion-mask cropping to input images (else the full image is just resized)
 VERSION=v2              # v1: CLS token | v2: MaskTokenDecoder (requires v2 pretrain ckpt)
 VISUAL_MODE=cls     # cls [B,512] | fg [B,512] | cls_fg [B,1024]  run_20260721_080616
-CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260927_152001/best_retrieval_checkpoint.pt
+CHECKPOINT=$home_dir/Project/results/lace_v2_pretrain/run_20260930_083100/best_retrieval_checkpoint.pt
 SPLITS=$home_dir/Project/data/internal_dataset/split_binary_final.json
 BINARY=true            # true = benign vs malignant only (intermediate skipped)
 BTXRD_MANIFEST=$home_dir/Project/data/BTXRD/btxrd_downstream_binary.json
